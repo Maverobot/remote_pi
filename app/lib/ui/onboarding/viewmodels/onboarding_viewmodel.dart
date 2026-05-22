@@ -24,8 +24,10 @@ class OnboardingViewModel extends ViewModel<OnboardingState> {
       case OnboardingStep.welcome:
         emit(s.copyWith(step: OnboardingStep.relay));
       case OnboardingStep.relay:
-        // Validate the relay choice before advancing.
-        if (s.relayChoice == RelayChoice.custom) {
+        // Validate the relay choice before advancing. Empty custom URL
+        // is allowed — it falls back to the default community relay.
+        if (s.relayChoice == RelayChoice.custom &&
+            s.customRelayUrl.isNotEmpty) {
           if (!isValidRelayUrl(s.customRelayUrl)) {
             emit(s.copyWith(
               customRelayError: 'URL must start with ws:// or wss://',
@@ -34,7 +36,8 @@ class OnboardingViewModel extends ViewModel<OnboardingState> {
           }
         }
         // Persist relay (null = use default community).
-        final urlToSave = s.relayChoice == RelayChoice.custom
+        final urlToSave = s.relayChoice == RelayChoice.custom &&
+                s.customRelayUrl.isNotEmpty
             ? s.customRelayUrl
             : null;
         // ignore: unawaited_futures

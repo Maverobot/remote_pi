@@ -3,6 +3,10 @@ import 'package:app/ui/app_theme.dart';
 import 'package:app/ui/onboarding/states/onboarding_state.dart';
 import 'package:flutter/material.dart';
 
+/// Empty custom URL is allowed — onboarding treats it as "use default
+/// community relay" (saves null in Preferences, falls back to
+/// [kDefaultRelayUrl] via [resolveRelayUrl]).
+
 /// Onboarding step 2 — relay choice. Two vertical cards (per plan 14
 /// D2): community (recommended, pre-selected) vs custom (URL field
 /// with inline validation).
@@ -24,6 +28,8 @@ class RelayStep extends StatelessWidget {
 
   bool get _canContinue {
     if (state.relayChoice == RelayChoice.community) return true;
+    // Empty custom URL is allowed (treated as default community relay).
+    if (state.customRelayUrl.isEmpty) return true;
     return isValidRelayUrl(state.customRelayUrl);
   }
 
@@ -275,7 +281,7 @@ class _CustomRelayCard extends StatelessWidget {
                   ),
                   decoration: InputDecoration(
                     isDense: true,
-                    hintText: 'wss://my-relay.example.com',
+                    hintText: kDefaultRelayUrl,
                     hintStyle:
                         const TextStyle(fontFamily: kMono, color: kMuted),
                     errorText: error,
