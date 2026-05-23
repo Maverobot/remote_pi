@@ -11,15 +11,16 @@ import 'package:app/data/repositories/i_session_repository.dart'
 import 'package:app/data/transport/channel.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/pairing/owner_identity_bridge.dart';
 import 'package:app/pairing/pair_request_flow.dart' show PeerTransport;
 import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/pairing/states/pairing_state.dart';
 import 'package:app/ui/pairing/viewmodels/pairing_viewmodel.dart';
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:provider/provider.dart';
+import 'package:remote_pi_identity/remote_pi_identity.dart';
 
 // ---------------------------------------------------------------------------
 // Test infrastructure
@@ -122,17 +123,17 @@ class _FakeStorage extends PairingStorage {
 
   @override
   Future<void> savePeer(PeerRecord r) async => _saved.add(r);
+}
 
-  @override
-  Future<DeviceIdentity> loadOrCreateDeviceEd25519Key() async {
-    final kp = await Ed25519().newKeyPair();
-    final pub = await kp.extractPublicKey();
-    final priv = await kp.extractPrivateKeyBytes();
-    return DeviceIdentity(
-      pk: base64Url.encode(pub.bytes),
-      sk: base64Url.encode(priv),
-    );
-  }
+/// Helper: build a fully-booted [OwnerIdentityBridge] backed by an
+/// in-memory plugin store, seeded with a freshly-generated identity.
+/// Mirrors what `dependencies.dart` + the router's _BootState do before
+/// PairingViewModel runs in production.
+Future<OwnerIdentityBridge> _bootedBridge(PairingStorage storage) async {
+  final store = InMemoryOwnerIdentityStore();
+  final bridge = OwnerIdentityBridge(store, storage);
+  await bridge.boot();
+  return bridge;
 }
 
 const _qrUri =
@@ -233,18 +234,30 @@ class _FakeSessionRepo implements ISessionRepository {
 
 void main() {
   group('PairingViewModel', () {
-    test('initial state is PairingScanning', () {
-      final vm = PairingViewModel(_FakeStorage(), (qr, key) async {
-        throw Exception('should not be called');
-      }, _FakeSessionRepo(), _PrefsForTest());
+    test('initial state is PairingScanning', () async {
+      final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
+      final vm = PairingViewModel(
+        storage,
+        (qr, key) async => throw Exception('should not be called'),
+        _FakeSessionRepo(),
+        _PrefsForTest(),
+        bridge,
+      );
       expect(vm.state, isA<PairingScanning>());
       vm.dispose();
     });
 
     test('invalid QR is ignored — stays PairingScanning', () async {
-      final vm = PairingViewModel(_FakeStorage(), (qr, key) async {
-        throw Exception('should not be called');
-      }, _FakeSessionRepo(), _PrefsForTest());
+      final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
+      final vm = PairingViewModel(
+        storage,
+        (qr, key) async => throw Exception('should not be called'),
+        _FakeSessionRepo(),
+        _PrefsForTest(),
+        bridge,
+      );
       await vm.onQrScanned('https://example.com/not-a-qr');
       expect(vm.state, isA<PairingScanning>());
       vm.dispose();
@@ -253,11 +266,18 @@ void main() {
     test('scan → connecting → paired (channel adopted)', () async {
       final storage = _FakeStorage();
       final fakeRepo = _FakeSessionRepo();
+      final bridge = await _bootedBridge(storage);
       final factory = _factoryReplyingWith({
         'type': 'pair_ok',
         'session_name': 'test session',
       });
-      final vm = PairingViewModel(storage, factory, fakeRepo, _PrefsForTest());
+      final vm = PairingViewModel(
+        storage,
+        factory,
+        fakeRepo,
+        _PrefsForTest(),
+        bridge,
+      );
 
       final fut = vm.onQrScanned(_qrUri);
       expect(vm.state, isA<PairingConnecting>());
@@ -277,12 +297,19 @@ void main() {
 
     test('pair_error → PairingError(canRetry: true)', () async {
       final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
       final factory = _factoryReplyingWith({
         'type': 'pair_error',
         'code': 'token_expired',
         'message': 'Token expired',
       });
-      final vm = PairingViewModel(storage, factory, _FakeSessionRepo(), _PrefsForTest());
+      final vm = PairingViewModel(
+        storage,
+        factory,
+        _FakeSessionRepo(),
+        _PrefsForTest(),
+        bridge,
+      );
 
       await vm.onQrScanned(_qrUri);
       await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -297,11 +324,14 @@ void main() {
     });
 
     test('transport failure → PairingError + retry returns to scanning', () async {
+      final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
       final vm = PairingViewModel(
-        _FakeStorage(),
+        storage,
         (qr, key) async => throw Exception('socket exception'),
         _FakeSessionRepo(),
         _PrefsForTest(),
+        bridge,
       );
 
       await vm.onQrScanned(_qrUri);
@@ -322,11 +352,18 @@ void main() {
   group('PairingPage widget', () {
     testWidgets('navigates via PairingPaired after pair_ok', (tester) async {
       final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
       final factory = _factoryReplyingWith({
         'type': 'pair_ok',
         'session_name': 'test session',
       });
-      final vm = PairingViewModel(storage, factory, _FakeSessionRepo(), _PrefsForTest());
+      final vm = PairingViewModel(
+        storage,
+        factory,
+        _FakeSessionRepo(),
+        _PrefsForTest(),
+        bridge,
+      );
 
       await tester.pumpWidget(
         MaterialApp(
@@ -355,7 +392,15 @@ void main() {
         'code': 'token_consumed',
         'message': 'Already used',
       });
-      final vm = PairingViewModel(_FakeStorage(), factory, _FakeSessionRepo(), _PrefsForTest());
+      final storage = _FakeStorage();
+      final bridge = await _bootedBridge(storage);
+      final vm = PairingViewModel(
+        storage,
+        factory,
+        _FakeSessionRepo(),
+        _PrefsForTest(),
+        bridge,
+      );
 
       await tester.pumpWidget(
         MaterialApp(

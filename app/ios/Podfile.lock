@@ -55,11 +55,14 @@ PODS:
   - nanopb/decode (2.30910.0)
   - nanopb/encode (2.30910.0)
   - PromisesObjC (2.4.0)
+  - remote_pi_identity (0.2.0):
+    - Flutter
 
 DEPENDENCIES:
   - Flutter (from `Flutter`)
   - flutter_secure_storage (from `.symlinks/plugins/flutter_secure_storage/ios`)
   - mobile_scanner (from `.symlinks/plugins/mobile_scanner/ios`)
+  - remote_pi_identity (from `.symlinks/plugins/remote_pi_identity/ios`)
 
 SPEC REPOS:
   trunk:
@@ -83,6 +86,8 @@ EXTERNAL SOURCES:
     :path: ".symlinks/plugins/flutter_secure_storage/ios"
   mobile_scanner:
     :path: ".symlinks/plugins/mobile_scanner/ios"
+  remote_pi_identity:
+    :path: ".symlinks/plugins/remote_pi_identity/ios"
 
 SPEC CHECKSUMS:
   Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
@@ -100,7 +105,8 @@ SPEC CHECKSUMS:
   mobile_scanner: 92e8812bf22a8f84131e2a7f9d0f44dad1a4742b
   nanopb: 438bc412db1928dac798aa6fd75726007be04262
   PromisesObjC: f5707f49cb48b9636751c5b2e7d227e43fba9f47
+  remote_pi_identity: 6ea28d440697ab1cca465d701c47f3bca0d17382
 
-PODFILE CHECKSUM: 6337627de716a170b4db13f068c384fc81e1bbe0
+PODFILE CHECKSUM: 3144f5f2de4f8e27cb0ef1d97d475a60d9a0bbea
 
 COCOAPODS: 1.16.2

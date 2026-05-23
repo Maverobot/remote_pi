@@ -1,14 +1,10 @@
-// Tests for Ed25519 device singleton in PairingStorage.
-
-import 'dart:convert';
+// Tests for the PairingStorage surface that survives plan 23 (W2A):
+// PeerRecord (de)serialization, nickname/roomId edges, and the new
+// `wipeAll()` helper that the OwnerIdentityBridge calls on sync-reset.
 
 import 'package:app/pairing/storage.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-
-// ---------------------------------------------------------------------------
-// Fake FlutterSecureStorage backed by a map
-// ---------------------------------------------------------------------------
 
 class _FakeSecureStorage implements FlutterSecureStorage {
   final Map<String, String> _store = {};
@@ -88,49 +84,7 @@ class _FakeSecureStorage implements FlutterSecureStorage {
   dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 void main() {
-  group('PairingStorage — device Ed25519 key', () {
-    late PairingStorage storage;
-    late _FakeSecureStorage fakeStore;
-
-    setUp(() {
-      fakeStore = _FakeSecureStorage();
-      storage = PairingStorage(fakeStore);
-    });
-
-    test('generates key on first call', () async {
-      final identity = await storage.loadOrCreateDeviceEd25519Key();
-      expect(identity.pk, isNotEmpty);
-      expect(identity.sk, isNotEmpty);
-      expect(() => base64Url.decode(_pad(identity.pk)), returnsNormally);
-      expect(() => base64Url.decode(_pad(identity.sk)), returnsNormally);
-    });
-
-    test('returns same key on second call (persisted)', () async {
-      final id1 = await storage.loadOrCreateDeviceEd25519Key();
-      final id2 = await storage.loadOrCreateDeviceEd25519Key();
-      expect(id1.pk, id2.pk);
-      expect(id1.sk, id2.sk);
-    });
-
-    test('different storage instance loads same key', () async {
-      final id1 = await storage.loadOrCreateDeviceEd25519Key();
-      final storage2 = PairingStorage(fakeStore);
-      final id2 = await storage2.loadOrCreateDeviceEd25519Key();
-      expect(id1.pk, id2.pk);
-    });
-
-    test('pk is 32 bytes (Ed25519 pubkey)', () async {
-      final identity = await storage.loadOrCreateDeviceEd25519Key();
-      final pkBytes = base64Url.decode(_pad(identity.pk));
-      expect(pkBytes.length, 32);
-    });
-  });
-
   group('PeerRecord — minimal post-rollback shape', () {
     test('serializes and deserializes the 4 retained fields', () {
       const record = PeerRecord(
@@ -172,7 +126,6 @@ void main() {
         'session_name': 'name',
         'relay_url': 'ws://x',
         'paired_at': '2026-01-01T00:00:00Z',
-        // no `nickname` key
       });
       expect(restored.nickname, isNull);
     });
@@ -188,7 +141,6 @@ void main() {
       final cleared = record.copyWith(nickname: null);
       expect(cleared.nickname, isNull);
 
-      // copyWith without passing nickname keeps the existing value
       final preserved = record.copyWith(sessionName: 'new');
       expect(preserved.nickname, 'old');
       expect(preserved.sessionName, 'new');
@@ -214,9 +166,46 @@ void main() {
       expect(await storage.listPeers(), isEmpty);
     });
   });
-}
 
-String _pad(String s) {
-  final p = (4 - s.length % 4) % 4;
-  return s + '=' * p;
+  group('PairingStorage.wipeAll (plan 23 sync-reset)', () {
+    test('clears every peer + every persisted rooms entry', () async {
+      final fake = _FakeSecureStorage();
+      final storage = PairingStorage(fake);
+      const a = PeerRecord(
+        remoteEpk: 'epk-a',
+        sessionName: 'A',
+        relayUrl: 'ws://x',
+        pairedAt: '2026-01-01T00:00:00Z',
+      );
+      const b = PeerRecord(
+        remoteEpk: 'epk-b',
+        sessionName: 'B',
+        relayUrl: 'ws://x',
+        pairedAt: '2026-01-01T00:00:00Z',
+      );
+      await storage.savePeer(a);
+      await storage.savePeer(b);
+      await storage.saveRooms('epk-a', const [
+        PersistedRoom(roomId: 'main', startedAt: 1700000000000),
+      ]);
+
+      expect(await storage.listPeers(), hasLength(2));
+      expect(await storage.loadRooms('epk-a'), hasLength(1));
+
+      await storage.wipeAll();
+
+      expect(await storage.listPeers(), isEmpty);
+      expect(await storage.loadRooms('epk-a'), isEmpty);
+    });
+
+    test('notifies listeners exactly once', () async {
+      final storage = PairingStorage(_FakeSecureStorage());
+      var notifications = 0;
+      storage.addListener(() => notifications++);
+
+      await storage.wipeAll();
+
+      expect(notifications, 1);
+    });
+  });
 }

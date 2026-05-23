@@ -1,12 +1,9 @@
 import 'dart:convert';
 
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 const _kPeersService = 'dev.remotepi.peers';
-const _kDeviceService = 'dev.remotepi.device';
-const _kDeviceAccount = 'ed25519';
 const _kRoomsService = 'dev.remotepi.rooms';
 
 /// Plan-17 follow-up — persisted snapshot of every room we have ever
@@ -161,17 +158,6 @@ class PeerRecord {
 }
 
 // ---------------------------------------------------------------------------
-// DeviceIdentity — Ed25519 singleton per device
-// ---------------------------------------------------------------------------
-
-class DeviceIdentity {
-  final String pk; // base64url Ed25519 pubkey
-  final String sk; // base64url Ed25519 privkey
-
-  const DeviceIdentity({required this.pk, required this.sk});
-}
-
-// ---------------------------------------------------------------------------
 // PairingStorage
 // ---------------------------------------------------------------------------
 
@@ -222,19 +208,20 @@ class PairingStorage extends ChangeNotifier {
         .toList();
   }
 
-  // ---- Device Ed25519 singleton -------------------------------------------
-
-  /// Load the device-level Ed25519 identity. Generates and persists on first
-  /// call. Used for relay challenge-response auth.
-  Future<DeviceIdentity> loadOrCreateDeviceEd25519Key() async {
-    final existing = await _store.read(
-      key: '$_kDeviceService:$_kDeviceAccount',
-    );
-    if (existing != null) {
-      final j = jsonDecode(existing) as Map<String, dynamic>;
-      return DeviceIdentity(pk: j['pk'] as String, sk: j['sk'] as String);
+  /// Wipe every peer + every persisted room map. Used by the
+  /// Owner-key bridge when iCloud / Backup sync brings a different
+  /// Owner-pk — the previous device's peer list is meaningless for
+  /// the newly-synced identity, so we start clean rather than risk
+  /// connecting against stale `remote_epk`s.
+  Future<void> wipeAll() async {
+    final all = await _store.readAll();
+    final prefixes = ['$_kPeersService:', '$_kRoomsService:'];
+    for (final key in all.keys) {
+      if (prefixes.any(key.startsWith)) {
+        await _store.delete(key: key);
+      }
     }
-    return _generateAndSaveDeviceKey();
+    notifyListeners();
   }
 
   // ---- Rooms (plan 17 follow-up) -----------------------------------------
@@ -265,22 +252,4 @@ class PairingStorage extends ChangeNotifier {
     await _store.delete(key: _roomsKey(remoteEpk));
     notifyListeners();
   }
-
-  Future<DeviceIdentity> _generateAndSaveDeviceKey() async {
-    final kp = await Ed25519().newKeyPair();
-    final pub = await kp.extractPublicKey();
-    final priv = await kp.extractPrivateKeyBytes();
-    final identity = DeviceIdentity(
-      pk: base64Url.encode(pub.bytes),
-      sk: base64Url.encode(priv),
-    );
-    await _saveDeviceEd25519Key(identity);
-    return identity;
-  }
-
-  Future<void> _saveDeviceEd25519Key(DeviceIdentity identity) =>
-      _store.write(
-        key: '$_kDeviceService:$_kDeviceAccount',
-        value: jsonEncode({'pk': identity.pk, 'sk': identity.sk}),
-      );
 }

@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:app/config/utils/injector.dart';
 import 'package:app/data/preferences/preferences.dart';
@@ -10,6 +9,7 @@ import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/data/transport/peer_channel.dart';
 import 'package:app/data/transport/relay_config.dart';
 import 'package:app/data/transport/ws_transport.dart';
+import 'package:app/pairing/owner_identity_bridge.dart';
 import 'package:app/pairing/pair_request_flow.dart';
 import 'package:app/pairing/qr_scanner.dart';
 import 'package:app/pairing/storage.dart';
@@ -21,6 +21,7 @@ import 'package:app/ui/pairing/viewmodels/pairing_viewmodel.dart';
 import 'package:app/ui/settings/viewmodels/settings_viewmodel.dart';
 import 'package:cryptography/cryptography.dart';
 import 'package:provider/provider.dart';
+import 'package:remote_pi_identity/remote_pi_identity.dart';
 
 final _injector = CustomInjector();
 
@@ -36,6 +37,15 @@ Future<void> setupDependencies() async {
   _injector.addInstance<Preferences>(prefs);
 
   _injector.addInstance<SessionHistoryStore>(SessionHistoryStore());
+
+  // Plan 23 — Owner-key sync. The store talks to the native plugin
+  // (iCloud Keychain on iOS, Block Store on Android); the bridge sits
+  // between it and the rest of the app, owning boot + watch-for-reset.
+  final OwnerIdentityStore ownerStore = MethodChannelOwnerIdentityStore();
+  _injector.addInstance<OwnerIdentityStore>(ownerStore);
+  _injector.addInstance<OwnerIdentityBridge>(
+    OwnerIdentityBridge(ownerStore, _injector.get<PairingStorage>()),
+  );
 
   // ConnectionManager — production factory wired here.
   _injector.addService<ConnectionManager>(
@@ -82,6 +92,7 @@ Future<void> setupDependencies() async {
       _productionPairingTransportFactory,
       _injector.get<SessionRepository>(),
       _injector.get<Preferences>(),
+      _injector.get<OwnerIdentityBridge>(),
     ),
   );
   _injector.addViewModel<OnboardingViewModel>(
@@ -95,20 +106,17 @@ Future<void> setupDependencies() async {
 // Production ConnectionFactory — used by ConnectionManager for reconnection.
 // Post-rollback: just open transport + wrap in PlainPeerChannel; Pi recognizes
 // the peer via peers.json (no per-reconnect handshake).
+// Plan 23: Owner-sk (synced via iCloud Keychain / Block Store) is the
+// challenge-response key. OwnerIdentityBridge.boot() is the router's
+// responsibility; by the time this factory runs, the identity is loaded.
 // ---------------------------------------------------------------------------
 
 Future<IChannel> _productionConnectionFactory(
   PeerRecord peer,
   CancelToken cancel,
 ) async {
-  final storage = injector.get<PairingStorage>();
-
-  // Load (or generate) device-level Ed25519 identity.
-  final deviceId = await storage.loadOrCreateDeviceEd25519Key();
-  if (cancel.isCancelled) throw _CancelledError();
-
-  final seed = base64Url.decode(_pad(deviceId.sk));
-  final deviceKey = await Ed25519().newKeyPairFromSeed(seed);
+  final bridge = injector.get<OwnerIdentityBridge>();
+  final ownerKey = await bridge.requireKeyPair();
   if (cancel.isCancelled) throw _CancelledError();
 
   // Defensive timeout (plano app-state-normalization): without this the
@@ -125,7 +133,7 @@ Future<IChannel> _productionConnectionFactory(
   final transport = await WsTransport.connect(
     relayUrl: relayUrl,
     peerPubkey: peer.remoteEpk,
-    ed25519Key: deviceKey,
+    ed25519Key: ownerKey,
   ).timeout(
     wsConnectTimeout,
     onTimeout: () => throw TimeoutException(
@@ -167,11 +175,6 @@ Future<PeerTransport> _productionPairingTransportFactory(
 
 class _CancelledError implements Exception {
   const _CancelledError();
-}
-
-String _pad(String s) {
-  final p = (4 - s.length % 4) % 4;
-  return s + '=' * p;
 }
 
 void disposeDependencies() => _injector.dispose();

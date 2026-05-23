@@ -1,6 +1,7 @@
 import 'package:app/config/dependencies.dart';
 import 'package:app/data/preferences/preferences.dart';
 import 'package:app/data/transport/connection_manager.dart';
+import 'package:app/pairing/owner_identity_bridge.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/ui/chat/chat_page.dart';
 import 'package:app/ui/chat/viewmodels/chat_viewmodel.dart';
@@ -12,6 +13,7 @@ import 'package:app/ui/pairing/pairing_page.dart';
 import 'package:app/ui/pairing/viewmodels/pairing_viewmodel.dart';
 import 'package:app/ui/settings/settings_page.dart';
 import 'package:app/ui/settings/viewmodels/settings_viewmodel.dart';
+import 'package:app/ui/sync_required/sync_required_page.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -22,17 +24,35 @@ class _BootState extends ChangeNotifier {
   bool _ready = false;
   bool _hasPeer = false;
   bool _onboarded = false;
+  bool _syncAvailable = true;
 
   bool get ready => _ready;
   bool get hasPeer => _hasPeer;
   bool get onboarded => _onboarded;
+  bool get syncAvailable => _syncAvailable;
 
   Future<void> load(
     PairingStorage storage,
     ConnectionManager conn,
     Preferences prefs,
+    OwnerIdentityBridge ownerBridge,
   ) async {
     await prefs.load();
+
+    // Plan 23 — block bootstrap until the platform's key-sync surface
+    // (iCloud Keychain / Block Store) is usable AND we have an
+    // Owner-key (loaded or freshly generated). If sync is off, the
+    // router redirects to /sync-required and the user retries from
+    // there once they flip the toggle in Settings.
+    final ownerResult = await ownerBridge.boot();
+    if (ownerResult is SyncUnavailableResult) {
+      _syncAvailable = false;
+      _ready = true;
+      notifyListeners();
+      return;
+    }
+    _syncAvailable = true;
+
     final peers = await storage.listPeers();
     _hasPeer = peers.isNotEmpty;
     // Plan 14: a user who already has a peer is implicitly onboarded —
@@ -62,21 +82,52 @@ class _BootState extends ChangeNotifier {
       conn.boot(preferredEpk: selected);
     }
   }
+
+  /// Plan 23 — invoked by the OwnerIdentityBridge watch listener when
+  /// platform sync delivers a different Owner-pk. We reset to the
+  /// "no-state" view; the next `load()` call (triggered when the user
+  /// returns to /boot) will repopulate from the freshly-wiped storage.
+  void onOwnerKeyReplaced() {
+    _ready = false;
+    _hasPeer = false;
+    _onboarded = false;
+    notifyListeners();
+  }
 }
 
 GoRouter buildRouter(
   PairingStorage storage,
   ConnectionManager conn,
   Preferences prefs,
+  OwnerIdentityBridge ownerBridge,
 ) {
   final boot = _BootState();
-  boot.load(storage, conn, prefs);
+  boot.load(storage, conn, prefs, ownerBridge);
+
+  // Plan 23 — watch for Owner-key drift on the sync surface. When the
+  // platform delivers a different keypair (restored on a new device,
+  // user wiped and re-installed elsewhere), the bridge wipes peers/rooms
+  // and we reset the boot state so the router redirects through /boot.
+  ownerBridge.startWatching(onReset: () async {
+    await conn.disconnect();
+    boot.onOwnerKeyReplaced();
+    await boot.load(storage, conn, prefs, ownerBridge);
+  });
 
   return GoRouter(
     initialLocation: '/boot',
     refreshListenable: boot,
     redirect: (context, state) {
       if (!boot.ready) return '/boot';
+      // Sync-required gate is sticky until the user toggles iCloud /
+      // Backup on and taps "Check again". Don't redirect away from
+      // /sync-required while the bridge still reports unavailable.
+      if (!boot.syncAvailable) {
+        return state.uri.path == '/sync-required' ? null : '/sync-required';
+      }
+      if (state.uri.path == '/sync-required') {
+        return boot.hasPeer ? '/home' : '/onboarding';
+      }
       if (state.uri.path == '/boot') {
         // No peer == no app surface to render. Always route to
         // /onboarding when peers are empty — this covers both the
@@ -95,6 +146,14 @@ GoRouter buildRouter(
       GoRoute(
         path: '/boot',
         builder: (ctx, st) => const _BootSplash(),
+      ),
+
+      // Plan 23 — first-launch gate when iCloud Keychain / Google
+      // Backup is off. Sticky route: redirect keeps the user here
+      // until the bridge reports sync available.
+      GoRoute(
+        path: '/sync-required',
+        builder: (ctx, st) => const SyncRequiredPage(),
       ),
 
       // Home — list of paired sessions, entry point post-boot

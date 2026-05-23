@@ -265,9 +265,21 @@ class ConnectionManager extends Service {
     }
   }
 
-  /// Subscribe (or re-subscribe) the relay to push `peer_online` /
-  /// `peer_offline` updates for [epks]. Idempotent. Stored so the
-  /// subscription is replayed automatically on reconnect.
+  /// Subscribe (or re-subscribe) the relay to push presence AND room
+  /// updates for [epks] (`peer_online` / `peer_offline` and
+  /// `room_announced` / `room_ended` / `rooms` snapshot). Idempotent.
+  /// Stored so the subscription is replayed automatically on
+  /// reconnect via [_replaySubscriptions].
+  ///
+  /// Both subscriptions are sent together — historically this method
+  /// only emitted `subscribe_presence`, which left a hole after the
+  /// first pairing: `adopt()` runs before [_BootState] has had a
+  /// chance to call this with the new peer, so `_subscribedEpks` is
+  /// empty and `_replaySubscriptions` short-circuits. Home then
+  /// subscribed (here) for presence only — never asking the relay to
+  /// push rooms — and the first session tile only appeared after the
+  /// next cold start (when boot() runs the full subscribe + connect
+  /// path). Keeping presence/rooms in lockstep here closes that hole.
   ///
   /// IMPORTANT: every epk on the wire is base64 STANDARD — the relay's
   /// registry is keyed by what comes in `hello.pubkey` (always standard).
@@ -285,10 +297,12 @@ class ConnectionManager extends Service {
       );
       return;
     }
-    debugPrint('[conn] subscribe_presence n=${standard.length}');
+    debugPrint('[conn] subscribe_presence + subscribe_rooms n=${standard.length}');
     link.sendControl(subscribePresenceFrame(standard));
+    link.sendControl(subscribeRoomsFrame(standard));
     if (standard.isNotEmpty) {
       link.sendControl(presenceCheckFrame(standard));
+      link.sendControl(roomsCheckFrame(standard));
     }
   }
 

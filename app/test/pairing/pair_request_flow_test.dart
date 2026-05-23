@@ -5,7 +5,6 @@ import 'dart:typed_data';
 import 'package:app/pairing/pair_request_flow.dart';
 import 'package:app/pairing/qr_scanner.dart';
 import 'package:app/pairing/storage.dart';
-import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _Q {
@@ -46,13 +45,6 @@ class _FakeStorage extends PairingStorage {
 
   @override
   Future<void> savePeer(PeerRecord r) async => saved.add(r);
-
-  @override
-  Future<DeviceIdentity> loadOrCreateDeviceEd25519Key() async {
-    final kp = await Ed25519().newKeyPair();
-    final pub = await kp.extractPublicKey();
-    return DeviceIdentity(pk: base64Url.encode(pub.bytes), sk: 'x');
-  }
 }
 
 QrPairPayload _qr({String? relayUrl}) => QrPairPayload(

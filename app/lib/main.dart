@@ -2,6 +2,7 @@ import 'package:app/config/dependencies.dart';
 import 'package:app/data/preferences/preferences.dart';
 import 'package:app/data/repositories/session_history_store.dart';
 import 'package:app/data/transport/connection_manager.dart';
+import 'package:app/pairing/owner_identity_bridge.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/routing/app_router.dart';
 import 'package:app/ui/app_theme.dart';
@@ -27,6 +28,7 @@ class _RemotePiAppState extends State<RemotePiApp> {
     injector.get<PairingStorage>(),
     injector.get<ConnectionManager>(),
     injector.get<Preferences>(),
+    injector.get<OwnerIdentityBridge>(),
   );
 
   @override
