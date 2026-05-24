@@ -3,7 +3,17 @@ set -euo pipefail
 
 # Cria 4 panes (App, Relay, Extension, Site) à direita do pane atual,
 # empilhados verticalmente, cada um já rodando
-# `claude --model sonnet --dangerously-skip-permissions` no cwd do subprojeto.
+# `cmux claude-teams --model sonnet --dangerously-skip-permissions` no cwd do
+# subprojeto.
+#
+# Por que `cmux claude-teams` em vez de `claude` puro:
+#   - O wrapper `claude-teams` injeta automaticamente os hooks Claude Code
+#     (SessionStart/UserPromptSubmit/Stop/...) que o cmux precisa pra emitir
+#     eventos `agent.hook.*`. Sem o wrapper, nenhum hook dispara e o
+#     orquestrador não consegue escutar via `cmux events` quando o worker
+#     termina seu turn — fica refém de o humano dizer "feito".
+#   - Todas as flags do `claude` (--model, --dangerously-skip-permissions,
+#     --resume) são passadas transparentemente.
 #
 # Por que --dangerously-skip-permissions:
 #   - Agentes operam dentro do seu próprio cwd (regra de orquestração)
@@ -157,7 +167,7 @@ for entry in "${agents[@]}"; do
 
   cmux rename-tab --surface "$surface" "$name" >/dev/null
 
-  cmd="cd '$cwd' && clear && claude --model sonnet --dangerously-skip-permissions"
+  cmd="cd '$cwd' && clear && cmux claude-teams --model sonnet --dangerously-skip-permissions"
   [ -n "$resume_flag" ] && cmd="$cmd $resume_flag"
   cmux send --surface "$surface" "${cmd}\n" >/dev/null
 

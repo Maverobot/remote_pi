@@ -111,6 +111,49 @@ Quando NÃO usar o wrapper:
   `cmux send-key --surface "$(surface_of <Nome>)" enter` (Enter separado
   porque `\n` vira newline multilinha no prompt do claude, não submit)
 
+### Aguardar o worker terminar (hook `agent.hook.Stop`)
+
+Pré-requisito: o pane alvo precisa ter sido lançado via `cmux claude-teams`
+(o wrapper que injeta os hooks Claude Code). O `cmux-bootstrap-agents.sh`
+já faz isso desde 2026-05-24. Panes lançados com `claude` puro **não emitem
+hooks** — orquestrador fica refém de "feito" digitado pelo humano.
+
+Pra checar se um pane está no formato certo, rode no orquestrador:
+
+```bash
+cmux events --category agent --limit 1 --no-heartbeat --no-ack &
+PID=$!; sleep 2; kill $PID 2>/dev/null
+```
+
+Se voltar silêncio em 2s sem nenhum evento, os panes estão em modo solo —
+ofereça rodar `scripts/cmux-close-agents.sh` + `scripts/cmux-bootstrap-agents.sh
+--resume` pra reativar com hooks.
+
+**Forma preferida** — dispatch com `--wait` bloqueia até o worker emitir Stop:
+
+```bash
+scripts/cmux-dispatch.sh --wait Extension 25-wave-x "..."
+# bloqueia aqui; retorna quando Stop (phase=completed) chega com cwd matching
+```
+
+**Forma manual** (depois de dispatch sem `--wait`):
+
+```bash
+cmux events --category agent --name agent.hook.Stop \
+            --reconnect --no-heartbeat --no-ack \
+            --cursor-file ~/.orch/cursor.seq \
+  | jq -c --arg cwd "$PWD/pi-extension" \
+      'select(.payload.phase == "completed" and .payload.cwd == $cwd)' \
+  | head -n 1
+```
+
+`cmux events` não tem filtro `--workspace` — desambig via `payload.cwd` no jq.
+Sempre `phase=="completed"` (vem depois de `phase=="received"`). O
+`--cursor-file` sobrevive crashes.
+
+Depois de Stop, **leia `.orchestration/results/<task-id>.md`** pro report
+estruturado — nunca dependa de screen-scrape do pane.
+
 ### Criar os 4 panes do zero
 
 Se o workspace ainda não tem os panes (ou eles foram fechados), use o script
