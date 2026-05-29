@@ -173,52 +173,64 @@ Detalhes em `plan/24-mesh-membership.md`.
 
 ---
 
-## Slash commands
+## App actions
 
-Camada acima do envelope. O app expõe um picker de slash commands (`/compact`, `/model`, comandos `/remote-pi …`, etc.) que listam o catálogo do Pi pareado e invocam comandos curados como se o usuário tivesse digitado no TUI.
+Vocabulário curado de ações tipadas que o app mobile invoca sobre a sessão do Pi pareado. **Não é** um picker genérico de slash commands — cada ação tem payload estruturado e mapeia pra uma API pública do SDK. Pi-extension lida; app não parseia nada.
 
-### Request — `list_commands`
+| Action | ClientMessage | SDK call no pi-extension |
+|---|---|---|
+| Compact context | `session_compact` | `ctx.compact()` |
+| New session | `session_new` | `ctx.newSession()` |
+| Set model | `model_set {provider, model_id}` | `ModelRegistry.find(...)` + `pi.setModel(model)` |
+| Set thinking | `thinking_set {level}` | `pi.setThinkingLevel(level)` |
+| List models | `list_models` | `ModelRegistry.getAvailable()` |
+
+### Wire — exemplos
 
 ```json
-{ "type": "list_commands", "id": "<uuid>" }
+// Request
+{ "type": "session_compact", "id": "<uuid>" }
+
+// Success reply
+{ "type": "action_ok", "in_reply_to": "<uuid>", "action": "session_compact" }
+
+// Failure reply
+{ "type": "action_error", "in_reply_to": "<uuid>", "action": "session_compact",
+  "error": "compact unavailable (no active session ctx)" }
 ```
 
-### Reply — `commands_list`
-
 ```json
+// Model list request → reply
+{ "type": "list_models", "id": "<uuid>" }
 {
-  "type": "commands_list",
+  "type": "models_list",
   "in_reply_to": "<uuid>",
-  "commands": [
-    { "name": "compact", "description": "Manually compact context", "source": "builtin",   "invokable": true,  "takes_args": false },
-    { "name": "model",   "description": "Select model",             "source": "builtin",   "invokable": true,  "takes_args": true  },
-    { "name": "fork",    "description": "Fork from previous user message", "source": "builtin", "invokable": false, "takes_args": false },
-    { "name": "remote-pi", "description": "Mesh control",           "source": "extension", "invokable": true,  "takes_args": true  }
-  ]
+  "models": [
+    { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "provider": "anthropic",
+      "reasoning": true, "context_window": 200000 }
+  ],
+  "current": { "id": "claude-opus-4-7", "name": "Claude Opus 4.7", "...": "..." }
 }
 ```
 
-`source ∈ {builtin, extension, prompt, skill}`. `invokable: false` marca comandos que existem no Pi mas só funcionam na TUI hoje — o app os mostra como hint informativo (grayed). Razão da limitação: o SDK do Pi `@mariozechner/pi-coding-agent` não expõe API programática genérica de invocação de builtins; só alguns têm equivalente em `ExtensionContextActions` (`compact`, `shutdown`, `setModel`).
+### Thinking levels (enum fixo)
 
-### Invocação — `command_invoke`
-
-```json
-{ "type": "command_invoke", "id": "<uuid>", "name": "compact", "args": "" }
+```
+"off" | "minimal" | "low" | "medium" | "high" | "xhigh"
 ```
 
-### Resultado — `command_result`
+`"xhigh"` só é honrado em famílias de modelo específicas (Anthropic 4.x reasoning, OpenAI o-series). Pi cai pra um nível vizinho quando não suporta — sem erro.
 
-```json
-{ "type": "command_result", "in_reply_to": "<uuid>", "ok": true }
-```
+### Side-effects
 
-Reply diz apenas se o dispatch funcionou. Efeitos visíveis (chat output, troca de modelo, aviso de compactação) chegam pelos canais normais (`agent_chunk`, `agent_done`, `model_select`, etc.). Erros vêm como `{ ok: false, error: "<motivo>" }` — ex: `"not_invokable"` se o app tentar invocar um comando marcado `invokable: false`.
+Os replies (`action_ok` / `models_list`) só confirmam dispatch. Efeitos visíveis chegam pelos canais normais:
+- Compact concluído → `agent_chunk`/`agent_done` no chat
+- Modelo trocado → evento `model_select` broadcast pra todos os owners conectados
+- Nova sessão → `pair_ok` (ou equivalente) com novo `session_started_at`
 
-### Limitações conhecidas
+### Por que ações tipadas em vez de picker genérico
 
-- **Mirror manual de builtins**: SDK do Pi não exporta `BUILTIN_SLASH_COMMANDS` publicamente. Pi-extension carrega a lista espelhada de `pi-coding-agent` 0.73.1. Updates do SDK exigem update manual do mirror até PR upstream aterrissar.
-- **Subset invocável**: apenas comandos com equivalente programático (`compact`, `quit`, `model`, comandos extension-registered como `/remote-pi *`). Demais marcados `invokable: false`.
-- **Cross-PC**: app lista comandos só do Pi diretamente pareado. Listar comandos de Pis irmãos via mesh fica pra plano futuro.
+O SDK `@mariozechner/pi-coding-agent` não expõe API genérica de invocação dos slash commands builtin (`/compact`, `/model`, `/fork`, `/copy`, etc.) — apenas alguns têm equivalente em `ExtensionContextActions`. Tentar espelhar o picker do TUI exigiria mirror manual da lista builtin + matriz de invocabilidade + UX de chip canonizado, com vários comandos sendo só hint informativo. Vocabulário tipado é mais simples, mais honesto, e cobre 100% das ações que fazem sentido em mobile. Padrão validado pelo adapter `pi-telegram` (mesmo abordagem: vocabulário curado, sem picker genérico).
 
 Detalhes em `plan/28-pi-commands.md`.
 

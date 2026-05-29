@@ -22,7 +22,7 @@
 | Platform | Status |
 |---|---|
 | Google Play (Android) | [Get it on Google Play](https://play.google.com/store/apps/details?id=work.jacobmoura.remotepi) |
-| App Store (iOS) | _Coming soon_ |
+| App Store (iOS) | [Download on the App Store](https://apps.apple.com/app/remote-pi-coding-agent/id6773499691) |
 | APK (sideload, Android) | [GitHub Releases](https://github.com/jacobaraujo7/remote_pi/releases) |
 
 ## What's in this repo
