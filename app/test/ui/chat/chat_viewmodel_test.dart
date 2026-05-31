@@ -19,15 +19,25 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
-class _FakeChannel implements IChannel {
+class _FakeChannel implements IChannel, IControlLink {
   final _ctrl = StreamController<ServerMessage>.broadcast();
+  final _control = StreamController<ControlInbound>.broadcast();
   @override
   Stream<ServerMessage> get serverMessages => _ctrl.stream;
   @override
+  Stream<ControlInbound> get controlFrames => _control.stream;
+  @override
+  void sendControl(Map<String, dynamic> json) {}
+  @override
   Future<void> send(ClientMessage msg) async {}
   @override
-  Future<void> close() => _ctrl.close();
+  Future<void> close() async {
+    await _ctrl.close();
+    await _control.close();
+  }
+
   void push(ServerMessage m) => _ctrl.add(m);
+  void pushControl(ControlInbound m) => _control.add(m);
 }
 
 class _FakeSecureStorage implements FlutterSecureStorage {
@@ -77,6 +87,20 @@ class _FakeStorage extends PairingStorage {
   @override
   Future<PeerRecord?> loadPeer(String epk) async =>
       epk == _peer.remoteEpk ? _peer : null;
+  @override
+  Future<void> savePeer(PeerRecord r) async {}
+
+  // In-memory rooms so a RoomAnnounced landing on the real ConnectionManager
+  // (_persistRoomsForPeer) never touches flutter_secure_storage.
+  final Map<String, List<PersistedRoom>> _rooms = {};
+  @override
+  Future<void> saveRooms(String epk, List<PersistedRoom> rooms) async =>
+      _rooms[epk] = rooms;
+  @override
+  Future<List<PersistedRoom>> loadRooms(String epk) async =>
+      _rooms[epk] ?? const [];
+  @override
+  Future<void> deleteRooms(String epk) async => _rooms.remove(epk);
 }
 
 late Directory _dir;
@@ -138,4 +162,107 @@ void main() {
     sync.dispose();
     conn.dispose();
   });
+
+  test(
+    'an empty session reaches ChatReady with no messages → the chat shows the '
+    'default "Nothing here" placeholder (plan/32)',
+    () async {
+      final ch = _FakeChannel();
+      final storage = _FakeStorage();
+      final conn = ConnectionManager(
+        factory: (_, _) async => ch,
+        storage: storage,
+      );
+      final boxes = LocalBoxes();
+      // The msgs box is shared across tests in this file (setUpAll) — start
+      // this one from a clean slate so "empty session" really is empty.
+      (await boxes.msgsBox(_peer.remoteEpk, 'main')).clear();
+      final sync = SyncService(conn, boxes);
+      final read = SessionReadRepository(boxes);
+      final prefs = Preferences(_FakeSecureStorage());
+      await prefs.setSelectedPeerEpk(_peer.remoteEpk);
+      await prefs.setSelectedRoom(epk: _peer.remoteEpk, roomId: 'main');
+
+      conn.adopt(ch, _peer);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final vm = ChatViewModel(read, sync, conn, prefs, storage);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      final state = vm.state;
+      expect(state, isA<ChatReady>());
+      state as ChatReady;
+      // Empty + nothing streaming → _buildBody renders the default Pi-icon +
+      // "Nothing here" placeholder (shown whenever the body is empty).
+      expect(state.messages, isEmpty);
+      expect(state.streaming, isNull);
+
+      vm.dispose();
+      sync.dispose();
+      conn.dispose();
+    },
+  );
+
+  test(
+    'working pill follows the relay per-room broadcast (same mechanism as '
+    'Home) and the flip rebuilds the state (plan/32)',
+    () async {
+      final ch = _FakeChannel();
+      final storage = _FakeStorage();
+      final conn = ConnectionManager(
+        factory: (_, _) async => ch,
+        storage: storage,
+        emitDebounce: Duration.zero,
+      );
+      final boxes = LocalBoxes();
+      final sync = SyncService(conn, boxes);
+      final read = SessionReadRepository(boxes);
+      final prefs = Preferences(_FakeSecureStorage());
+      await prefs.setSelectedPeerEpk(_peer.remoteEpk);
+      await prefs.setSelectedRoom(epk: _peer.remoteEpk, roomId: 'main');
+
+      conn.adopt(ch, _peer);
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      final vm = ChatViewModel(read, sync, conn, prefs, storage);
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+
+      // Room comes online idle (no local turn started in THIS chat).
+      ch.pushControl(const RoomAnnounced(
+        peer: 'epk_chat',
+        roomId: 'main',
+        startedAt: 1,
+      ));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(vm.isWorking, isFalse);
+
+      // The relay broadcasts meta.working=true for this room (turn_start) —
+      // no local send/echo, purely the per-room signal that also drives Home.
+      ch.pushControl(const RoomMetaUpdated(
+        peer: 'epk_chat',
+        roomId: 'main',
+        working: true,
+        hasModel: false,
+        hasThinking: false,
+      ));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(vm.isWorking, isTrue, reason: 'relay per-room working drives the pill');
+      expect((vm.state as ChatReady).isWorking, isTrue,
+          reason: 'state carries isWorking so the flip rebuilds the UI');
+
+      // turn_end → working=false.
+      ch.pushControl(const RoomMetaUpdated(
+        peer: 'epk_chat',
+        roomId: 'main',
+        working: false,
+        hasModel: false,
+        hasThinking: false,
+      ));
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(vm.isWorking, isFalse);
+      expect((vm.state as ChatReady).isWorking, isFalse);
+
+      vm.dispose();
+      sync.dispose();
+      conn.dispose();
+    },
+  );
 }

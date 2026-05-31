@@ -16,9 +16,16 @@ class _FakeSpeechService implements SpeechService {
   String transcript = 'hello from voice';
   final StreamController<double> _level = StreamController<double>.broadcast();
 
+  /// When set, `init()` blocks on this until completed — mimics the OS
+  /// permission prompt holding up `startRecording` while the user lifts their
+  /// finger off the mic to tap "Allow".
+  Completer<void>? initGate;
+
   @override
-  Future<SpeechAvailability> init({String? preferredLocaleId}) async =>
-      availability;
+  Future<SpeechAvailability> init({String? preferredLocaleId}) async {
+    if (initGate != null) await initGate!.future;
+    return availability;
+  }
   @override
   Stream<double> get soundLevel => _level.stream;
   @override
@@ -132,6 +139,41 @@ void main() {
     await tester.pump();
     expect(find.byIcon(LucideIcons.mic), findsNothing);
   });
+
+  testWidgets(
+    'first use: releasing during the permission prompt does NOT leave a '
+    'phantom recording',
+    (tester) async {
+      // init() blocks until we allow it — the prompt is "up" while the user
+      // lifts their finger to tap "Allow".
+      final gate = Completer<void>();
+      svc.initGate = gate;
+      await pumpBar(tester);
+
+      final gesture = await tester.startGesture(
+        tester.getCenter(find.byIcon(LucideIcons.mic)),
+      );
+      await tester.pump(const Duration(milliseconds: 700)); // onLongPressStart
+      await tester.pump();
+      // Recording hasn't started (init still pending) → no strip.
+      expect(find.byKey(const Key('recording-strip')), findsNothing);
+
+      // User lifts to tap the OS "Allow" button — the hold ends first.
+      await gesture.up();
+      await tester.pump();
+
+      // Permission resolves (Allow tapped) → startRecording proceeds.
+      gate.complete();
+      await tester.pump();
+      await tester.pump();
+
+      // The recording that started behind the prompt is discarded: no phantom
+      // strip, mic back, field empty.
+      expect(find.byKey(const Key('recording-strip')), findsNothing);
+      expect(find.byIcon(LucideIcons.mic), findsOneWidget);
+      expect(find.text('hello from voice'), findsNothing);
+    },
+  );
 
   testWidgets('permission denied keeps the mic and surfaces the hint', (
     tester,

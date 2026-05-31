@@ -1,4 +1,5 @@
-// Plan/27 Wave A — PiCard subtitle showing the agent harness.
+// PeerSectionHeader — device label only. The "via <harness>" subtitle was
+// removed as redundant.
 
 import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart' show PiHarness;
@@ -29,8 +30,9 @@ Future<void> _pump(WidgetTester tester, PeerRecord peer) async {
 }
 
 void main() {
-  group('PeerSectionHeader (plan/27 Wave A)', () {
-    testWidgets('shows nickname uppercase + harness subtitle', (tester) async {
+  group('PeerSectionHeader', () {
+    testWidgets('shows nickname uppercase and NO harness subtitle',
+        (tester) async {
       await _pump(
         tester,
         _peer(
@@ -40,48 +42,15 @@ void main() {
       );
 
       expect(find.text('MACBOOK'), findsOneWidget);
-      expect(find.text('via Pi coding agent'), findsOneWidget);
+      // The redundant "via …" subtitle is gone.
+      expect(find.textContaining('via '), findsNothing);
     });
 
-    testWidgets(
-      'falls back to default harness when peer.harness is null (legacy)',
-      (tester) async {
-        await _pump(
-          tester,
-          _peer(nickname: 'Mac', harness: null),
-        );
-
-        // Default is PiHarness.piCodingAgentUnknown → "Pi coding agent".
-        expect(find.text('via Pi coding agent'), findsOneWidget);
-      },
-    );
-
-    testWidgets(
-      'reflects future Claude Code / OpenCode harnesses verbatim',
-      (tester) async {
-        await _pump(
-          tester,
-          _peer(
-            nickname: 'Mac',
-            harness: const PiHarness(name: 'Claude Code', version: '0.7.1'),
-          ),
-        );
-
-        expect(find.text('via Claude Code'), findsOneWidget);
-        expect(find.text('via Pi coding agent'), findsNothing);
-      },
-    );
-
-    testWidgets(
-      'falls back to sessionName when no nickname is set',
-      (tester) async {
-        await _pump(
-          tester,
-          _peer(sessionName: 'remote_pi · main'),
-        );
-
-        expect(find.text('REMOTE_PI · MAIN'), findsOneWidget);
-      },
-    );
+    testWidgets('falls back to sessionName when no nickname is set',
+        (tester) async {
+      await _pump(tester, _peer(sessionName: 'remote_pi · main'));
+      expect(find.text('REMOTE_PI · MAIN'), findsOneWidget);
+      expect(find.textContaining('via '), findsNothing);
+    });
   });
 }

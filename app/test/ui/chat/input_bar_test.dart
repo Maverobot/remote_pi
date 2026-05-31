@@ -3,6 +3,7 @@
 
 import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
@@ -155,5 +156,75 @@ void main() {
   ) async {
     await pumpBar(tester, disabled: false, streaming: false);
     expect(find.byKey(const Key('input-bar-quick-actions')), findsNothing);
+  });
+
+  // Hardware keyboard (iPad keyboard case): plain Enter SENDS, Shift+Enter
+  // inserts a newline. Touch behaviour is unaffected (soft Enter = newline via
+  // performAction, send via the button).
+  testWidgets('hardware Enter sends; Shift+Enter inserts a newline', (
+    tester,
+  ) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            disabled: false,
+            streaming: false,
+            onSend: sent.add,
+            onCancel: () {},
+          ),
+        ),
+      ),
+    );
+
+    final field = find.byType(TextField);
+    await tester.enterText(field, 'hello');
+    await tester.pump();
+
+    // Plain Enter → send + clear.
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(sent, ['hello']);
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      isEmpty,
+      reason: 'submit clears the field',
+    );
+
+    // Shift+Enter → newline, NOT a send.
+    await tester.enterText(field, 'line1');
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+    await tester.pump();
+    expect(sent, ['hello'], reason: 'shift+enter must not send');
+    expect(
+      tester.widget<TextField>(field).controller!.text,
+      'line1\n',
+      reason: 'shift+enter inserts a newline at the caret',
+    );
+  });
+
+  // While streaming the composer is locked — hardware Enter must NOT send.
+  testWidgets('hardware Enter does nothing while streaming', (tester) async {
+    final sent = <String>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            disabled: false,
+            streaming: true,
+            onSend: sent.add,
+            onCancel: () {},
+          ),
+        ),
+      ),
+    );
+    // The field is disabled while streaming; focus the composer subtree and
+    // fire Enter anyway — it must be a no-op.
+    await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+    await tester.pump();
+    expect(sent, isEmpty);
   });
 }

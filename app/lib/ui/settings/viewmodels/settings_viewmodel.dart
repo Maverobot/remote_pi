@@ -14,6 +14,7 @@ class SettingsViewModel extends ViewModel<SettingsState> {
   final PairingStorage _storage;
   final Preferences _prefs;
   final ConnectionManager _conn;
+
   /// Optional in tests; required in production. The revoke flow drives
   /// it explicitly with `allowEmpty:true` so a revoke of the last
   /// remaining peer still propagates to the relay — without it, the
@@ -23,7 +24,7 @@ class SettingsViewModel extends ViewModel<SettingsState> {
   bool _disposed = false;
 
   SettingsViewModel(this._storage, this._prefs, this._conn, [this._meshSync])
-      : super(const SettingsLoading()) {
+    : super(const SettingsLoading()) {
     _load();
   }
 
@@ -43,12 +44,14 @@ class SettingsViewModel extends ViewModel<SettingsState> {
     if (s is! SettingsList) return;
     PeerRecord? target;
     for (final p in s.peers) {
-      if (p.remoteEpk == epk) { target = p; break; }
+      if (p.remoteEpk == epk) {
+        target = p;
+        break;
+      }
     }
     if (target == null) return;
     final trimmed = nickname?.trim();
-    final normalized =
-        (trimmed == null || trimmed.isEmpty) ? null : trimmed;
+    final normalized = (trimmed == null || trimmed.isEmpty) ? null : trimmed;
     final updated = target.copyWith(nickname: normalized);
     await _storage.savePeer(updated);
     await _load();
@@ -57,32 +60,21 @@ class SettingsViewModel extends ViewModel<SettingsState> {
   /// Effective relay URL the app is connecting to right now.
   String get effectiveRelayUrl => resolveRelayUrl(_prefs);
 
-  /// The user override (null = using the public default).
-  String? get relayUrlOverride => _prefs.relayUrl;
+  /// User-set override for the relay URL. If `null`, the app is using the
+  /// default endpoint [kDefaultRelayUrl].
+  String get relayUrlOverride => _prefs.relayUrl ?? kDefaultRelayUrl;
 
-  /// Persist a custom relay URL. Pass [value] = null or empty to clear
-  /// the override (falls back to [kDefaultRelayUrl]). Returns `null` on
-  /// success or an error message string when validation fails.
-  ///
-  /// Always tears down the active relay connection and kicks off a
-  /// fresh `boot` after saving — clicking Save is the user's explicit
-  /// "use this relay now" gesture, so we restart the WebSocket
-  /// unconditionally even when the URL didn't change (handy as a
-  /// manual reconnect when the relay seems stuck).
   Future<String?> saveRelayUrl(String? value) async {
-    final trimmed = value?.trim();
-    if (trimmed == null || trimmed.isEmpty) {
-      await _prefs.setRelayUrl(null);
-    } else {
-      final reason = relayUrlValidationMessage(trimmed);
-      if (reason != null) return reason;
-      await _prefs.setRelayUrl(trimmed);
+    if (value == null || value.trim().isEmpty) {
+      return 'Enter a URL or clear the field to use the default relay.';
     }
+    final trimmed = value.trim();
+
+    final reason = relayUrlValidationMessage(trimmed);
+    if (reason != null) return reason;
+    await _prefs.setRelayUrl(trimmed);
+
     await _conn.disconnect();
-    // Fire-and-forget; boot resolves the URL fresh via the production
-    // connect factory (`resolveRelayUrl(prefs)`), so the new endpoint
-    // is picked up on the next attempt.
-    // ignore: unawaited_futures
     _conn.boot(preferredEpk: _prefs.selectedPeerEpk);
     return null;
   }

@@ -33,6 +33,10 @@ sealed class ControlInbound {
         final metaJson = j['meta'] as Map<String, dynamic>?;
         final rawThinking =
             (j['thinking'] as String?) ?? (metaJson?['thinking'] as String?);
+        // Plan/32 — `working` arrives top-level (RoomMeta serializes flat)
+        // or nested under `meta.working`; read both for forward-compat.
+        final rawWorking =
+            (j['working'] as bool?) ?? (metaJson?['working'] as bool?);
         return RoomAnnounced(
           peer: j['peer'] as String,
           roomId: j['room_id'] as String,
@@ -43,6 +47,7 @@ sealed class ControlInbound {
           thinking: rawThinking != null
               ? ThinkingLevel.fromWire(rawThinking)
               : null,
+          working: rawWorking,
         );
       }(),
       'room_ended' => RoomEnded(
@@ -68,6 +73,10 @@ sealed class ControlInbound {
           thinking: rawThinking != null
               ? ThinkingLevel.fromWire(rawThinking)
               : null,
+          // Plan/32 — `working` has no "clear to null" state (false IS the
+          // cleared state), so a plain nullable bool models the patch:
+          // null = absent (preserve current), true/false = set.
+          working: meta?['working'] as bool?,
           hasModel: hasModel,
           hasThinking: hasThinking,
         );
@@ -178,6 +187,13 @@ class RoomInfo {
   /// segmented control.
   final ThinkingLevel? thinking;
 
+  /// Plan/32 — `true` when the room currently has an in-flight agent
+  /// turn. The relay broadcasts `meta.working` for EVERY subscribed room
+  /// (like presence), so Home can light the blue "working" dot on any
+  /// session — not just the single connected one. Defaults to `false`
+  /// (idle / not reported yet).
+  final bool working;
+
   const RoomInfo({
     required this.roomId,
     required this.startedAt,
@@ -185,6 +201,7 @@ class RoomInfo {
     this.cwd,
     this.model,
     this.thinking,
+    this.working = false,
   });
 
   factory RoomInfo.fromJson(Map<String, dynamic> j) {
@@ -198,6 +215,7 @@ class RoomInfo {
       thinking: rawThinking != null
           ? ThinkingLevel.fromWire(rawThinking)
           : null,
+      working: (j['working'] as bool?) ?? false,
     );
   }
 
@@ -208,6 +226,7 @@ class RoomInfo {
     'started_at': startedAt,
     'model': model,
     if (thinking != null) 'thinking': thinking!.wire,
+    'working': working,
   };
 
   RoomInfo copyWith({
@@ -216,6 +235,7 @@ class RoomInfo {
     int? startedAt,
     Object? model = _kRoomInfoUnset,
     Object? thinking = _kRoomInfoUnset,
+    bool? working,
   }) => RoomInfo(
     roomId: roomId,
     name: name ?? this.name,
@@ -225,6 +245,7 @@ class RoomInfo {
     thinking: identical(thinking, _kRoomInfoUnset)
         ? this.thinking
         : thinking as ThinkingLevel?,
+    working: working ?? this.working,
   );
 
   @override
@@ -235,11 +256,12 @@ class RoomInfo {
       other.cwd == cwd &&
       other.startedAt == startedAt &&
       other.model == model &&
-      other.thinking == thinking;
+      other.thinking == thinking &&
+      other.working == working;
 
   @override
   int get hashCode =>
-      Object.hash(roomId, name, cwd, startedAt, model, thinking);
+      Object.hash(roomId, name, cwd, startedAt, model, thinking, working);
 }
 
 class RoomAnnounced extends ControlInbound {
@@ -256,6 +278,11 @@ class RoomAnnounced extends ControlInbound {
   /// session start. Parsed from `meta.thinking` or top-level
   /// `thinking` depending on whether the relay flattens metadata.
   final ThinkingLevel? thinking;
+
+  /// Plan/32 — in-flight agent turn at announce time. `null` when the
+  /// frame omitted it (legacy relay); the ConnectionManager then keeps
+  /// any previously-known value instead of forcing `false`.
+  final bool? working;
   const RoomAnnounced({
     required this.peer,
     required this.roomId,
@@ -264,6 +291,7 @@ class RoomAnnounced extends ControlInbound {
     this.cwd,
     this.model,
     this.thinking,
+    this.working,
   });
 }
 
@@ -313,11 +341,18 @@ class RoomMetaUpdated extends ControlInbound {
 
   /// Plan/28 Wave D — same convention for `thinking`.
   final bool hasThinking;
+
+  /// Plan/32 — in-flight agent turn for this room. `null` = the update
+  /// did not carry `working` (preserve the cached value); non-null =
+  /// set. No separate `hasWorking` flag is needed because `working` can
+  /// never be "explicitly null" on the wire — `false` is the off state.
+  final bool? working;
   const RoomMetaUpdated({
     required this.peer,
     required this.roomId,
     this.model,
     this.thinking,
+    this.working,
     this.hasModel = true,
     this.hasThinking = true,
   });
@@ -688,6 +723,8 @@ sealed class ServerMessage {
       // here is the "user-text-arrived" event regardless of origin.
       'user_input' || 'user_message' => UserInput.fromJson(json),
       'agent_message' => AgentMessage.fromJson(json),
+      // Plan/32 — Pi-extension emits this when a context compaction finishes.
+      'compaction' => Compaction.fromJson(json),
       'session_history' => SessionHistory.fromJson(json),
       'bye' => Bye.fromJson(json),
       'action_ok' => ActionOk.fromJson(json),
@@ -925,6 +962,22 @@ class AgentMessage extends ServerMessage {
   );
 }
 
+/// Plan/32 — emitted by the Pi-extension when a context compaction finishes.
+/// Rendered as a system bubble in the chat (✓ Contexto compactado + summary +
+/// the token count that was reclaimed). `ts` is optional (epoch millis).
+class Compaction extends ServerMessage {
+  final String summary;
+  final int? tokensBefore;
+  final int? ts;
+  Compaction({required this.summary, this.tokensBefore, this.ts});
+
+  factory Compaction.fromJson(Map<String, dynamic> j) => Compaction(
+    summary: (j['summary'] as String?) ?? '',
+    tokensBefore: (j['tokens_before'] as num?)?.toInt(),
+    ts: (j['ts'] as num?)?.toInt(),
+  );
+}
+
 // ---------------------------------------------------------------------------
 // SessionHistory + embedded event types
 // ---------------------------------------------------------------------------
@@ -989,6 +1042,13 @@ sealed class SessionHistoryEvent {
         inReplyTo: j['in_reply_to'] as String,
         text: j['text'] as String,
       ),
+      // Plan/32 — compaction replayed from history so the system bubble
+      // survives a re-sync.
+      'compaction' => CompactionEvt(
+        ts: ts,
+        summary: (j['summary'] as String?) ?? '',
+        tokensBefore: (j['tokens_before'] as num?)?.toInt(),
+      ),
       final t => throw UnsupportedTypeException(t ?? ''),
     };
   }
@@ -1041,6 +1101,17 @@ class AgentMessageEvt extends SessionHistoryEvent {
     required super.ts,
     required this.inReplyTo,
     required this.text,
+  });
+}
+
+/// Plan/32 — a context compaction replayed from `session_history`.
+class CompactionEvt extends SessionHistoryEvent {
+  final String summary;
+  final int? tokensBefore;
+  const CompactionEvt({
+    required super.ts,
+    required this.summary,
+    this.tokensBefore,
   });
 }
 

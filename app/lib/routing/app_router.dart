@@ -270,7 +270,10 @@ GoRouter buildRouter(
           StatefulShellBranch(
             preload: true,
             routes: [
-              GoRoute(path: '/session', builder: (ctx, st) => _detailPane()),
+              GoRoute(
+                path: '/session',
+                builder: (ctx, st) => const _DetailPane(),
+              ),
             ],
           ),
         ],
@@ -313,9 +316,17 @@ GoRouter buildRouter(
         builder: (ctx, st) {
           final extra = st.extra;
           String? initialTitle;
+          String? initialDevice;
+          var initialOnline = false;
           if (extra is Map) {
             final t = extra['title'];
             if (t is String && t.isNotEmpty) initialTitle = t;
+            // Plan/32g — device (Mac) label Home already knows, so AppBar
+            // line 2 renders immediately (no async PeerRecord wait).
+            final d = extra['device'];
+            if (d is String && d.isNotEmpty) initialDevice = d;
+            // Live state of the tile → initial status dot (no reconnect flash).
+            initialOnline = extra['online'] == true;
           }
           return MultiProvider(
             providers: [
@@ -323,7 +334,11 @@ GoRouter buildRouter(
               ViewmodelProvider<VoiceInputViewModel>(),
               ViewmodelProvider<AttachmentViewModel>(),
             ],
-            child: ChatPage(initialTitle: initialTitle),
+            child: ChatPage(
+              initialTitle: initialTitle,
+              initialDevice: initialDevice,
+              initialOnline: initialOnline,
+            ),
           );
         },
       ),
@@ -343,22 +358,30 @@ GoRouter buildRouter(
 /// by (epk, room) so switching sessions tears down the old ChatViewModel
 /// and builds a fresh one, which re-binds to the now-selected peer (the
 /// VM reads `Preferences.selectedPeerEpk`, already set by Home._open).
-Widget _detailPane() {
-  return Consumer<SessionSelection>(
-    builder: (ctx, sel, _) {
-      final cur = sel.current;
-      if (cur == null) return const DetailPlaceholder();
-      return MultiProvider(
-        key: ValueKey('chat-${cur.epk}-${cur.roomId}'),
-        providers: [
-          ViewmodelProvider<ChatViewModel>(),
-          ViewmodelProvider<VoiceInputViewModel>(),
-          ViewmodelProvider<AttachmentViewModel>(),
-        ],
-        child: ChatPage(initialTitle: cur.title, showBack: false),
-      );
-    },
-  );
+class _DetailPane extends StatelessWidget {
+  const _DetailPane();
+
+  @override
+  Widget build(BuildContext context) {
+    final sel = context.watch<SessionSelection>();
+    if (sel.current == null) {
+      return const DetailPlaceholder();
+    }
+    return MultiProvider(
+      key: ValueKey('chat-${sel.current!.epk}-${sel.current!.roomId}'),
+      providers: [
+        ViewmodelProvider<ChatViewModel>(),
+        ViewmodelProvider<VoiceInputViewModel>(),
+        ViewmodelProvider<AttachmentViewModel>(),
+      ],
+      child: ChatPage(
+        initialTitle: sel.current!.title,
+        initialDevice: sel.current!.device.isEmpty ? null : sel.current!.device,
+        initialOnline: sel.current!.online,
+        showBack: false,
+      ),
+    );
+  }
 }
 
 class _BootSplash extends StatelessWidget {

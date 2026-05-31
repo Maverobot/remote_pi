@@ -12,6 +12,7 @@ const kMuted2 = Color(0xFF8A8A8A);
 const kAccent = Color(0xFF00D4FF);
 const kHighlight = Color(0xFF9FE6FF); // code/file paths in agent messages
 const kSuccess = Color(0xFF6CD28A);  // ✓ in tool results
+const kError = Color(0xFFE5484D); // ✗ failed tool results
 const kCodeBg = Color(0xFF050505);
 const kUserBubble = Color(0xFF1A1A1A);
 const kModelBadgeBg = Color(0xFF161616);

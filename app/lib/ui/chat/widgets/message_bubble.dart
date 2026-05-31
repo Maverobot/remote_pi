@@ -51,7 +51,9 @@ class UserBubble extends StatelessWidget {
                         horizontal: 13,
                         vertical: 10,
                       ),
-                      child: Text(
+                      // Selectable so the user can copy their own message (the
+                      // agent reply is already selectable via AgentMarkdown).
+                      child: SelectableText(
                         message.text,
                         style: kSansBody.copyWith(color: kText),
                       ),
@@ -96,6 +98,80 @@ class UserBubble extends StatelessWidget {
                 ),
               ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// CompactionBubble — centered system card (plan/32)
+// ---------------------------------------------------------------------------
+
+/// A system message distinct from user/assistant: shows that the Pi compacted
+/// the context, with the recap summary and the reclaimed token count. Mirrors
+/// the TUI's CompactionSummaryMessageComponent.
+class CompactionBubble extends StatelessWidget {
+  final CompactionMsg message;
+  const CompactionBubble(this.message, {super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final tokens = message.tokensBefore;
+    final summary = message.summary;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 360),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: kSurface,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: kBorder),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(LucideIcons.check, size: 13, color: kSuccess),
+                  const SizedBox(width: 6),
+                  const Expanded(
+                    child: Text(
+                      'Context compacted',
+                      style: TextStyle(
+                        fontFamily: kMono,
+                        fontSize: 12,
+                        color: kText,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                  if (tokens != null)
+                    Text(
+                      '~$tokens tokens',
+                      style: const TextStyle(
+                        fontFamily: kMono,
+                        fontSize: 11,
+                        color: kMuted,
+                      ),
+                    ),
+                ],
+              ),
+              if (summary.isNotEmpty) ...[
+                const SizedBox(height: 6),
+                Text(
+                  summary,
+                  style: const TextStyle(
+                    fontFamily: kMono,
+                    fontSize: 12,
+                    color: kMuted2,
+                  ),
+                ),
+              ],
+            ],
+          ),
         ),
       ),
     );

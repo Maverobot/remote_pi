@@ -36,4 +36,30 @@ void main() {
       reason: 'agent markdown should fill beyond the old 340px cap',
     );
   });
+
+  testWidgets('AssistantBubble is selectable (copyable)', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: AssistantBubble(AssistantMsg(id: 'a1', text: 'reply')),
+        ),
+      ),
+    );
+    await tester.pump();
+    // AgentMarkdown wraps the reply in a SelectionArea when selectable.
+    expect(find.byType(SelectionArea), findsOneWidget);
+  });
+
+  testWidgets('UserBubble text is selectable (copyable)', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: UserBubble(UserMsg(id: 'u1', text: 'my message')),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.byType(SelectableText), findsOneWidget);
+    expect(find.text('my message'), findsOneWidget);
+  });
 }

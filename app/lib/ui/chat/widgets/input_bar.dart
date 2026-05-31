@@ -8,6 +8,7 @@ import 'package:app/ui/chat/voice/states/voice_input_state.dart';
 import 'package:app/ui/chat/voice/viewmodels/voice_input_viewmodel.dart';
 import 'package:app/ui/chat/voice/widgets/recording_strip.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 // InputBar — bottom message composer.
@@ -79,8 +80,17 @@ class _InputBarState extends State<InputBar> {
   static const double _cancelThreshold = 90;
 
   final _controller = TextEditingController();
+  // Owns the field's focus so we can intercept hardware Enter on its OWN
+  // node (the primary/leaf focus). An ancestor Focus runs too late: the
+  // FocusManager dispatches leaf→root, so the field's multiline newline
+  // handling would consume Enter before an ancestor ever sees it.
+  late final FocusNode _focusNode = FocusNode(onKeyEvent: _onComposerKey);
   bool _empty = true;
   bool _cancelArmed = false;
+  // True while the hold-to-talk gesture is active. Lets `_beginVoice` tell
+  // whether the user is still holding once `startRecording` resolves — if not
+  // (the permission prompt ended the hold), the recording is discarded.
+  bool _holding = false;
   StreamSubscription<String>? _transcriptSub;
 
   @override
@@ -124,6 +134,7 @@ class _InputBarState extends State<InputBar> {
     _transcriptSub?.cancel();
     _controller.removeListener(_onTextChange);
     _controller.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -136,9 +147,66 @@ class _InputBarState extends State<InputBar> {
     widget.onSend(text);
   }
 
+  /// Hardware-keyboard behaviour (iPad keyboard case, etc.): plain Enter
+  /// SENDS, Shift+Enter inserts a newline. On a touch soft-keyboard the
+  /// newline arrives via `performAction` (not a key event), so this never
+  /// fires there — the field keeps growing and the user sends with the
+  /// composer button, exactly as before.
+  KeyEventResult _onComposerKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    final isEnter =
+        event.logicalKey == LogicalKeyboardKey.enter ||
+        event.logicalKey == LogicalKeyboardKey.numpadEnter;
+    if (!isEnter) return KeyEventResult.ignored;
+    // TEMP diag (input multiline Enter): if this line never prints when you
+    // press Enter on the emulator, Android is routing it through the IME and
+    // NOT as a hardware key event — remove once the behaviour is confirmed.
+    debugPrint(
+      '[input.enter] shift=${HardwareKeyboard.instance.isShiftPressed} '
+      'disabled=${widget.disabled} streaming=${widget.streaming}',
+    );
+    // Don't intercept while offline/streaming, or mid-IME-composition (a CJK
+    // candidate is confirmed with Enter, not sent) — let the field/IME deal.
+    if (widget.disabled ||
+        widget.streaming ||
+        !_controller.value.composing.isCollapsed) {
+      return KeyEventResult.ignored;
+    }
+    if (HardwareKeyboard.instance.isShiftPressed) {
+      // Shift+Enter → newline. Inserted explicitly (and consumed) so the
+      // behaviour is identical on every platform instead of depending on
+      // the framework's default multiline key handling.
+      _insertNewlineAtCursor();
+      return KeyEventResult.handled;
+    }
+    _submit();
+    return KeyEventResult.handled;
+  }
+
+  /// Replaces the current selection (or inserts at the caret) with a newline
+  /// and leaves the caret right after it.
+  void _insertNewlineAtCursor() {
+    final value = _controller.value;
+    final sel = value.selection;
+    if (!sel.isValid) {
+      final text = '${value.text}\n';
+      _controller.value = TextEditingValue(
+        text: text,
+        selection: TextSelection.collapsed(offset: text.length),
+      );
+      return;
+    }
+    final text = '${sel.textBefore(value.text)}\n${sel.textAfter(value.text)}';
+    _controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: sel.start + 1),
+    );
+  }
+
   // --- voice gesture ---------------------------------------------------------
 
   void _onVoiceStart() {
+    _holding = true;
     if (_cancelArmed) setState(() => _cancelArmed = false);
     unawaited(_beginVoice());
   }
@@ -148,6 +216,16 @@ class _InputBarState extends State<InputBar> {
     if (voice == null) return;
     await voice.startRecording();
     if (!mounted) return;
+    // Bug fix: on first use the OS permission prompt steals the hold — the
+    // finger lifts to tap "Allow", so the press ends BEFORE recording actually
+    // begins (state isn't VoiceRecording yet, so the release no-ops). When
+    // `startRecording` then resolves and starts, the composer was left stuck
+    // "recording" with no finger down. If the gesture is already over by the
+    // time we get here, discard that phantom recording.
+    if (!_holding && voice.state is VoiceRecording) {
+      await voice.cancel();
+      if (!mounted) return;
+    }
     final s = voice.state;
     if (s is VoiceUnavailable &&
         s.reason == VoiceUnavailableReason.permissionDenied) {
@@ -162,6 +240,7 @@ class _InputBarState extends State<InputBar> {
   }
 
   void _onVoiceEnd() {
+    _holding = false;
     final voice = widget.voice;
     final armed = _cancelArmed;
     if (_cancelArmed) setState(() => _cancelArmed = false);
@@ -251,11 +330,22 @@ class _InputBarState extends State<InputBar> {
                   // Text field (doubles as the image caption when one is set).
                   Expanded(
                     child: TextField(
+                      // Intercept hardware Enter on the field's OWN focus
+                      // node (the primary/leaf): plain Enter sends,
+                      // Shift+Enter newlines — see _onComposerKey. Must be
+                      // the leaf, not an ancestor Focus, or the multiline
+                      // newline handling consumes Enter first.
+                      focusNode: _focusNode,
                       controller: _controller,
                       enabled: canInteract && !widget.streaming,
-                      onSubmitted: canInteract && !widget.streaming
-                          ? (_) => _submit()
-                          : null,
+                      // Grow with the content: starts at one line, expands up
+                      // to 6 then scrolls internally. On a touch soft-keyboard
+                      // Enter inserts a newline; sending is via the composer
+                      // button (hardware Enter sends — see _onComposerKey).
+                      minLines: 1,
+                      maxLines: 6,
+                      keyboardType: TextInputType.multiline,
+                      textInputAction: TextInputAction.newline,
                       style: const TextStyle(
                         fontFamily: kMono,
                         fontSize: 13,
@@ -589,11 +679,11 @@ class _ComposerActionButton extends StatelessWidget {
   IconData get _icon {
     switch (_mode) {
       case _ComposerMode.cancel:
-        return LucideIcons.square;
+        return LucideIcons.square600;
       case _ComposerMode.sendText:
-        return LucideIcons.send;
+        return LucideIcons.send600;
       case _ComposerMode.sendAudio:
-        return LucideIcons.mic;
+        return LucideIcons.mic600;
     }
   }
 

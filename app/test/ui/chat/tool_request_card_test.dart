@@ -1,4 +1,5 @@
 import 'package:app/domain/session_state.dart';
+import 'package:app/ui/app_theme.dart';
 import 'package:app/ui/chat/widgets/tool_request_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -72,6 +73,44 @@ void main() {
       await tester.pumpWidget(_wrap(const ToolRequestCard(tool: allowed)));
       expect(find.text('RUNNING'), findsOneWidget);
       expect(find.text('Allow'), findsNothing);
+    });
+
+    // Plan/32 — the card is colored by status: running blue, done green,
+    // failed red. We assert the outcome line's color (the same _statusColor
+    // drives the border / icon / tool name).
+    Color? outcomeColor(WidgetTester tester, String text) =>
+        tester.widget<Text>(find.text(text)).style?.color;
+
+    testWidgets('completed → green "✓ Done"', (tester) async {
+      const done = ToolEvent(
+        id: 'tc1',
+        toolCallId: 'tc1',
+        tool: 'Bash',
+        args: {'command': 'ls'},
+        status: ToolEventStatus.completed,
+      );
+      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: done)));
+      expect(outcomeColor(tester, '✓ Done'), kSuccess);
+    });
+
+    testWidgets('failed → red "✗ {error}" + FAILED label', (tester) async {
+      const failed = ToolEvent(
+        id: 'tc1',
+        toolCallId: 'tc1',
+        tool: 'Bash',
+        args: {'command': 'exit 1'},
+        status: ToolEventStatus.failed,
+        error: 'command failed: exit 1',
+      );
+      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: failed)));
+      expect(find.text('FAILED'), findsOneWidget);
+      expect(outcomeColor(tester, '✗ command failed: exit 1'), kError);
+    });
+
+    testWidgets('running → blue "⏳ Running…"', (tester) async {
+      // pending defaults
+      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: _bashTool)));
+      expect(outcomeColor(tester, '⏳ Running…'), kAccent);
     });
   });
 }

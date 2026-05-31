@@ -3,7 +3,7 @@ import 'package:app/domain/session_state.dart';
 /// Plan/31 — one persisted chat message (row-granular SSOT). Stored in the
 /// per-session `msgs:<epk>:<roomId>` box, keyed by [seq]. Maps to the domain
 /// [ChatMessage] the UI widgets already render.
-enum MsgRole { user, assistant, tool }
+enum MsgRole { user, assistant, tool, compaction }
 
 class MessageRecord {
   /// Protocol id — the dedupe key (optimistic send ↔ Pi echo share it).
@@ -24,6 +24,9 @@ class MessageRecord {
   /// Optimistic: sent locally, not yet echoed by the Pi.
   final bool pending;
 
+  /// Plan/32 — tokens reclaimed by a compaction (compaction rows only).
+  final int? tokensBefore;
+
   const MessageRecord({
     required this.id,
     required this.seq,
@@ -33,6 +36,7 @@ class MessageRecord {
     this.tool,
     required this.ts,
     this.pending = false,
+    this.tokensBefore,
   });
 
   MessageRecord copyWith({
@@ -50,6 +54,7 @@ class MessageRecord {
     tool: tool ?? this.tool,
     ts: ts,
     pending: pending ?? this.pending,
+    tokensBefore: tokensBefore,
   );
 
   Map<String, dynamic> toJson() => {
@@ -61,6 +66,7 @@ class MessageRecord {
     if (tool != null) 'tool': tool!.toJson(),
     'ts': ts.millisecondsSinceEpoch,
     'pending': pending,
+    if (tokensBefore != null) 'tokens_before': tokensBefore,
   };
 
   factory MessageRecord.fromJson(Map<String, dynamic> j) {
@@ -85,6 +91,7 @@ class MessageRecord {
           : null,
       ts: DateTime.fromMillisecondsSinceEpoch((j['ts'] as num).toInt()),
       pending: (j['pending'] as bool?) ?? false,
+      tokensBefore: (j['tokens_before'] as num?)?.toInt(),
     );
   }
 
@@ -111,6 +118,8 @@ class MessageRecord {
           result: t?.result,
           error: t?.error,
         );
+      case MsgRole.compaction:
+        return CompactionMsg(id: id, summary: text, tokensBefore: tokensBefore);
     }
   }
 }

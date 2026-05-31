@@ -1,20 +1,17 @@
 import 'dart:async';
-import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:app/data/local/boxes.dart';
-import 'package:app/data/local/records/session_index_record.dart';
 import 'package:app/data/preferences/preferences.dart';
-import 'package:app/data/repositories/home_read_repository.dart';
+import 'package:app/data/transport/channel.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/data/transport/peer_channel.dart';
 import 'package:app/pairing/pair_request_flow.dart';
+import 'package:app/protocol/protocol.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/ui/home/states/home_state.dart';
 import 'package:app/ui/home/viewmodels/home_viewmodel.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hive/hive.dart';
 
 class _FakeStorage extends PairingStorage {
   List<PeerRecord> peers;
@@ -31,6 +28,24 @@ class _FakeStorage extends PairingStorage {
   @override
   Future<void> deletePeer(String epk) async {
     peers = peers.where((p) => p.remoteEpk != epk).toList();
+  }
+
+  // Rooms persistence is exercised when a RoomAnnounced lands on a real
+  // ConnectionManager (_persistRoomsForPeer). Keep it in-memory so the
+  // test never touches flutter_secure_storage (no binding in unit tests).
+  final Map<String, List<PersistedRoom>> _rooms = {};
+  @override
+  Future<void> saveRooms(String epk, List<PersistedRoom> rooms) async {
+    _rooms[epk] = rooms;
+  }
+
+  @override
+  Future<List<PersistedRoom>> loadRooms(String epk) async =>
+      _rooms[epk] ?? const [];
+
+  @override
+  Future<void> deleteRooms(String epk) async {
+    _rooms.remove(epk);
   }
 }
 
@@ -78,12 +93,6 @@ class _FakeSecureStorage implements FlutterSecureStorage {
   dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
 }
 
-/// Plan/31 — HomeViewModel now reads the working/idle signal from the DB
-/// session index via HomeReadRepository. The boxes are empty in these tests
-/// (no session index written), so every room reads `idle` — which is the
-/// correct default for the presence/rooms assertions below.
-HomeReadRepository _home() => HomeReadRepository(LocalBoxes());
-
 const _peerA = PeerRecord(
   remoteEpk: 'epk_A',
   sessionName: 'Pi A',
@@ -108,6 +117,29 @@ class _NoopTransport implements PeerTransport {
 
 PlainPeerChannel _channel() => PlainPeerChannel(transport: _NoopTransport());
 
+/// Lets a test inject relay control frames (presence / rooms / working)
+/// into a real ConnectionManager.
+class _ControllableChannel implements IChannel, IControlLink {
+  final _serverCtrl = StreamController<ServerMessage>.broadcast();
+  final _controlCtrl = StreamController<ControlInbound>.broadcast();
+
+  @override
+  Stream<ServerMessage> get serverMessages => _serverCtrl.stream;
+  @override
+  Stream<ControlInbound> get controlFrames => _controlCtrl.stream;
+  @override
+  Future<void> send(ClientMessage msg) async {}
+  @override
+  void sendControl(Map<String, dynamic> json) {}
+  @override
+  Future<void> close() async {
+    await _serverCtrl.close();
+    await _controlCtrl.close();
+  }
+
+  void pushControl(ControlInbound m) => _controlCtrl.add(m);
+}
+
 ConnectionManager _conn({_FakeStorage? storage}) {
   return ConnectionManager(
     factory: (_, _) async => _channel(),
@@ -116,64 +148,73 @@ ConnectionManager _conn({_FakeStorage? storage}) {
 }
 
 void main() {
-  late Directory hiveDir;
-  setUpAll(() async {
-    hiveDir = Directory.systemTemp.createTempSync('home_vm_hive_');
-    await LocalBoxes.initForTest(hiveDir.path);
-  });
-  tearDownAll(() async {
-    await Hive.close();
-    await hiveDir.delete(recursive: true);
-  });
-
   group('HomeViewModel', () {
-    test('isRoomWorking reflects the DB session index (plan/31 fix)', () async {
-      final storage = _FakeStorage([_peerA]);
-      final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(vm.isRoomWorking(_peerA.remoteEpk, 'main'), isFalse);
+    test(
+      'isRoomWorking follows the relay meta.working broadcast for ANY room — '
+      'including one that is NOT the connected session, and clears when the '
+      'relay says the turn ended (plan/32)',
+      () async {
+        // Reproduces the smoke-test bugs in sequence:
+        //  1) the dot only lit for the active chat (working came from the
+        //     connected peer's message channel), and
+        //  2) a session that FINISHED while the app was on another chat
+        //     stayed blue forever (the DB session index never got idled).
+        // Home now reads ONLY ConnectionManager.isRoomWorking — the relay's
+        // per-room broadcast — which has no such blind spot.
+        final ch = _ControllableChannel();
+        final storage = _FakeStorage([_peerA]);
+        final conn = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: storage,
+          emitDebounce: Duration.zero,
+        );
+        final prefs = Preferences(_FakeSecureStorage());
+        final vm = HomeViewModel(storage, prefs, conn);
+        await conn.connectTo(_peerA);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
 
-      // SyncService writes this when the agent starts working.
-      await LocalBoxes().sessionsIndexBox().put(
-        '${_peerA.remoteEpk}:main',
-        SessionIndexRecord(
-          epk: _peerA.remoteEpk,
-          roomId: 'main',
-          status: SessionActivity.working,
-        ).toJson(),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(vm.isRoomWorking(_peerA.remoteEpk, 'main'), isTrue);
+        // Room comes online idle.
+        ch.pushControl(const RoomAnnounced(
+          peer: 'epk_A',
+          roomId: 'r1',
+          startedAt: 1,
+        ));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(vm.isRoomWorking('epk_A', 'r1'), isFalse);
 
-      // Back to idle clears it.
-      await LocalBoxes().sessionsIndexBox().put(
-        '${_peerA.remoteEpk}:main',
-        SessionIndexRecord(
-          epk: _peerA.remoteEpk,
-          roomId: 'main',
-          status: SessionActivity.idle,
-        ).toJson(),
-      );
-      await Future<void>.delayed(Duration.zero);
-      expect(vm.isRoomWorking(_peerA.remoteEpk, 'main'), isFalse);
-      vm.dispose();
-    });
+        // turn_start → relay broadcasts meta.working=true.
+        ch.pushControl(const RoomMetaUpdated(
+          peer: 'epk_A',
+          roomId: 'r1',
+          working: true,
+          hasModel: false,
+          hasThinking: false,
+        ));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(vm.isRoomWorking('epk_A', 'r1'), isTrue);
+
+        // turn_end → meta.working=false → dot goes back off (this is the
+        // case that previously stayed blue forever).
+        ch.pushControl(const RoomMetaUpdated(
+          peer: 'epk_A',
+          roomId: 'r1',
+          working: false,
+          hasModel: false,
+          hasThinking: false,
+        ));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(vm.isRoomWorking('epk_A', 'r1'), isFalse);
+
+        vm.dispose();
+        await conn.disconnect();
+        conn.dispose();
+      },
+    );
 
     test('initial state is HomeLoading', () {
       final storage = _FakeStorage([_peerA]);
       final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
+      final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
       expect(vm.state, isA<HomeLoading>());
       vm.dispose();
     });
@@ -181,12 +222,7 @@ void main() {
     test('empty storage → HomeNoPeer', () async {
       final storage = _FakeStorage([]);
       final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
+      final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
       await Future<void>.delayed(Duration.zero);
       expect(vm.state, isA<HomeNoPeer>());
       vm.dispose();
@@ -195,12 +231,7 @@ void main() {
     test('two peers → HomeList containing both', () async {
       final storage = _FakeStorage([_peerA, _peerB]);
       final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
+      final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
       await Future<void>.delayed(Duration.zero);
 
       final s = vm.state as HomeList;
@@ -212,12 +243,7 @@ void main() {
     test('openSession writes selectedPeerEpk to Preferences', () async {
       final storage = _FakeStorage([_peerA, _peerB]);
       final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
+      final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
       await Future<void>.delayed(Duration.zero);
 
       await vm.openSession('epk_B');
@@ -240,7 +266,7 @@ void main() {
           },
           storage: storage,
         );
-        final vm = HomeViewModel(storage, prefs, conn, _home());
+        final vm = HomeViewModel(storage, prefs, conn);
         await Future<void>.delayed(Duration.zero);
 
         await vm.openSession('epk_B');
@@ -264,12 +290,7 @@ void main() {
     test('openSession with unknown epk is a no-op', () async {
       final storage = _FakeStorage([_peerA]);
       final prefs = Preferences(_FakeSecureStorage());
-      final vm = HomeViewModel(
-        storage,
-        prefs,
-        _conn(storage: storage),
-        _home(),
-      );
+      final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
       await Future<void>.delayed(Duration.zero);
 
       await vm.openSession('epk_unknown');
@@ -285,12 +306,7 @@ void main() {
       () async {
         final storage = _FakeStorage([_peerA]);
         final prefs = Preferences(_FakeSecureStorage());
-        final vm = HomeViewModel(
-          storage,
-          prefs,
-          _conn(storage: storage),
-          _home(),
-        );
+        final vm = HomeViewModel(storage, prefs, _conn(storage: storage));
         await Future<void>.delayed(Duration.zero);
 
         // Seed prefs with a DIFFERENT room (simulating the previous

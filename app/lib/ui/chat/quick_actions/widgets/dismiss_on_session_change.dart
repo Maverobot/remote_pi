@@ -31,7 +31,7 @@ class _DismissOnSessionChangeState extends State<DismissOnSessionChange> {
   }
 
   static ({String epk, String roomId})? _key(
-    ({String epk, String roomId, String title})? c,
+    ({String epk, String roomId, String title, String device, bool online})? c,
   ) => c == null ? null : (epk: c.epk, roomId: c.roomId);
 
   void _onChange() {

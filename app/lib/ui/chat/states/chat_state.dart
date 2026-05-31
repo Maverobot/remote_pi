@@ -37,6 +37,13 @@ class ChatReady extends ChatState {
   /// reports.
   final PresenceState peerPresence;
 
+  /// Plan/32 — whether the room this chat is viewing has an in-flight
+  /// agent turn (drives the working pill + input-lock + stop button).
+  /// Part of the state identity so a relay `meta.working` flip (which is
+  /// per-room, like Home) actually triggers a rebuild even when nothing
+  /// else changed. See [ChatViewModel.isWorking].
+  final bool isWorking;
+
   const ChatReady({
     required this.messages,
     this.streaming,
@@ -44,6 +51,7 @@ class ChatReady extends ChatState {
     this.pairingRevoked = false,
     this.peerOfflineReason,
     this.peerPresence = const PresenceUnknown(),
+    this.isWorking = false,
   });
 
   ChatReady copyWith({
@@ -53,6 +61,7 @@ class ChatReady extends ChatState {
     bool? pairingRevoked,
     String? peerOfflineReason,
     PresenceState? peerPresence,
+    bool? isWorking,
     bool clearStreaming = false,
     bool clearPeerOffline = false,
   }) =>
@@ -65,6 +74,7 @@ class ChatReady extends ChatState {
             ? null
             : (peerOfflineReason ?? this.peerOfflineReason),
         peerPresence: peerPresence ?? this.peerPresence,
+        isWorking: isWorking ?? this.isWorking,
       );
 
   @override
@@ -75,7 +85,8 @@ class ChatReady extends ChatState {
       other.isOffline == isOffline &&
       other.pairingRevoked == pairingRevoked &&
       other.peerOfflineReason == peerOfflineReason &&
-      other.peerPresence.runtimeType == peerPresence.runtimeType;
+      other.peerPresence.runtimeType == peerPresence.runtimeType &&
+      other.isWorking == isWorking;
 
   @override
   int get hashCode => Object.hash(
@@ -85,6 +96,7 @@ class ChatReady extends ChatState {
         pairingRevoked,
         peerOfflineReason,
         peerPresence.runtimeType,
+        isWorking,
       );
 }
 

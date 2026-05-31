@@ -29,12 +29,31 @@ class ChatPage extends StatelessWidget {
   /// arrives.
   final String? initialTitle;
 
+  /// Plan/32g — the paired-device (Mac) label Home already knows, passed via
+  /// `extra` / [SessionSelection]. Drives the AppBar's line 2 immediately so
+  /// it never flickers empty/room-title while the PeerRecord loads async.
+  /// When the PeerRecord arrives it resolves to the same string, so there's no
+  /// visible change.
+  final String? initialDevice;
+
+  /// Plan/32g — the live state of the tile Home tapped (its green dot). Seeds
+  /// the AppBar status dot so it doesn't flash "reconnecting" before the VM
+  /// reads the real runtime. Superseded by the live signal once it resolves
+  /// ([ChatViewModel.connectionResolved]).
+  final bool initialOnline;
+
   /// Plan/tablet — `false` when the chat is embedded as the tablet's
   /// detail pane (no navigation stack to pop back to). Hides the back
   /// arrow; defaults to `true` for the phone full-screen route.
   final bool showBack;
 
-  const ChatPage({super.key, this.initialTitle, this.showBack = true});
+  const ChatPage({
+    super.key,
+    this.initialTitle,
+    this.initialDevice,
+    this.initialOnline = false,
+    this.showBack = true,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -71,11 +90,16 @@ class ChatPage extends StatelessWidget {
     final vm = context.watch<ChatViewModel>();
     final peer = vm.activePeer;
     final room = vm.activeRoom;
-    final isOnline = vm.isRoomLive;
+    // Plan/32g — until the VM has read a real runtime, trust the `initialOnline`
+    // hint Home passed (the tile's live dot) so the status dot doesn't flash
+    // "reconnecting" on the default runtime. The live signal takes over once
+    // resolved.
+    final resolved = vm.connectionResolved;
+    final isOnline = resolved ? vm.isRoomLive : initialOnline;
     // Plan-18 follow-up — when the chat is "offline" (WS to relay
     // down or retrying), prefer a "reconectando" amber pill so the
     // user knows it's the relay, not the Pi cwd, that's gone.
-    final isReconnecting = state is ChatReady && (state).isOffline;
+    final isReconnecting = resolved && state is ChatReady && (state).isOffline;
     // Plan-18 follow-up — when the agent is currently producing a
     // response, show "working…" instead of online/offline.
     final isWorking = vm.isWorking;
@@ -85,7 +109,10 @@ class ChatPage extends StatelessWidget {
     // the generic placeholders when the ViewModel hasn't finished
     // bootstrapping yet.
     final roomName = _roomDisplayName(room, state, initialTitle);
-    final peerLabel = _peerDisplayName(peer, initialTitle);
+    // Plan/32g — line 2 (device) falls back to `initialDevice` (the Mac name
+    // Home passed), NOT `initialTitle` (the room name) — so it shows the right
+    // device from frame 1 and doesn't flip when the PeerRecord loads.
+    final peerLabel = _peerDisplayName(peer, initialDevice);
 
     return Container(
       height: 56,
@@ -185,12 +212,22 @@ class ChatPage extends StatelessWidget {
               ],
             ),
           ),
-          if (peer != null)
-            IconButton(
-              icon: const Icon(LucideIcons.info, size: 18, color: kMuted2),
-              tooltip: 'Session info',
-              onPressed: () => _showSessionInfo(context, peer, room, roomName),
-            ),
+          // Plan/32g follow-up: ALWAYS render the info button. Gating it on the
+          // async PeerRecord made it pop in on load → an AppBar layout shift
+          // (the flicker the user saw). Title + device already render from the
+          // nav hints, so the bar is stable from frame 1. The dialog needs the
+          // loaded PeerRecord; we read it at tap time (loaded within ms of
+          // mount for the connection) and no-op in the unlikely pre-load tap.
+          IconButton(
+            icon: const Icon(LucideIcons.info, size: 18, color: kMuted2),
+            tooltip: 'Session info',
+            onPressed: () {
+              final p = vm.activePeer;
+              if (p != null) {
+                _showSessionInfo(context, p, vm.activeRoom, roomName);
+              }
+            },
+          ),
         ],
       ),
     );
@@ -276,11 +313,12 @@ class ChatPage extends StatelessWidget {
     return 'Remote Pi';
   }
 
-  static String _peerDisplayName(PeerRecord? peer, String? initialTitle) {
+  static String _peerDisplayName(PeerRecord? peer, String? fallback) {
     if (peer == null) {
-      // Plan/24-fix-title: while the ViewModel hasn't loaded the
-      // PeerRecord yet, fall back to whatever Home passed us.
-      if (initialTitle != null && initialTitle.isNotEmpty) return initialTitle;
+      // Plan/32g: while the ViewModel hasn't loaded the PeerRecord yet, fall
+      // back to the device label Home passed (initialDevice) — same value the
+      // PeerRecord resolves to, so no flicker on load.
+      if (fallback != null && fallback.isNotEmpty) return fallback;
       return '—';
     }
     if (peer.nickname != null && peer.nickname!.isNotEmpty) {
@@ -314,13 +352,25 @@ class ChatPage extends StatelessWidget {
         actionLabel: 'Re-pair',
         onAction: () => context.go('/pair'),
       ),
-      ChatReady(:final messages, :final streaming) => _MessageList(
-        messages: hideToolCalls
+      ChatReady(:final messages, :final streaming) => () {
+        final visible = hideToolCalls
             ? messages.where((m) => m is! ToolEvent).toList()
-            : messages,
-        streaming: streaming,
-        onDecide: (id, decision) => vm.approveTool(id, decision),
-      ),
+            : messages;
+        // Empty body → the default placeholder (Pi brand icon + "Nothing
+        // here"), shown whenever there's nothing to render — including while
+        // reconnecting (the reconnect handshake never swaps the body).
+        if (visible.isEmpty && streaming == null) {
+          return const _EmptyState(
+            icon: LucideIcons.terminal,
+            message: 'Nothing here',
+          );
+        }
+        return _MessageList(
+          messages: visible,
+          streaming: streaming,
+          onDecide: (id, decision) => vm.approveTool(id, decision),
+        );
+      }(),
     };
   }
 
@@ -476,7 +526,7 @@ class ChatPage extends StatelessWidget {
 
 // ---------------------------------------------------------------------------
 
-class _MessageList extends StatefulWidget {
+class _MessageList extends StatelessWidget {
   final List<ChatMessage> messages;
   final StreamingMessage? streaming;
   final void Function(String, ApproveDecision) onDecide;
@@ -488,74 +538,42 @@ class _MessageList extends StatefulWidget {
   });
 
   @override
-  State<_MessageList> createState() => _MessageListState();
-}
-
-class _MessageListState extends State<_MessageList> {
-  final _scroll = ScrollController();
-  bool _userScrolled = false;
-
-  @override
-  void initState() {
-    super.initState();
-    _scroll.addListener(() {
-      if (_scroll.position.userScrollDirection.name == 'reverse') {
-        _userScrolled = true;
-      }
-      if (_scroll.position.pixels < 20) _userScrolled = false;
-    });
-  }
-
-  @override
-  void didUpdateWidget(_MessageList old) {
-    super.didUpdateWidget(old);
-    if (!_userScrolled) _scrollToBottom();
-  }
-
-  void _scrollToBottom() {
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(
-          0,
-          duration: const Duration(milliseconds: 200),
-          curve: Curves.easeOut,
-        );
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _scroll.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final itemCount =
-        widget.messages.length + (widget.streaming != null ? 1 : 0);
+    final itemCount = messages.length + (streaming != null ? 1 : 0);
 
+    // `reverse: true` anchors the viewport to the bottom (offset 0 = newest)
+    // and keeps it there as content arrives — no manual scroll-to-bottom is
+    // needed. The previous animateTo-on-every-rebuild fought this and caused
+    // overlapping animations (flicker / runaway scroll) during streaming.
     return ListView.separated(
-      controller: _scroll,
       reverse: true,
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
       itemCount: itemCount,
       separatorBuilder: (context, idx) => const SizedBox(height: 14),
       itemBuilder: (_, i) {
-        // Index 0 = bottom = newest
-        if (widget.streaming != null && i == 0) {
-          return StreamingBubble(widget.streaming!);
+        // Index 0 = bottom = newest. Stable keys are REQUIRED here: when the
+        // streaming bubble appears/disappears at index 0 every other item's
+        // index shifts by 1, and without keys Flutter re-matches elements by
+        // position — briefly painting the wrong message at a slot (the
+        // momentary C/B/A → B/C/A reorder). Keying by message id makes it
+        // match by identity instead.
+        if (streaming != null && i == 0) {
+          return KeyedSubtree(
+            key: const ValueKey('streaming'),
+            child: StreamingBubble(streaming!),
+          );
         }
-        final msgIdx =
-            widget.messages.length -
-            1 -
-            (i - (widget.streaming != null ? 1 : 0));
-        final msg = widget.messages[msgIdx];
-        return switch (msg) {
-          UserMsg() => UserBubble(msg),
-          AssistantMsg() => AssistantBubble(msg),
-          ToolEvent() => ToolRequestCard(tool: msg, onDecide: widget.onDecide),
-        };
+        final msgIdx = messages.length - 1 - (i - (streaming != null ? 1 : 0));
+        final msg = messages[msgIdx];
+        return KeyedSubtree(
+          key: ValueKey(msg.id),
+          child: switch (msg) {
+            UserMsg() => UserBubble(msg),
+            AssistantMsg() => AssistantBubble(msg),
+            ToolEvent() => ToolRequestCard(tool: msg, onDecide: onDecide),
+            CompactionMsg() => CompactionBubble(msg),
+          },
+        );
       },
     );
   }

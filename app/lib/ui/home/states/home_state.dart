@@ -1,6 +1,6 @@
 import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart';
-import 'package:flutter/foundation.dart' show listEquals, mapEquals, setEquals;
+import 'package:flutter/foundation.dart' show listEquals, mapEquals;
 
 sealed class HomeState {
   const HomeState();
@@ -58,30 +58,20 @@ class HomeList extends HomeState {
   final Map<String, PresenceState> statusByEpk;
   final Map<String, List<RoomInfo>> roomsByPeer;
 
-  /// Plan/31 — set of `<standard-epk>:<roomId>` whose session is `working`
-  /// (from the DB session index). Part of the state's identity so a working
-  /// change actually triggers a rebuild — without it, an otherwise-identical
-  /// HomeList would compare equal and `emit` would no-op (the working dot
-  /// would never light up).
-  final Set<String> workingKeys;
-
   const HomeList({
     required this.peers,
     this.statusByEpk = const {},
     this.roomsByPeer = const {},
-    this.workingKeys = const {},
   });
 
   HomeList copyWith({
     List<PeerRecord>? peers,
     Map<String, PresenceState>? statusByEpk,
     Map<String, List<RoomInfo>>? roomsByPeer,
-    Set<String>? workingKeys,
   }) => HomeList(
     peers: peers ?? this.peers,
     statusByEpk: statusByEpk ?? this.statusByEpk,
     roomsByPeer: roomsByPeer ?? this.roomsByPeer,
-    workingKeys: workingKeys ?? this.workingKeys,
   );
 
   /// Flatten to a single ordered list of items: one row per (peer, room).
@@ -144,8 +134,7 @@ class HomeList extends HomeState {
       other is HomeList &&
       listEquals(other.peers, peers) &&
       mapEquals(other.statusByEpk, statusByEpk) &&
-      mapEquals(other.roomsByPeer, roomsByPeer) &&
-      setEquals(other.workingKeys, workingKeys);
+      mapEquals(other.roomsByPeer, roomsByPeer);
 
   @override
   int get hashCode => Object.hash(
@@ -156,6 +145,5 @@ class HomeList extends HomeState {
     Object.hashAllUnordered(
       roomsByPeer.entries.map((e) => '${e.key}:${e.value.length}'),
     ),
-    Object.hashAllUnordered(workingKeys),
   );
 }

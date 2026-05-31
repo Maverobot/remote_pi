@@ -22,22 +22,33 @@ class ToolRequestCard extends StatelessWidget {
 
   const ToolRequestCard({super.key, required this.tool, this.onDecide});
 
+  /// Plan/32 — one color drives the whole card so the outcome is unmistakable:
+  /// running → blue, done → green, failed → red, denied/expired → grey.
+  Color get _statusColor => switch (tool.status) {
+    ToolEventStatus.pending || ToolEventStatus.allowed => kAccent,
+    ToolEventStatus.completed => kSuccess,
+    ToolEventStatus.failed => kError,
+    ToolEventStatus.denied || ToolEventStatus.expired => kMuted,
+  };
+
   @override
   Widget build(BuildContext context) {
-    final isRunning = tool.status == ToolEventStatus.pending ||
-        tool.status == ToolEventStatus.allowed;
-    final opacity = isRunning ? 1.0 : 0.65;
+    final color = _statusColor;
+    // Dim only the inert states (denied/expired); keep done/failed at full
+    // opacity so their green/red read clearly.
+    final dimmed = tool.status == ToolEventStatus.denied ||
+        tool.status == ToolEventStatus.expired;
 
     return Opacity(
-      opacity: opacity,
+      opacity: dimmed ? 0.65 : 1.0,
       child: Container(
         decoration: BoxDecoration(
           color: kSurface,
-          border: Border.all(color: kAccent, width: 1),
+          border: Border.all(color: color, width: 1),
           borderRadius: BorderRadius.circular(12),
           boxShadow: [
             BoxShadow(
-              color: kAccent.withValues(alpha: 0.13),
+              color: color.withValues(alpha: 0.13),
               blurRadius: 20,
               spreadRadius: 1,
             ),
@@ -48,49 +59,49 @@ class ToolRequestCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: [
-            _buildHeader(),
+            _buildHeader(color),
             const SizedBox(height: 10),
             _buildCodeBlock(),
             const SizedBox(height: 8),
-            _buildOutcome(),
+            _buildOutcome(color),
           ],
         ),
       ),
     );
   }
 
-  Widget _buildHeader() {
+  Widget _buildHeader(Color color) {
     final statusLabel = switch (tool.status) {
-      ToolEventStatus.pending => 'RUNNING',
-      ToolEventStatus.allowed => 'RUNNING',
+      ToolEventStatus.pending || ToolEventStatus.allowed => 'RUNNING',
+      ToolEventStatus.completed => 'DONE',
+      ToolEventStatus.failed => 'FAILED',
       ToolEventStatus.denied => 'DENIED',
       ToolEventStatus.expired => 'EXPIRED',
-      ToolEventStatus.completed => 'DONE',
     };
 
     return Row(
       children: [
         CustomPaint(
           size: const Size(14, 14),
-          painter: _TerminalIconPainter(color: kAccent),
+          painter: _TerminalIconPainter(color: color),
         ),
         const SizedBox(width: 8),
         Text(
           tool.tool.toUpperCase(),
-          style: const TextStyle(
+          style: TextStyle(
             fontFamily: kMono,
             fontSize: 11.5,
-            color: kAccent,
+            color: color,
             letterSpacing: 0.6,
           ),
         ),
         const Spacer(),
         Text(
           statusLabel,
-          style: const TextStyle(
+          style: TextStyle(
             fontFamily: kMono,
             fontSize: 10,
-            color: kMuted,
+            color: color,
             letterSpacing: 0.4,
           ),
         ),
@@ -119,16 +130,13 @@ class ToolRequestCard extends StatelessWidget {
     );
   }
 
-  Widget _buildOutcome() {
+  Widget _buildOutcome(Color color) {
     final text = switch (tool.status) {
       ToolEventStatus.pending || ToolEventStatus.allowed => '⏳ Running…',
       ToolEventStatus.completed => '✓ Done',
+      ToolEventStatus.failed => '✗ ${tool.error ?? "Failed"}',
       ToolEventStatus.denied => '✗ ${tool.error ?? "Denied"}',
       ToolEventStatus.expired => '✗ Expired',
-    };
-    final color = switch (tool.status) {
-      ToolEventStatus.denied || ToolEventStatus.expired => kMuted,
-      _ => kSuccess,
     };
     return Text(
       text,

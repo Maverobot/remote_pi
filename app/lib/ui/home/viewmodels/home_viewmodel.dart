@@ -1,8 +1,6 @@
 import 'dart:async';
 
-import 'package:app/data/local/records/session_index_record.dart';
 import 'package:app/data/preferences/preferences.dart';
-import 'package:app/data/repositories/home_read_repository.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/data/transport/epk_encoding.dart';
 import 'package:app/pairing/storage.dart';
@@ -25,38 +23,24 @@ class HomeViewModel extends ViewModel<HomeState> {
   final PairingStorage _storage;
   final Preferences _prefs;
   final ConnectionManager _conn;
-  // Plan/31 — the working/idle signal now comes from the DB session index
-  // (written by SyncService), not the old SessionRepository.
-  final HomeReadRepository _home;
   StreamSubscription<Map<String, PresenceState>>? _presenceSub;
   StreamSubscription<Map<String, List<RoomInfo>>>? _roomsSub;
   StreamSubscription<ConnectionStatus>? _statusSub;
-  StreamSubscription<List<SessionIndexRecord>>? _sessionsSub;
   bool _relayConnected = false;
-  // Set of `<standard-epk>:<roomId>` whose session index says `working`.
-  Set<String> _workingKeys = const {};
   bool _disposed = false;
 
-  HomeViewModel(this._storage, this._prefs, this._conn, this._home)
+  HomeViewModel(this._storage, this._prefs, this._conn)
     : super(const HomeLoading()) {
     _relayConnected = _conn.status is StatusOnline;
-    _workingKeys = _workingKeysFrom(_home.snapshot().values);
     _load();
     _presenceSub = _conn.presenceStream.listen(_onPresence);
     _roomsSub = _conn.roomsStream.listen(_onRooms);
     _statusSub = _conn.statusStream.listen(_onStatus);
-    _sessionsSub = _home.watchSessions().listen(_onSessions);
     // Settings (rename / revoke) and pairing flow both write through
     // PairingStorage; listening here keeps Home in sync without manual
     // notifications between screens.
     _storage.addListener(_onStorageChanged);
   }
-
-  static Set<String> _workingKeysFrom(Iterable<SessionIndexRecord> rows) => {
-    for (final r in rows)
-      if (r.status == SessionActivity.working)
-        '${toStandardB64(r.epk)}:${r.roomId}',
-  };
 
   void _onStorageChanged() {
     if (_disposed) return;
@@ -69,23 +53,20 @@ class HomeViewModel extends ViewModel<HomeState> {
   /// no fresh signal on any room.
   bool get isRelayConnected => _relayConnected;
 
-  /// Plan-18 follow-up — `true` when `(epk, roomId)` is the room
-  /// whose agent is currently streaming. Drives the blue "working"
-  /// dot on the corresponding Home tile. Limited to the single
-  /// currently-active room (room-demux drops chunks from non-active
-  /// rooms); a future Pi-side `room_busy` control frame can widen
-  /// this to all rooms.
+  /// `true` when `(epk, roomId)`'s agent is currently mid-turn. Drives
+  /// the blue "working" dot on the Home tile.
+  ///
+  /// Plan/32 — single source of truth: the relay broadcasts `meta.working`
+  /// (turn_start/turn_end from the Pi-extension) to ALL subscribed rooms,
+  /// exactly like presence, so this reflects EVERY session — connected or
+  /// not. We deliberately do NOT OR the DB session index here: that row is
+  /// only kept fresh for the currently-connected room (the SyncService
+  /// writer follows the active connection), so a session that finishes
+  /// while the app is on a DIFFERENT chat would never get its index idled
+  /// and the dot would stay blue forever. The relay flag has no such blind
+  /// spot.
   bool isRoomWorking(String epk, String roomId) =>
-      _workingKeys.contains('${toStandardB64(epk)}:$roomId');
-
-  /// Plan-18 follow-up — expose just the working peer (without room).
-  /// The Home large-title subtitle uses this to flip the global
-  /// status to "Working" when any active room of that peer is
-  /// streaming. Returns the standard-b64 epk of any working session.
-  String? get workingEpk {
-    if (_workingKeys.isEmpty) return null;
-    return _workingKeys.first.split(':').first;
-  }
+      _conn.isRoomWorking(epk, roomId);
 
   Future<void> _load() async {
     final peers = await _storage.listPeers();
@@ -104,7 +85,6 @@ class HomeViewModel extends ViewModel<HomeState> {
         peers: peers,
         statusByEpk: _conn.presenceSnapshot,
         roomsByPeer: _conn.roomsSnapshot,
-        workingKeys: _workingKeys,
       ),
     );
   }
@@ -119,26 +99,6 @@ class HomeViewModel extends ViewModel<HomeState> {
     final s = state;
     if (s is! HomeList) return;
     emit(s.copyWith(roomsByPeer: snapshot));
-  }
-
-  void _onSessions(List<SessionIndexRecord> rows) {
-    final next = _workingKeysFrom(rows);
-    if (_setEquals(next, _workingKeys)) return;
-    _workingKeys = next;
-    final s = state;
-    if (s is HomeList) {
-      // workingKeys is part of HomeList's identity now, so this emit actually
-      // notifies (the dot re-renders).
-      emit(s.copyWith(workingKeys: next));
-    }
-  }
-
-  static bool _setEquals(Set<String> a, Set<String> b) {
-    if (a.length != b.length) return false;
-    for (final x in a) {
-      if (!b.contains(x)) return false;
-    }
-    return true;
   }
 
   void _onStatus(ConnectionStatus status) {
@@ -217,7 +177,6 @@ class HomeViewModel extends ViewModel<HomeState> {
     _presenceSub?.cancel();
     _roomsSub?.cancel();
     _statusSub?.cancel();
-    _sessionsSub?.cancel();
     _storage.removeListener(_onStorageChanged);
     super.dispose();
   }

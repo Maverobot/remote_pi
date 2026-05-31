@@ -9,6 +9,7 @@
 // the finalized message lands in the box on `agent_done`.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:app/data/local/boxes.dart';
@@ -103,10 +104,34 @@ class SyncService extends Service {
   Future<void> activate(String epk, String roomId) async {
     final room = roomId.isEmpty ? 'main' : roomId;
     if (_activeEpk == epk && _activeRoomId == room && _indexLoaded) return;
+    // Genuine session switch: drop the in-memory turn state so the
+    // PREVIOUS session's streaming buffer + whole-turn working flag can't
+    // bleed into the next chat (the bug where chat 2 looked "working"
+    // because chat 1 was mid-turn). We deliberately do NOT clear the
+    // durable session index — the previous room may still be running on
+    // the Pi, and Home keeps showing it via the relay's per-room
+    // `meta.working` broadcast.
+    _resetTurnState();
     _activeEpk = epk;
     _activeRoomId = room;
     await _loadIndex();
     _writeRuntime();
+  }
+
+  /// Clears the in-memory streaming buffer + whole-turn working flag
+  /// (emitting the cleared state so listeners update) WITHOUT touching the
+  /// durable session index. Used on a session switch — see [activate].
+  void _resetTurnState() {
+    _flushTimer?.cancel();
+    _flushTimer = null;
+    _chunkBuffer.clear();
+    _chunkReplyTo = '';
+    _workingReplyTo = null;
+    if (_streaming != null) _emitStreaming(null);
+    if (_working) {
+      _working = false;
+      if (!_workingController.isClosed) _workingController.add(false);
+    }
   }
 
   Future<void> sendMessage(String text, {MessageImage? image}) async {
@@ -218,8 +243,21 @@ class SyncService extends Service {
     _msgSub?.cancel();
     _msgSub = null;
     if (s is StatusOnline) {
+      // Plan/32f — bind this stream's writes to the PEER that owns the
+      // channel RIGHT NOW. After a `switchTo`, a late frame from the OLD
+      // peer's channel must not land in the NEW session's box: `_activeEpk`
+      // has already moved (the chat calls `activate()` before `switchTo`), so
+      // a straggler chat-1 frame would otherwise be written to chat-2's box
+      // and bleed across until chat-2's history re-applied. We capture the
+      // origin epk here and drop frames whose origin is no longer active.
+      //
+      // We gate on epk only — NOT room: rooms of the same peer share one
+      // channel and `_onStatus` doesn't re-fire on a same-peer room switch
+      // (the transport already demuxes by room), so a room gate would wrongly
+      // drop everything after switching cwds on the same Mac.
+      final originEpk = _conn.activePeer?.remoteEpk;
       _msgSub = s.channel.serverMessages.listen(
-        _onServerMessage,
+        (msg) => _onServerMessage(msg, originEpk),
         onError: (Object _, StackTrace _) {},
       );
       // ignore: discarded_futures
@@ -238,7 +276,17 @@ class SyncService extends Service {
     if (_pendingSyncRequest) requestSync();
   }
 
-  void _onServerMessage(ServerMessage msg) {
+  void _onServerMessage(ServerMessage msg, [String? originEpk]) {
+    // Plan/32f — drop frames from a peer whose channel is no longer the active
+    // session (a stale connection still draining after `switchTo`). Without
+    // this, a straggler write targets `_activeEpk` — which already points at
+    // the NEW chat — and bleeds the old session's messages into the new box.
+    // Only gate when BOTH origin and active are set and differ: pre-bind
+    // (`_activeEpk == null`, cold boot before `activate`) must still flow, and
+    // direct test calls without an origin aren't gated.
+    if (originEpk != null && _activeEpk != null && originEpk != _activeEpk) {
+      return;
+    }
     switch (msg) {
       case AgentChunk(:final inReplyTo, :final delta):
         _chunkBuffer.write(delta);
@@ -337,7 +385,7 @@ class SyncService extends Service {
               .copyWith(
                 tool: base.copyWith(
                   status: error != null
-                      ? ToolEventStatus.denied
+                      ? ToolEventStatus.failed
                       : ToolEventStatus.completed,
                   result: result,
                   error: error,
@@ -387,6 +435,9 @@ class SyncService extends Service {
           ),
         );
 
+      case Compaction(:final summary, :final tokensBefore, :final ts):
+        _writeCompaction(summary, tokensBefore, ts);
+
       case Pong():
       case PairOk():
       case PairError():
@@ -395,6 +446,31 @@ class SyncService extends Service {
       case ModelsList():
         break;
     }
+  }
+
+  /// Plan/32 — persist a compaction as a system row so it renders a system
+  /// bubble in the chat and survives a re-sync. Keyed by `ts` when present so
+  /// the live message and its history replay collapse to one row.
+  void _writeCompaction(String summary, int? tokensBefore, int? ts) {
+    final id = 'compaction_${ts ?? uuid7()}';
+    final when = ts != null
+        ? DateTime.fromMillisecondsSinceEpoch(ts)
+        : DateTime.now();
+    // ignore: discarded_futures
+    _upsert(
+      MsgRole.compaction,
+      id,
+      (seq, existing) =>
+          existing ??
+          MessageRecord(
+            id: id,
+            seq: seq,
+            role: MsgRole.compaction,
+            text: summary,
+            tokensBefore: tokensBefore,
+            ts: when,
+          ),
+    );
   }
 
   Future<void> _applyHistory(SessionHistory h) async {
@@ -414,15 +490,47 @@ class SyncService extends Service {
           preserved.add(r);
         }
       }
-      await box.clear();
-      _idToSeq.clear();
-      _nextSeq = 0;
-      _indexLoaded = true;
-      for (final r in [...rows, ...preserved]) {
-        final seq = _nextSeq++;
-        await box.put(seq, r.copyWith(seq: seq).toJson());
-        _idToSeq[_key(r.role, r.id)] = seq;
+      // Desired ordered state: history (seq = index) then preserved pending.
+      final desired = <MessageRecord>[
+        for (var i = 0; i < rows.length; i++) rows[i].copyWith(seq: i),
+        for (var j = 0; j < preserved.length; j++)
+          preserved[j].copyWith(seq: rows.length + j),
+      ];
+      // Reconcile the box to `desired` with the MINIMUM number of writes.
+      //
+      // The old path did `box.clear()` + re-put every row. Hive emits a watch
+      // event per deleted AND per put key, so the read repo re-emitted ~2N
+      // times — tearing the whole list down to EMPTY and rebuilding it — on
+      // EVERY SessionHistory the relay re-delivered (which it does on every
+      // reconnect). That was the flicker/"embaralha e some". Diffing instead
+      // means a re-sent identical history produces ZERO box writes → ZERO
+      // emits → no rebuild; a changed history only rewrites the rows that
+      // actually differ.
+      for (final k in box.keys.toList()) {
+        if ((k as num).toInt() >= desired.length) {
+          await box.delete(k);
+        }
       }
+      for (var i = 0; i < desired.length; i++) {
+        final newJson = desired[i].toJson();
+        final curRaw = box.get(i);
+        // Normalise the stored value through fromJson→toJson so the compare is
+        // independent of however Hive ordered the persisted map.
+        final curNorm = curRaw == null
+            ? null
+            : jsonEncode(MessageRecord.fromJson(_coerce(curRaw)).toJson());
+        if (curNorm != jsonEncode(newJson)) {
+          await box.put(i, newJson);
+        }
+      }
+      _idToSeq
+        ..clear()
+        ..addEntries([
+          for (var i = 0; i < desired.length; i++)
+            MapEntry(_key(desired[i].role, desired[i].id), i),
+        ]);
+      _nextSeq = desired.length;
+      _indexLoaded = true;
     });
     final started = h.sessionStartedAt;
     _updateIndex(
@@ -479,7 +587,7 @@ class SyncService extends Service {
             (m) => m.role == MsgRole.tool && m.tool?.toolCallId == toolCallId,
           );
           final status = error != null
-              ? ToolEventStatus.denied
+              ? ToolEventStatus.failed
               : ToolEventStatus.completed;
           if (idx >= 0) {
             out[idx] = out[idx].copyWith(
@@ -506,6 +614,17 @@ class SyncService extends Service {
               ),
             );
           }
+        case CompactionEvt(:final summary, :final tokensBefore):
+          out.add(
+            MessageRecord(
+              id: 'compaction_${e.ts}',
+              seq: seq++,
+              role: MsgRole.compaction,
+              text: summary,
+              tokensBefore: tokensBefore,
+              ts: DateTime.fromMillisecondsSinceEpoch(e.ts),
+            ),
+          );
       }
     }
     return out;

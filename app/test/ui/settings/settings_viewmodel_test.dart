@@ -276,18 +276,50 @@ void main() {
     });
 
     test(
-      'saveRelayUrl with empty / null clears the override (falls back '
-      'to kDefaultRelayUrl via effectiveRelayUrl)',
+      'saveRelayUrl with empty / null is rejected (URL is now required) and '
+      'does NOT clear the existing override',
       () async {
         final prefs = Preferences(_FakeSecureStorage());
         await prefs.setRelayUrl('https://x.example');
         final vm = SettingsViewModel(_FakeStorage([]), prefs, _conn());
         await Future<void>.delayed(Duration.zero);
 
-        final err = await vm.saveRelayUrl('');
-        expect(err, isNull);
-        expect(prefs.relayUrl, isNull);
+        // Empty → error, override untouched.
+        final emptyErr = await vm.saveRelayUrl('');
+        expect(emptyErr, isNotNull);
+        expect(prefs.relayUrl, 'https://x.example');
+
+        // Whitespace-only → same (trimmed to empty).
+        final blankErr = await vm.saveRelayUrl('   ');
+        expect(blankErr, isNotNull);
+        expect(prefs.relayUrl, 'https://x.example');
+
+        // null → same.
+        final nullErr = await vm.saveRelayUrl(null);
+        expect(nullErr, isNotNull);
+        expect(prefs.relayUrl, 'https://x.example');
+
+        vm.dispose();
+      },
+    );
+
+    test(
+      'relayUrlOverride defaults to kDefaultRelayUrl (pre-fill for the '
+      '"use default" button) and reflects a saved override',
+      () async {
+        final prefs = Preferences(_FakeSecureStorage());
+        final vm = SettingsViewModel(_FakeStorage([]), prefs, _conn());
+        await Future<void>.delayed(Duration.zero);
+
+        // No override yet → the field pre-fills with the default endpoint.
+        expect(vm.relayUrlOverride, kDefaultRelayUrl);
         expect(vm.effectiveRelayUrl, kDefaultRelayUrl);
+
+        // Saving the default URL explicitly is valid (what the button does).
+        final err = await vm.saveRelayUrl(kDefaultRelayUrl);
+        expect(err, isNull);
+        expect(vm.relayUrlOverride, kDefaultRelayUrl);
+        expect(prefs.relayUrl, kDefaultRelayUrl);
 
         vm.dispose();
       },

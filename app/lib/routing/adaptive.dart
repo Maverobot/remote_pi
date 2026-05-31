@@ -69,9 +69,11 @@ class ShellLayout extends ChangeNotifier {
 /// toque. Vive enquanto o app roda (não é restaurada entre execuções, já
 /// que queremos iniciar sempre sem seleção).
 class SessionSelection extends ChangeNotifier {
-  ({String epk, String roomId, String title})? _current;
+  ({String epk, String roomId, String title, String device, bool online})?
+  _current;
 
-  ({String epk, String roomId, String title})? get current => _current;
+  ({String epk, String roomId, String title, String device, bool online})?
+  get current => _current;
 
   /// `true` se `(epk, roomId)` é a sessão selecionada agora.
   bool matches(String epk, String roomId) {
@@ -79,12 +81,31 @@ class SessionSelection extends ChangeNotifier {
     return c != null && c.epk == epk && c.roomId == roomId;
   }
 
-  void select(String epk, String roomId, String title) {
+  /// Plan/32g — `device` é o nome do dispositivo pareado (nickname /
+  /// sessionName) que o Home já conhece; o detail-pane do tablet o repassa pro
+  /// `ChatPage.initialDevice` pra renderizar a linha 2 da AppBar de cara, sem
+  /// esperar o PeerRecord assíncrono. `online` é o estado live do tile (verde),
+  /// repassado pro `ChatPage.initialOnline` pra o ponto de status não piscar
+  /// "reconnecting" no boot do runtime. Ambos opcionais pra não quebrar
+  /// chamadas legadas/testes que só passam o título.
+  void select(
+    String epk,
+    String roomId,
+    String title, [
+    String device = '',
+    bool online = false,
+  ]) {
     final c = _current;
     if (c != null && c.epk == epk && c.roomId == roomId) {
       return; // no-op — evita rebuild do detail/master
     }
-    _current = (epk: epk, roomId: roomId, title: title);
+    _current = (
+      epk: epk,
+      roomId: roomId,
+      title: title,
+      device: device,
+      online: online,
+    );
     notifyListeners();
   }
 

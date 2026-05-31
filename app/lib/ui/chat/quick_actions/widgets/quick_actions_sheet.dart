@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app/config/dependencies.dart';
+import 'package:app/data/actions/actions_repository.dart' show ActionFailure;
 import 'package:app/protocol/protocol.dart';
 import 'package:app/routing/adaptive.dart';
 import 'package:app/ui/app_theme.dart';
@@ -90,8 +91,6 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
 
   void _showError(String message) => _toast(message, Colors.redAccent);
 
-  void _showSuccess(String message) => _toast(message, kAccent);
-
   /// Toasts go through the chat scaffold's messenger (captured before the
   /// sheet opened) so success/failure feedback survives the sheet being
   /// popped on success.
@@ -179,16 +178,24 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
       // the sheet open so the user can retry.
       return;
     }
-    // action_ok — close the sheet and confirm with a toast.
+    // action_ok — just close the sheet (no success toast: compacting is a
+    // quiet, frequent action and the toast was noise).
     if (!mounted) return;
     Navigator.of(context).pop();
-    _showSuccess('Context compacted');
   }
 
   Future<void> _onNewSession(QuickActionsViewModel vm) async {
+    // Close the sheet up front — the confirm dialog stands on its own. We
+    // capture the root navigator BEFORE popping (our own context dies with
+    // the sheet) so the dialog is shown on the root, same as before. Toasts
+    // use `widget.messenger`, which outlives the sheet.
+    final rootNavigator = Navigator.of(context, rootNavigator: true);
+    Navigator.of(context).pop();
     final confirm = await showDialog<bool>(
-      context: context,
-      builder: (_) => AlertDialog(
+      context: rootNavigator.context,
+      // Pop via the dialog's OWN context (dCtx) — Cancel/Start close the
+      // dialog regardless of which navigator it sits on.
+      builder: (dCtx) => AlertDialog(
         backgroundColor: kBg,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(8),
@@ -205,7 +212,7 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
+            onPressed: () => Navigator.of(dCtx).pop(false),
             child: const Text(
               'Cancel',
               style: TextStyle(fontFamily: kMono, color: kMuted),
@@ -216,7 +223,7 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
               backgroundColor: kAccent,
               foregroundColor: Colors.black,
             ),
-            onPressed: () => Navigator.of(context).pop(true),
+            onPressed: () => Navigator.of(dCtx).pop(true),
             child: const Text('Start new', style: TextStyle(fontFamily: kMono)),
           ),
         ],
@@ -225,17 +232,18 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
     if (confirm != true) return;
     try {
       await vm.newSession();
+    } on ActionFailure catch (e) {
+      // The sheet is already closed, so its `vm.errors` listener is gone —
+      // surface the failure toast directly through the captured messenger.
+      _showError(e.message);
+      return;
     } catch (_) {
-      // Failure already surfaced as an error toast via `vm.errors`; leave
-      // the sheet open so the user can retry.
       return;
     }
     // action_ok — wipe the local chat mirror so the UI reflects the fresh
-    // session, then close the sheet and confirm with a toast.
+    // session. The sheet is already closed; no success toast (quiet action,
+    // the cleared chat is feedback enough).
     await widget.onSessionReset?.call();
-    if (!mounted) return;
-    Navigator.of(context).pop();
-    _showSuccess('New session started');
   }
 
   Future<void> _onThinking(

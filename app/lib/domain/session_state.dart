@@ -128,7 +128,33 @@ class ToolEvent extends ChatMessage {
   int get hashCode => Object.hash(id, toolCallId, status);
 }
 
-enum ToolEventStatus { pending, allowed, denied, expired, completed }
+/// Plan/32 — `denied` = the user/SDK declined the tool; `failed` = the tool
+/// ran but errored (a distinct, red outcome). `expired` = approval timed out.
+enum ToolEventStatus { pending, allowed, denied, expired, completed, failed }
+
+/// Plan/32 — a context-compaction marker rendered as a system bubble
+/// (distinct from user/assistant). [summary] is the Pi's recap of the
+/// compacted thread; [tokensBefore] is the token count reclaimed (null when
+/// the Pi didn't report it).
+class CompactionMsg extends ChatMessage {
+  final String summary;
+  final int? tokensBefore;
+  const CompactionMsg({
+    required super.id,
+    required this.summary,
+    this.tokensBefore,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is CompactionMsg &&
+      other.id == id &&
+      other.summary == summary &&
+      other.tokensBefore == tokensBefore;
+
+  @override
+  int get hashCode => Object.hash(id, summary, tokensBefore);
+}
 
 // ---------------------------------------------------------------------------
 // StreamingMessage — accumulated deltas while the assistant is typing

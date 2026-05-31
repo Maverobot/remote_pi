@@ -1,6 +1,9 @@
+import 'package:app/routing/adaptive.dart';
 import 'package:app/ui/app_theme.dart';
+import 'package:app/ui/chat/quick_actions/widgets/dismiss_on_session_change.dart';
 import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
+import 'package:provider/provider.dart';
 
 /// Plan/30 — which source the user picked from the attach sheet (#2).
 enum AttachSource { camera, gallery }
@@ -10,6 +13,10 @@ enum AttachSource { camera, gallery }
 /// [AttachSource], or null if dismissed. Pure UI — the caller drives the
 /// picker ViewModel with the result.
 Future<AttachSource?> showAttachSheet(BuildContext context) {
+  // Auto-close if the tablet's selected session changes out from under the
+  // sheet (same fix as the Quick Actions sheet — the modal lives on the
+  // detail-pane navigator and would otherwise orphan over a different chat).
+  final selection = context.read<SessionSelection>();
   return showModalBottomSheet<AttachSource>(
     context: context,
     backgroundColor: kBg,
@@ -19,7 +26,10 @@ Future<AttachSource?> showAttachSheet(BuildContext context) {
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
     ),
-    builder: (ctx) => const _AttachSheetBody(),
+    builder: (ctx) => DismissOnSessionChange(
+      selection: selection,
+      child: const _AttachSheetBody(),
+    ),
   );
 }
 

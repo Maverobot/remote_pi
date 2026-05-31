@@ -49,9 +49,12 @@ class ChatViewModel extends ViewModel<ChatState> {
   ConnectionStatus? _lastStatus;
 
   ChatViewModel(this._read, this._sync, this._conn, this._prefs, this._storage)
-    : super(const ChatConnecting()) {
-    _streaming = _sync.streaming;
-    _working = _sync.isWorking;
+    : super(const ChatReady(messages: [])) {
+    // Plan/32f — do NOT seed _streaming/_working from the shared SyncService
+    // here: it may still be bound to the PREVIOUS chat (this VM is recreated
+    // on session switch, before _bootstrap rebinds via activate). Seeding now
+    // would briefly paint the old chat's streaming bubble / working pill. We
+    // seed AFTER activate() in _bootstrap, when the sync owns THIS session.
     _streamingSub = _sync.streamingStream.listen(_onStreaming);
     _workingSub = _sync.workingStream.listen(_onWorking);
     _eventSub = _sync.events.listen(_onEvent);
@@ -80,10 +83,22 @@ class ChatViewModel extends ViewModel<ChatState> {
     return _conn.isRoomLive(epk, _activeRoomId);
   }
 
-  /// Whole-turn working signal (send/echo → agent_done), from the SyncService.
-  /// Falls back to the streaming presence so the pill is blue even if a
-  /// reconnect dropped the flag mid-turn.
-  bool get isWorking => _working || _streaming != null;
+  /// Whole-turn working signal for the room THIS chat is viewing — the
+  /// same mechanism as the Home dot. The relay broadcasts `meta.working`
+  /// per-room (turn_start/turn_end), so switching to another chat never
+  /// inherits the previous one's working state (previously `_working`
+  /// was a single global flag that leaked across sessions).
+  ///
+  /// OR'd with the local SyncService signals for the CONNECTED session:
+  /// `_working` is set optimistically on send (before the relay's
+  /// turn_start round-trips) and `_streaming != null` keeps the pill blue
+  /// during token flow — both are reset by [SyncService.activate] on a
+  /// session switch, so they only ever refer to the current chat.
+  bool get isWorking {
+    final epk = _activePeer?.remoteEpk;
+    final roomWorking = epk != null && _conn.isRoomWorking(epk, _activeRoomId);
+    return roomWorking || _working || _streaming != null;
+  }
 
   /// The id to `cancel` to stop the in-flight reply (the user message the
   /// agent is answering). Null when idle. Prefers the live streaming target,
@@ -113,6 +128,12 @@ class ChatViewModel extends ViewModel<ChatState> {
     // Bind the writer + watch the DB for this (peer, room).
     await _sync.activate(epk, roomId);
     if (_disposed) return;
+    // Plan/32f — now that the writer owns THIS session (activate reset the
+    // turn state on a switch, or kept it when re-entering the same session),
+    // seed the in-memory streaming/working from it. Doing this here instead of
+    // the constructor avoids inheriting the previous chat's bubble/pill.
+    _streaming = _sync.streaming;
+    _working = _sync.isWorking;
     _conn.switchRoom(roomId);
     _msgsSub = _read.watchMessages(epk, roomId).listen(_onMessages);
     _runtimeSub = _read.watchRuntime(epk, roomId).listen(_onRuntime);
@@ -143,8 +164,16 @@ class ChatViewModel extends ViewModel<ChatState> {
     _recompute();
   }
 
+  /// Plan/32g — `true` once a real runtime (connection/presence) has been read
+  /// from the box. Until then the AppBar trusts the `initialOnline` hint Home
+  /// passed (the tile's live state) so the status dot doesn't flash
+  /// "reconnecting" on the default runtime before the first read.
+  bool get connectionResolved => _connectionResolved;
+  bool _connectionResolved = false;
+
   void _onRuntime(RuntimeRecord r) {
     _runtime = r;
+    _connectionResolved = true;
     _recompute();
   }
 
@@ -172,8 +201,15 @@ class ChatViewModel extends ViewModel<ChatState> {
   }
 
   ChatState _compose() {
+    // No "loading"/connecting screen — once a peer is selected we always
+    // render ChatReady (empty until the DB/stream delivers rows) and just
+    // replace it as updates arrive. The connecting/offline status is shown
+    // inline (banner + presence dot via isOffline/peerPresence), never as a
+    // full-screen spinner, so entering the chat doesn't flicker.
     if (_activePeer == null) {
-      return _bootstrapping ? const ChatConnecting() : const ChatNoPeer();
+      return _bootstrapping
+          ? const ChatReady(messages: [])
+          : const ChatNoPeer();
     }
     final isOnline = _runtime.connection == RuntimeConnection.online;
     final isOffline = !isOnline;
@@ -181,26 +217,14 @@ class ChatViewModel extends ViewModel<ChatState> {
         ? const PresenceOnline() as PresenceState
         : const PresenceOffline(sinceTs: 0);
 
-    final hasContent = _messages.isNotEmpty || _streaming != null;
-    if (hasContent) {
-      return ChatReady(
-        messages: _messages,
-        streaming: _streaming,
-        isOffline: isOffline,
-        pairingRevoked: _pairingRevoked,
-        peerOfflineReason: _peerOfflineReason,
-        peerPresence: peerPresence,
-      );
-    }
-    if (_bootstrapping && _runtime.connection == RuntimeConnection.connecting) {
-      return const ChatConnecting();
-    }
     return ChatReady(
-      messages: const [],
+      messages: _messages,
+      streaming: _streaming,
       isOffline: isOffline,
       pairingRevoked: _pairingRevoked,
       peerOfflineReason: _peerOfflineReason,
       peerPresence: peerPresence,
+      isWorking: isWorking,
     );
   }
 
@@ -220,7 +244,9 @@ class ChatViewModel extends ViewModel<ChatState> {
     final peer = _activePeer;
     if (peer == null) return;
     _peerOfflineReason = null;
-    emit(const ChatConnecting());
+    // No connecting spinner — keep the current messages on screen and let the
+    // status update inline as the connection comes back.
+    _recompute();
     await _conn.switchTo(peer);
   }
 

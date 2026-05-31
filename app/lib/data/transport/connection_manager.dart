@@ -581,6 +581,7 @@ class ConnectionManager extends Service {
         :final startedAt,
         :final model,
         :final thinking,
+        :final working,
       ):
         final key = toStandardB64(peer);
         final list = _roomsByPeer[key] ?? <RoomInfo>[];
@@ -594,10 +595,15 @@ class ConnectionManager extends Service {
         // the previously cached value (if any) survives until the
         // next genuine `room_meta_updated`.
         ThinkingLevel? preservedThinking;
+        // Plan/32 — same preserve convention for `working`: a legacy
+        // relay that omits it (null) keeps the cached value instead of
+        // forcing the room back to idle.
+        var preservedWorking = false;
         final existingIdx = list.indexWhere((r) => r.roomId == roomId);
         if (existingIdx >= 0) {
           preservedName = list[existingIdx].name;
           preservedThinking = list[existingIdx].thinking;
+          preservedWorking = list[existingIdx].working;
         }
         final next = RoomInfo(
           roomId: roomId,
@@ -606,6 +612,7 @@ class ConnectionManager extends Service {
           startedAt: startedAt,
           model: model,
           thinking: thinking ?? preservedThinking,
+          working: working ?? preservedWorking,
         );
         final liveAlready = _liveRoomIds[key]?.contains(roomId) ?? false;
         final identicalEntry = existingIdx >= 0 && list[existingIdx] == next;
@@ -643,6 +650,7 @@ class ConnectionManager extends Service {
         :final roomId,
         :final model,
         :final thinking,
+        :final working,
         :final hasModel,
         :final hasThinking,
       ):
@@ -660,10 +668,21 @@ class ConnectionManager extends Service {
         // would clobber the previously cached model with null.
         final nextModel = hasModel ? model : current.model;
         final nextThinking = hasThinking ? thinking : current.thinking;
-        if (current.model == nextModel && current.thinking == nextThinking) {
+        // Plan/32 — `working` is nullable-as-absent: null preserves the
+        // cached value (e.g. a model-only update must not flip the dot),
+        // non-null sets it. This is what carries the relay's
+        // turn_start/turn_end broadcast to the Home dot for EVERY room.
+        final nextWorking = working ?? current.working;
+        if (current.model == nextModel &&
+            current.thinking == nextThinking &&
+            current.working == nextWorking) {
           break; // dedup: nothing actually changed
         }
-        list[idx] = current.copyWith(model: nextModel, thinking: nextThinking);
+        list[idx] = current.copyWith(
+          model: nextModel,
+          thinking: nextThinking,
+          working: nextWorking,
+        );
         roomsDirty = true;
         // ignore: unawaited_futures
         _persistRoomsForPeer(key);
@@ -687,6 +706,10 @@ class ConnectionManager extends Service {
             startedAt: r.startedAt,
             model: preservedModel,
             thinking: preservedThinking,
+            // Plan/32 — the snapshot is authoritative for live state:
+            // `rooms_of` reads the current registry meta, so its
+            // `working` reflects the latest turn_start/turn_end.
+            working: r.working,
           );
         }
         final newList = byId.values.toList();
@@ -798,6 +821,27 @@ class ConnectionManager extends Service {
     if (_status is! StatusOnline) return false;
     final live = _liveRoomIds[toStandardB64(epk)];
     return live != null && live.contains(roomId);
+  }
+
+  /// Plan/32 — `true` when the relay's last room-meta broadcast for
+  /// `(epk, roomId)` carried `working: true` (an in-flight agent turn).
+  /// Unlike the DB session-index signal (which only covers the single
+  /// connected room), this reflects EVERY subscribed room because the
+  /// relay broadcasts `meta.working` to all room subscribers — the same
+  /// fan-out as presence. Drives the blue Home dot on non-active
+  /// sessions.
+  ///
+  /// Gated on `StatusOnline` (same as [isRoomLive]): a dropped WS means
+  /// we have no fresh signal, so we report not-working and let the tile
+  /// fall back to the amber "reconnecting" / grey state.
+  bool isRoomWorking(String epk, String roomId) {
+    if (_status is! StatusOnline) return false;
+    final list = _roomsByPeer[toStandardB64(epk)];
+    if (list == null) return false;
+    for (final r in list) {
+      if (r.roomId == roomId) return r.working;
+    }
+    return false;
   }
 
   /// Plan-17 follow-up — hydrate `_roomsByPeer` from disk on boot so

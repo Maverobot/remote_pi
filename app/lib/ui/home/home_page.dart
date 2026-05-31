@@ -469,16 +469,43 @@ class HomePage extends StatelessWidget {
     await vm.openSession(peer.remoteEpk, roomId: room.roomId);
     if (!context.mounted) return;
     final title = _titleFor(peer, room);
+    // Plan/32g — the device (Mac) name we already know here. The Chat AppBar's
+    // line 2 renders this immediately instead of flickering empty/room-title
+    // until the PeerRecord loads async.
+    final device = _deviceFor(peer);
+    // Plan/32g — the live state of this tile (the green dot). Passed so the
+    // Chat AppBar's status dot starts correct instead of flashing
+    // "reconnecting" before the runtime is read.
+    final online = vm.isRoomLive(peer.remoteEpk, room.roomId);
     // Mark the UI selection — drives the tablet detail pane AND the
     // highlighted tile. Set AFTER openSession so the detail's fresh
     // ChatViewModel reads the already-updated prefs.
-    context.read<SessionSelection>().select(peer.remoteEpk, room.roomId, title);
+    context.read<SessionSelection>().select(
+      peer.remoteEpk,
+      room.roomId,
+      title,
+      device,
+      online,
+    );
     // Phone: full-screen chat (root push → native back/swipe). Tablet:
     // the detail pane reacts to the selection above — no nav needed.
     if (!isWideLayout(context)) {
-      context.push('/chat', extra: {'title': title});
+      context.push(
+        '/chat',
+        extra: {'title': title, 'device': device, 'online': online},
+      );
     }
   }
+
+  /// Plan/32g — the paired-device label for the Chat AppBar's line 2
+  /// (nickname → sessionName → epk prefix). Mirrors [ChatPage]'s own peer
+  /// resolution so there's no change when the PeerRecord finishes loading.
+  static String _deviceFor(PeerRecord peer) =>
+      (peer.nickname?.isNotEmpty ?? false)
+      ? peer.nickname!
+      : peer.sessionName.isNotEmpty
+      ? peer.sessionName
+      : peer.remoteEpk.substring(0, 8);
 
   /// Plan/24-fix-title: the peer/room label we already know here, so the
   /// Chat AppBar doesn't show '—' / 'Remote Pi' until the ChatViewModel

@@ -117,7 +117,7 @@ class _RelaySectionState extends State<_RelaySection> {
   void initState() {
     super.initState();
     final vm = context.read<SettingsViewModel>();
-    _ctrl = TextEditingController(text: vm.relayUrlOverride ?? '');
+    _ctrl = TextEditingController(text: vm.relayUrlOverride);
   }
 
   @override
@@ -135,10 +135,7 @@ class _RelaySectionState extends State<_RelaySection> {
     if (err == null) {
       messenger.showSnackBar(
         const SnackBar(
-          content: Text(
-            'Relay updated',
-            style: TextStyle(fontFamily: kMono),
-          ),
+          content: Text('Relay updated', style: TextStyle(fontFamily: kMono)),
           duration: Duration(seconds: 2),
         ),
       );
@@ -166,12 +163,13 @@ class _RelaySectionState extends State<_RelaySection> {
                 ),
                 decoration: InputDecoration(
                   isDense: true,
-                  hintText: 'Default Relay ($kDefaultRelayUrl)',
-                  hintStyle:
-                      const TextStyle(fontFamily: kMono, color: kMuted, fontSize: 12),
-                  helperText:
-                      'http(s) only — the app converts to WebSocket '
-                      'internally.',
+                  hintText: 'https://my-relay.example.com',
+                  hintStyle: const TextStyle(
+                    fontFamily: kMono,
+                    color: kMuted,
+                    fontSize: 12,
+                  ),
+                  helperText: 'Current: ${vm.effectiveRelayUrl}',
                   helperStyle: const TextStyle(
                     fontFamily: kMono,
                     fontSize: 10,
@@ -184,7 +182,9 @@ class _RelaySectionState extends State<_RelaySection> {
                     color: Colors.redAccent,
                   ),
                   contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 10, vertical: 10),
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
                   enabledBorder: const OutlineInputBorder(
                     borderSide: BorderSide(color: kBorder),
                   ),
@@ -193,33 +193,42 @@ class _RelaySectionState extends State<_RelaySection> {
                   ),
                 ),
               ),
-              const SizedBox(height: 6),
-              Text(
-                'Current: ${vm.effectiveRelayUrl}',
-                style: const TextStyle(
-                  fontFamily: kMono,
-                  fontSize: 11,
-                  color: kMuted,
-                ),
-              ),
               const SizedBox(height: 10),
               Align(
                 alignment: Alignment.centerLeft,
-                child: FilledButton(
-                  onPressed: _save,
-                  style: FilledButton.styleFrom(
-                    backgroundColor: kAccent,
-                    foregroundColor: Colors.black,
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 18, vertical: 10),
-                    shape: const RoundedRectangleBorder(
-                      borderRadius: BorderRadius.all(Radius.circular(6)),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    FilledButton(
+                      onPressed: _save,
+                      style: FilledButton.styleFrom(
+                        backgroundColor: kAccent,
+                        foregroundColor: Colors.black,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 18,
+                          vertical: 10,
+                        ),
+                        shape: const RoundedRectangleBorder(
+                          borderRadius: BorderRadius.all(Radius.circular(6)),
+                        ),
+                      ),
+                      child: const Text(
+                        'Save',
+                        style: TextStyle(fontFamily: kMono, fontSize: 13),
+                      ),
                     ),
-                  ),
-                  child: const Text(
-                    'Save',
-                    style: TextStyle(fontFamily: kMono, fontSize: 13),
-                  ),
+                    SizedBox(width: 12),
+                    TextButton(
+                      onPressed: () {
+                        _ctrl.text = kDefaultRelayUrl;
+                        _save();
+                      },
+                      child: Text(
+                        'Use default Relay',
+                        style: TextStyle(fontFamily: kMono, fontSize: 13),
+                      ),
+                    ),
+                  ],
                 ),
               ),
             ],
