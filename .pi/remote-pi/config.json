@@ -1,0 +1,4 @@
+{
+  "agent_name": "RemotePi/Leader",
+  "auto_start_relay": true
+}
