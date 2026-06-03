@@ -4,32 +4,23 @@ const GITHUB_URL = "https://github.com/jacobaraujo7/remote_pi";
 
 export function SiteFooter() {
   return (
-    <footer className="border-t border-border-soft bg-bg">
-      <div className="mx-auto flex max-w-6xl flex-col items-start justify-between gap-6 px-6 py-10 text-sm text-muted sm:flex-row sm:items-center">
-        <p className="leading-relaxed">
-          © {new Date().getFullYear()} Flutterando. Remote Pi is open source under the MIT license.
-        </p>
-        <nav className="flex flex-wrap items-center gap-x-5 gap-y-2">
-          <Link href="/terms" className="transition-colors hover:text-fg">
-            Terms of Service
-          </Link>
-          <Link href="/privacy" className="transition-colors hover:text-fg">
-            Privacy Policy
-          </Link>
+    <footer className="footer">
+      <div className="wrap footer-inner">
+        <div className="copy">
+          © {new Date().getFullYear()} <b>Flutterando</b>. Remote Pi is open
+          source under the MIT license.
+        </div>
+        <nav className="footer-links">
+          <Link href="/terms">Terms of Service</Link>
+          <Link href="/privacy">Privacy Policy</Link>
           <a
             href={`${GITHUB_URL}/blob/main/PROTOCOL.md`}
             target="_blank"
             rel="noopener noreferrer"
-            className="transition-colors hover:text-fg"
           >
             Protocol
           </a>
-          <a
-            href={GITHUB_URL}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="transition-colors hover:text-fg"
-          >
+          <a href={GITHUB_URL} target="_blank" rel="noopener noreferrer">
             GitHub
           </a>
         </nav>

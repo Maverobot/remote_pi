@@ -1,6 +1,6 @@
 import { ImageResponse } from "next/og";
 
-export const alt = "Remote Pi — A mesh of coding agents on every machine you work from";
+export const alt = "Remote Pi — Your coding agents, in your pocket";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
@@ -67,7 +67,7 @@ export default function OpengraphImage() {
               lineHeight: 1.1,
             }}
           >
-            A mesh of coding agents on every machine you work from.
+            Your coding agents, in your pocket.
           </div>
           <div
             style={{
@@ -76,7 +76,7 @@ export default function OpengraphImage() {
               lineHeight: 1.4,
             }}
           >
-            Phone-as-authenticator · cross-PC mesh · self-hostable
+            Phone gateway · always-on 24/7 · one mesh, any machine
           </div>
         </div>
       </div>

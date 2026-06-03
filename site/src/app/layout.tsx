@@ -1,23 +1,33 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Space_Grotesk, Hanken_Grotesk, JetBrains_Mono } from "next/font/google";
 import "./globals.css";
 import { SiteHeader } from "@/components/header";
 import { SiteFooter } from "@/components/footer";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const display = Space_Grotesk({
+  variable: "--font-display",
   subsets: ["latin"],
+  weight: ["500", "600", "700"],
+  display: "swap",
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const body = Hanken_Grotesk({
+  variable: "--font-body",
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
+  display: "swap",
 });
 
-const siteTagline =
-  "Remote Pi — A mesh of coding agents across every machine you work from";
+const mono = JetBrains_Mono({
+  variable: "--font-mono",
+  subsets: ["latin"],
+  weight: ["400", "500"],
+  display: "swap",
+});
+
+const siteTagline = "Remote Pi — Your coding agents, in your pocket";
 const siteDescription =
-  "A mesh of coding agents on every machine you work from. Your phone authenticates new peers; the agents talk to each other. Open source, self-hostable.";
+  "Pair your phone once, then drive any Pi coding agent from it — keep a fleet running 24/7 and link every machine into one mesh. Open source, self-hostable.";
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://remote-pi.jacobmoura.work"),
@@ -30,10 +40,11 @@ export const metadata: Metadata = {
   authors: [{ name: "Flutterando", url: "https://flutterando.com.br" }],
   keywords: [
     "Remote Pi",
-    "agent mesh",
     "coding agents",
     "Pi coding agent",
-    "cross-machine coding",
+    "mobile agent control",
+    "24/7 agent daemon",
+    "agent mesh",
     "self-hostable relay",
   ],
   openGraph: {
@@ -58,12 +69,14 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${display.variable} ${body.variable} ${mono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col bg-bg text-fg">
-        <SiteHeader />
-        <main className="flex-1 flex flex-col">{children}</main>
-        <SiteFooter />
+        <div className="app flex min-h-full flex-1 flex-col" id="top">
+          <SiteHeader />
+          <main className="flex-1">{children}</main>
+          <SiteFooter />
+        </div>
       </body>
     </html>
   );
