@@ -35,6 +35,30 @@ documentação do MVP. **Apenas apresentação — não tem lógica de produto.*
 - Não desabilitar lint pra fazer passar — corrigir o erro
 - Não introduzir backend (API routes) sem registrar plano
 
+## Publicação (deploy)
+
+O site roda em produção (`remote-pi.jacobmoura.work`) como **imagem Docker** no
+Docker Hub: `jacobmoura7/remote-pi-site`. O host de produção puxa a tag
+`:latest` — então **publicar = buildar e dar push da imagem**.
+
+```bash
+./push-docker.sh            # build multi-plataforma + push, tag :latest
+./push-docker.sh v1.2.3     # tag :v1.2.3 E :latest
+```
+
+O que o script faz: cria (idempotente) um builder buildx `multiarch`
+(`docker-container`), builda para `linux/amd64,linux/arm64` a partir do
+`Dockerfile` (multi-stage → `next build` com `output: "standalone"`, runtime
+`node:22-alpine` na porta 3000 com healthcheck em `/`) e dá `--push` pro Docker
+Hub.
+
+Pré-requisitos: **`docker login`** (Docker Hub) feito antes, e `docker buildx`
+(vem no Docker moderno). Sem login, o push falha no fim do build.
+
+Fluxo típico de publicação: commit + push no git → `pnpm lint && pnpm build`
+verdes → `./push-docker.sh` → o host redeploya da `:latest`. Passe uma versão
+(`vX.Y.Z`) quando quiser uma tag fixada além da `:latest`.
+
 ## Modo orquestrado
 
 Se receber um prompt começando com `[ORCH:<task-id>]`, leia
