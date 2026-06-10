@@ -1,0 +1,23 @@
+{
+  "name": "remote-pi-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pi package manifest for loading the Remote Pi extension from the monorepo fork.",
+  "workspaces": [
+    "pi-extension"
+  ],
+  "scripts": {
+    "postinstall": "npm --workspace remote-pi run build"
+  },
+  "dependencies": {
+    "@types/node": "^25.8.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "^6.0.3"
+  },
+  "pi": {
+    "extensions": [
+      "pi-extension/dist"
+    ],
+    "image": "https://raw.githubusercontent.com/jacobaraujo7/remote_pi/main/branding/banner.png"
+  }
+}
