@@ -62,9 +62,10 @@ dependencies:
   window_manager: ^0.4.3
 
   # Wave 2 — aba de terminal: emulador + widget (xterm) + PTY nativo
-  # (flutter_pty: forkpty no macOS/Linux, ConPTY no Windows).
+  # (kyroon_pty: PTY em código nativo — forkpty no macOS/Linux, ConPTY no
+  # Windows 10 1809+; mais estável e mantido que o flutter_pty antigo).
   xterm: ^4.0.0
-  flutter_pty: ^0.4.2
+  kyroon_pty: ^1.0.4
 
   # Wave 2 — viewer de arquivo: renderiza SVG no pane (PNG/JPEG via Image.file).
   flutter_svg: ^2.0.10

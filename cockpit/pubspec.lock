@@ -206,14 +206,6 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "2.0.35"
-  flutter_pty:
-    dependency: "direct main"
-    description:
-      name: flutter_pty
-      sha256: c2f3b3160b519ac820fa3f6ef175361f2dfc52c557465643589542e9f229ad66
-      url: "https://pub.dev"
-    source: hosted
-    version: "0.4.2"
   flutter_sticky_header:
     dependency: "direct main"
     description:
@@ -337,6 +329,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "4.12.0"
+  kyroon_pty:
+    dependency: "direct main"
+    description:
+      name: kyroon_pty
+      sha256: e5243f941c54c2470b1a1fccce2e96d33b869930e2cec820d6a29511073008cc
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.4"
   leak_tracker:
     dependency: transitive
     description:

@@ -2,9 +2,9 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cockpit/domain/contracts/terminal_gateway.dart';
-import 'package:flutter_pty/flutter_pty.dart';
+import 'package:kyroon_pty/kyroon_pty.dart';
 
-/// PTY nativo via `flutter_pty`. Roda o shell real do SO num pseudo-terminal.
+/// PTY nativo via `kyroon_pty`. Roda o shell real do SO num pseudo-terminal.
 class PtyTerminalGateway implements TerminalGateway {
   Pty? _pty;
 
