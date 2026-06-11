@@ -24,8 +24,9 @@
  * Architecture note — why we don't use AgentBridge directly here:
  *   AgentBridge.beforeToolCallHook is designed to be passed to createAgentSession().
  *   Inside an extension Pi already owns the AgentSession, so we can't re-bind
- *   beforeToolCall after the fact. The equivalent is pi.on("tool_call", …) which
- *   fires BEFORE execution and supports { block: true }.
+ *   beforeToolCall after the fact. The equivalent is pi.on("tool_call", …),
+ *   which fires BEFORE execution. Note: `{ block: true }` is a hard denial that
+ *   produces an error tool result; it is not a waiting/remote-response primitive.
  *   AgentBridge (src/session/agent_bridge.ts) remains the tested, mockable unit
  *   for integration tests.
  */
@@ -158,7 +159,12 @@ let _relayUrl: string | null = null;  // URL used by current _relay connection
  *     `/remote-pi status` output both derive from this.
  */
 const _activePeers = new Map<string, PlainPeerChannel>();
-const ASK_USER_PROMPT_CAPABILITY = "ask_user_prompt_cards";
+// v1 `ask_user_prompt_cards` used `tool_call` + `{ block:true }`, which Pi
+// converts into an immediate error result rendered by pi-ask-user as
+// `Cancelled`. v2 means dual-surface mode: Android gets the prompt card while
+// the local CLI ask_user still opens, and the first answer resolves all
+// surfaces.
+const ASK_USER_PROMPT_CAPABILITY = "ask_user_prompt_cards_v2";
 const _askUserCapablePeers = new Set<string>();
 let _peerShort = "";  // shortid of the most recently attached peer (UX hint only)
 
@@ -533,6 +539,13 @@ function _broadcastToActive(msg: ServerMessage): void {
 function _broadcastToAskUserCapable(msg: ServerMessage): void {
   for (const [peerId, ch] of _activePeers.entries()) {
     if (!_askUserCapablePeers.has(peerId)) continue;
+    try { ch.send(msg); } catch { /* best-effort per channel */ }
+  }
+}
+
+function _broadcastToAskUserIncapable(msg: ServerMessage): void {
+  for (const [peerId, ch] of _activePeers.entries()) {
+    if (_askUserCapablePeers.has(peerId)) continue;
     try { ch.send(msg); } catch { /* best-effort per channel */ }
   }
 }
@@ -1233,6 +1246,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // tool always sees the current state.
   registerAgentTools(pi, () => _meshNode?.peer() ?? null);
 
+  _registerAskUserEventBridge(pi);
+
   // Tool calls execute without prompting the remote user. The Pi SDK has no
   // native `requiresApproval` per tool, and a hardcoded gate (Bash/Edit/Write)
   // misfired on every custom tool from third-party packages. Approval will
@@ -1300,34 +1315,16 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     }
   });
 
-  // Plan/44: intercept ask_user before execution and forward as an interactive
-  // prompt to connected owners. Local UI stays untouched when no owner is
-  // attached.
+  // Plan/44 v2: mirror ask_user prompts to connected owners, but do NOT block
+  // the tool call. Blocking makes Pi synthesize an error result (`Cancelled`).
+  // The local pi-ask-user UI must still execute; whichever surface answers
+  // first resolves the other via ask_user_resolved.
   pi.on("tool_call", (event) => {
     if (event.toolName.toLowerCase() !== "ask_user" || !_anyAskUserCapablePeerActive()) return;
 
     const askUser = _normalizeAskUserToolInput(event.input);
-    _pendingAskUserPrompts.set(event.toolCallId, askUser);
-    _messageBuffer.push({
-      role: "ask_user_prompt",
-      timestamp: Date.now(),
-      toolCallId: event.toolCallId,
-      askUser,
-    });
-    _broadcastToAskUserCapable({
-      type: "ask_user_prompt",
-      id: event.toolCallId,
-      question: askUser.question,
-      ...(askUser.context ? { context: askUser.context } : {}),
-      options: askUser.options,
-      allow_multiple: askUser.allowMultiple,
-      allow_freeform: askUser.allowFreeform,
-      allow_comment: askUser.allowComment,
-    });
-    return {
-      block: true,
-      reason: "ask_user was forwarded to remote owner for response",
-    };
+    _startAskUserPrompt(event.toolCallId, askUser);
+    return undefined;
   });
 
   // Notify every connected owner that a tool is about to run (visibility
@@ -1338,19 +1335,27 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // avoid duplicated tool_request cards.
   pi.on("tool_execution_start", (event) => {
     if (!_anyPeerActive()) return;
-    if (event.toolName.toLowerCase() === "ask_user" && _pendingAskUserPrompts.has(event.toolCallId)) {
-      return;
-    }
-    _broadcastToActive({
+    const msg: ServerMessage = {
       type: "tool_request",
       tool_call_id: event.toolCallId,
       tool: event.toolName,
       args: _enrichToolArgs(event.toolName, event.args),
-    });
+    };
+    if (event.toolName.toLowerCase() === "ask_user" && _pendingAskUserPrompts.has(event.toolCallId)) {
+      _broadcastToAskUserIncapable(msg);
+      return;
+    }
+    _broadcastToActive(msg);
+  });
+
+  pi.on("tool_result", (event) => {
+    if (event.toolName.toLowerCase() !== "ask_user") return;
+    return _handleAskUserToolResult(event.toolCallId, event.details, event.content, event.isError);
   });
 
   pi.on("tool_execution_end", (event) => {
     if (!_anyPeerActive()) return;
+    const mirroredAskUser = event.toolName.toLowerCase() === "ask_user" && _mirroredAskUserToolIds.has(event.toolCallId);
     // Stringify like the history mapper (same helper) so the live text == what
     // a session_sync replays for this tool. Raw `String(event.result)` turned
     // a content-array/object into "[object Object]" and the success branch sent
@@ -1359,6 +1364,10 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     const msg: ServerMessage = event.isError
       ? { type: "tool_result", tool_call_id: event.toolCallId, error: text }
       : { type: "tool_result", tool_call_id: event.toolCallId, result: text };
+    if (mirroredAskUser) {
+      _broadcastToAskUserIncapable(msg);
+      return;
+    }
     _broadcastToActive(msg);
   });
 
@@ -3105,6 +3114,219 @@ function _abortCurrentTurn(
   return false;
 }
 
+function _startAskUserPrompt(toolCallId: string, askUser: AskUserPromptNormalized): PendingAskUserPrompt {
+  const existing = _pendingAskUserPrompts.get(toolCallId);
+  if (existing) return existing;
+
+  const pending: PendingAskUserPrompt = { prompt: askUser };
+  _pendingAskUserPrompts.set(toolCallId, pending);
+  _mirroredAskUserToolIds.add(toolCallId);
+  _messageBuffer.push({
+    role: "ask_user_prompt",
+    timestamp: Date.now(),
+    toolCallId,
+    askUser,
+  });
+  _broadcastToAskUserCapable({
+    type: "ask_user_prompt",
+    id: toolCallId,
+    question: askUser.question,
+    ...(askUser.context ? { context: askUser.context } : {}),
+    options: askUser.options,
+    allow_multiple: askUser.allowMultiple,
+    allow_freeform: askUser.allowFreeform,
+    allow_comment: askUser.allowComment,
+  });
+  return pending;
+}
+
+function _registerAskUserEventBridge(pi: ExtensionAPI): void {
+  const events = pi.events;
+  if (!events || typeof events.on !== "function") return;
+
+  events.on("ask:prompt", (raw) => {
+    const event = raw as AskUserPromptBridgeEvent | null | undefined;
+    if (!event || typeof event !== "object") return;
+    const toolCallId = typeof event.toolCallId === "string"
+      ? event.toolCallId
+      : typeof event.id === "string"
+        ? event.id
+        : undefined;
+    if (!toolCallId) return;
+
+    const existing = _pendingAskUserPrompts.get(toolCallId);
+    if (!existing && !_anyAskUserCapablePeerActive()) return;
+    const pending = existing ?? _startAskUserPrompt(toolCallId, _normalizeAskUserToolInput(event));
+    const responder = typeof event.respond === "function"
+      ? event.respond
+      : typeof event.resolve === "function"
+        ? event.resolve
+        : undefined;
+    if (responder) {
+      pending.responder = responder;
+      if (pending.resolved?.source === "app" && !_respondToLocalAskUser(pending, pending.resolved.response)) {
+        pending.resolved = undefined;
+      }
+    }
+  });
+
+  events.on("ask:answered", (raw) => {
+    const parsed = _parseAskUserAnsweredBridgeEvent(raw);
+    if (!parsed) return;
+    _resolveAskUserPrompt(parsed.toolCallId, parsed.response, "cli", { deleteAfterResolve: true });
+  });
+
+  events.on("ask:cancelled", (raw) => {
+    const toolCallId = _findAskUserPromptId(raw as AskUserAnsweredBridgeEvent | null | undefined);
+    if (!toolCallId) return;
+    _resolveAskUserPrompt(toolCallId, { kind: "cancelled" }, "cli", { deleteAfterResolve: true });
+  });
+}
+
+function _parseAskUserAnsweredBridgeEvent(raw: unknown): { toolCallId: string; response: AskUserResponsePayload } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const event = raw as AskUserAnsweredBridgeEvent;
+  const toolCallId = _findAskUserPromptId(event);
+  if (!toolCallId) return undefined;
+  const response = _parseAskUserResponsePayload(event.response);
+  if (!response) return undefined;
+  return { toolCallId, response };
+}
+
+function _findAskUserPromptId(event: AskUserAnsweredBridgeEvent | null | undefined): string | undefined {
+  const direct = typeof event?.toolCallId === "string"
+    ? event.toolCallId
+    : typeof event?.id === "string"
+      ? event.id
+      : undefined;
+  if (direct && _pendingAskUserPrompts.has(direct)) return direct;
+
+  const entries = [..._pendingAskUserPrompts.entries()];
+  if (event?.question) {
+    const matched = entries.find(([, pending]) => (
+      pending.prompt.question === event.question
+      && (!event.context || pending.prompt.context === event.context)
+    ));
+    if (matched) return matched[0];
+  }
+
+  return entries.length === 1 ? entries[0]![0] : undefined;
+}
+
+function _respondToLocalAskUser(pending: PendingAskUserPrompt, response: AskUserResponsePayload): boolean {
+  if (!pending.responder) return false;
+  const payload = response.kind === "cancelled" ? null : response;
+  try {
+    return pending.responder(payload) !== false;
+  } catch (err) {
+    console.error(`[remote-pi] failed to resolve local ask_user prompt: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+function _resolveAskUserPrompt(
+  toolCallId: string,
+  response: AskUserResponsePayload,
+  source: "app" | "cli",
+  options: { deleteAfterResolve?: boolean } = {},
+): PendingAskUserPrompt | undefined {
+  const pending = _pendingAskUserPrompts.get(toolCallId);
+  if (!pending) return undefined;
+  if (pending.resolved) return pending;
+
+  if (source === "app" && pending.responder && !_respondToLocalAskUser(pending, response)) {
+    return undefined;
+  }
+
+  const resolved = _formatAskUserResolutionText(pending.prompt, response, toolCallId);
+  pending.resolved = { response, answerLabel: resolved.answerLabel, source };
+
+  _messageBuffer.push({
+    role: "ask_user_resolved",
+    timestamp: Date.now(),
+    toolCallId,
+    answerLabel: resolved.answerLabel,
+    cancelled: response.kind === "cancelled",
+  });
+  _broadcastToAskUserCapable({
+    type: "ask_user_resolved",
+    id: toolCallId,
+    answer_label: resolved.answerLabel,
+    cancelled: response.kind === "cancelled",
+  });
+
+  if (options.deleteAfterResolve) {
+    _pendingAskUserPrompts.delete(toolCallId);
+  }
+  return pending;
+}
+
+function _toolResultForAskUserResolution(
+  pending: PendingAskUserPrompt,
+): { content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: boolean } {
+  const response = pending.resolved?.response;
+  if (!response) {
+    return {
+      content: [{ type: "text", text: "User cancelled the question" }],
+      details: {
+        question: pending.prompt.question,
+        context: pending.prompt.context,
+        options: pending.prompt.options,
+        response: null,
+        cancelled: true,
+      },
+      isError: false,
+    };
+  }
+
+  if (response.kind === "cancelled") {
+    return {
+      content: [{ type: "text", text: "User cancelled the question" }],
+      details: {
+        question: pending.prompt.question,
+        context: pending.prompt.context,
+        options: pending.prompt.options,
+        response: null,
+        cancelled: true,
+      },
+      isError: false,
+    };
+  }
+
+  const summary = _formatAskUserToolResultSummary(response);
+  return {
+    content: [{ type: "text", text: `User answered: ${summary}` }],
+    details: {
+      question: pending.prompt.question,
+      context: pending.prompt.context,
+      options: pending.prompt.options,
+      response,
+      cancelled: false,
+    },
+    isError: false,
+  };
+}
+
+function _handleAskUserToolResult(
+  toolCallId: string,
+  details: unknown,
+  content: unknown,
+  isError: boolean,
+): { content?: { type: "text"; text: string }[]; details?: Record<string, unknown>; isError?: boolean } | undefined {
+  const pending = _pendingAskUserPrompts.get(toolCallId);
+  if (!pending) return undefined;
+
+  if (pending.resolved?.source === "app") {
+    _pendingAskUserPrompts.delete(toolCallId);
+    return _toolResultForAskUserResolution(pending);
+  }
+
+  const response = _parseAskUserToolResult(details, content, isError);
+  if (!response) return undefined;
+  _resolveAskUserPrompt(toolCallId, response, "cli", { deleteAfterResolve: true });
+  return undefined;
+}
+
 function _handleAskUserResponse(
   sender: PlainPeerChannel,
   msg: Extract<ClientMessage, { type: "ask_user_response" }>,
@@ -3116,6 +3338,15 @@ function _handleAskUserResponse(
       code: "invalid_message",
       in_reply_to: msg.id,
       message: `No pending ask_user prompt for id ${msg.id}`,
+    });
+    return;
+  }
+  if (pending.resolved) {
+    sender.send({
+      type: "error",
+      code: "invalid_message",
+      in_reply_to: msg.id,
+      message: `ask_user prompt ${msg.id} is already resolved`,
     });
     return;
   }
@@ -3133,48 +3364,22 @@ function _handleAskUserResponse(
     return;
   }
 
-  const resolved = _formatAskUserResolutionText(pending, parsed, msg.id);
-  const echoId = `ask_user_${msg.id}`;
-  const previousTurnId = _currentTurnId;
-  const seededTurnId = _currentTurnId === null;
-  if (seededTurnId) _currentTurnId = echoId;
-
-  const wake = _wakeAgent(
-    resolved.echoedText,
-    `ask_user_response id=${msg.id}`,
-    "steer",
-  );
-  if (!wake.ok) {
-    if (seededTurnId) _currentTurnId = previousTurnId;
+  const resolved = _resolveAskUserPrompt(msg.id, parsed, "app");
+  if (!resolved) {
     sender.send({
       type: "error",
-      code: "internal_error",
+      code: "invalid_message",
       in_reply_to: msg.id,
-      message: `ask_user response was ignored by local agent: ${wake.detail}`,
+      message: `ask_user prompt ${msg.id} was already resolved locally`,
     });
     return;
   }
-
-  _pendingAskUserPrompts.delete(msg.id);
-  _messageBuffer.push({
-    role: "ask_user_resolved",
-    timestamp: Date.now(),
-    toolCallId: msg.id,
-    answerLabel: resolved.answerLabel,
-    cancelled: parsed.kind === "cancelled",
-  });
-  _broadcastToAskUserCapable({
-    type: "ask_user_resolved",
-    id: msg.id,
-    answer_label: resolved.answerLabel,
-    cancelled: parsed.kind === "cancelled",
-  });
-  _broadcastToActive({
-    type: "user_message",
-    id: echoId,
-    text: resolved.echoedText,
-    streaming_behavior: "steer",
-  });
+  if (!pending.responder) {
+    _lastCtx?.ui.notify?.(
+      "Remote Pi received an Android ask_user answer, but this pi-ask-user version cannot be resolved externally. Update pi-ask-user to enable true Android↔CLI first-answer-wins.",
+      "warning",
+    );
+  }
 }
 
 export function _routeClientMessageFrom(
@@ -3432,6 +3637,7 @@ function _handleSessionSync(
  */
 function _resetSessionForNew(inReplyTo: string): void {
   _messageBuffer = [];
+  _mirroredAskUserToolIds.clear();
   _sessionStartedAt = Date.now();
   _broadcastToActive({
     type: "session_history",
@@ -3467,13 +3673,41 @@ type AskUserResponsePayload =
       kind: "cancelled";
     };
 
+type AskUserExternalResponder = (response: Exclude<AskUserResponsePayload, { kind: "cancelled" }> | null) => void | boolean;
+
+type PendingAskUserPrompt = {
+  prompt: AskUserPromptNormalized;
+  responder?: AskUserExternalResponder;
+  resolved?: {
+    response: AskUserResponsePayload;
+    answerLabel: string;
+    source: "app" | "cli";
+  };
+};
+
+type AskUserPromptBridgeEvent = Partial<AskUserPromptNormalized> & {
+  toolCallId?: string;
+  id?: string;
+  respond?: AskUserExternalResponder;
+  resolve?: AskUserExternalResponder;
+};
+
+type AskUserAnsweredBridgeEvent = {
+  toolCallId?: string;
+  id?: string;
+  question?: string;
+  context?: string;
+  response?: unknown;
+};
+
 type DiffLine =
   | { kind: "context"; oldLine?: number; newLine?: number; text: string }
   | { kind: "remove"; oldLine?: number; text: string }
   | { kind: "add"; newLine?: number; text: string }
   | { kind: "ellipsis" };
 
-const _pendingAskUserPrompts = new Map<string, AskUserPromptNormalized>();
+const _pendingAskUserPrompts = new Map<string, PendingAskUserPrompt>();
+const _mirroredAskUserToolIds = new Set<string>();
 
 function _enrichToolArgs(tool: string, args: unknown): ToolArgs {
   if (!args || typeof args !== "object") return {};
@@ -3698,6 +3932,38 @@ function _parseAskUserResponsePayload(payload: unknown): AskUserResponsePayload 
   return undefined;
 }
 
+function _parseAskUserToolResult(
+  details: unknown,
+  content: unknown,
+  isError: boolean,
+): AskUserResponsePayload | undefined {
+  if (details && typeof details === "object") {
+    const obj = details as Record<string, unknown>;
+    if (obj.cancelled === true) return { kind: "cancelled" };
+    const parsed = _parseAskUserResponsePayload(obj.response);
+    if (parsed) return parsed;
+  }
+
+  if (isError) return undefined;
+
+  const text = _stringifyContent(content).trim();
+  const prefix = "User answered:";
+  if (text.startsWith(prefix)) {
+    const answer = text.slice(prefix.length).trim();
+    if (answer) return { kind: "freeform", text: answer };
+  }
+  if (/cancelled/i.test(text)) return { kind: "cancelled" };
+  return undefined;
+}
+
+function _formatAskUserToolResultSummary(response: Exclude<AskUserResponsePayload, { kind: "cancelled" }>): string {
+  if (response.kind === "selection") {
+    const selections = response.selections.join(", ");
+    return response.comment ? `${selections} — ${response.comment}` : selections;
+  }
+  return response.comment ? `${response.text} — ${response.comment}` : response.text;
+}
+
 function _formatAskUserResolutionText(prompt: AskUserPromptNormalized, response: AskUserResponsePayload, id: string): {
   answerLabel: string;
   echoedText: string;
@@ -3884,6 +4150,9 @@ export function _mapAgentMessagesToEvents(
       // Same helper as the live `tool_execution_end` broadcast → live == re-sync.
       const text = _stringifyToolResult(m.content);
       const tcid = String(m.toolCallId ?? "");
+      if (String(m.toolName ?? "").toLowerCase() === "ask_user" && _mirroredAskUserToolIds.has(tcid)) {
+        continue;
+      }
       events.push(
         m.isError
           ? { ts, type: "tool_result", tool_call_id: tcid, error: text }

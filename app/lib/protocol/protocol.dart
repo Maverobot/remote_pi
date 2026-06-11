@@ -624,7 +624,11 @@ class Ping extends ClientMessage {
   Map<String, dynamic> toJson() => {'type': 'ping', 'id': id};
 }
 
-const List<String> kRemotePiClientCapabilities = ['ask_user_prompt_cards'];
+// v1 `ask_user_prompt_cards` used Pi's `tool_call` block hook, which produced
+// fake "Cancelled" results. v2 means dual-surface prompt cards: Android shows
+// the card while the local CLI ask_user remains live; the first answer resolves
+// both surfaces.
+const List<String> kRemotePiClientCapabilities = ['ask_user_prompt_cards_v2'];
 
 class PairRequest extends ClientMessage {
   final String id;

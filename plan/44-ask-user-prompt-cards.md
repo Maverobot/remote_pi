@@ -22,21 +22,30 @@ Important constraints from the current codebase:
 - The app UI is shared Flutter/Dart under `app/lib/`, so prompt cards implemented
   there are not Android-only; the same implementation should run on iOS. iOS
   still needs its own build/smoke pass.
-- Pi's `tool_call` event can block a tool call. pi-telegram already uses this to
-  forward `ask_user` prompts instead of opening hidden local UI.
-- Remote Pi already has steering-safe message injection (`_wakeAgent(...,
-  "steer")`) from plan 43, which is the right path for the mobile answer.
+- Pi's `tool_call` event can see the prompt before execution, but blocking a
+  tool call is not a waiting primitive: it returns an immediate error result.
+- Remote Pi therefore uses a v2 dual-surface design: mirror the prompt to
+  Android while letting the local `pi-ask-user` tool keep running.
 - Generic `extension_ui_request` cards remain valuable later for setup wizards
   and other extension UI, but they are not required for this user-requested
   `ask_user` prompt-card slice.
 
+**2026-06-11 correction:** real smoke showed the original v1 blocking design
+was wrong for Pi: `{ block: true }` immediately completes the tool call as an
+error result, and `pi-ask-user` renders that missing-response result as
+`Cancelled` while the Android card remains open. Current code does not honor the
+legacy `ask_user_prompt_cards` capability. The replacement capability is
+`ask_user_prompt_cards_v2`: Android receives a prompt card, the CLI prompt stays
+open, and the first answer resolves the other surface through a `pi-ask-user`
+external responder bridge.
+
 ## Goal
 
-Implement Telegram-style `ask_user` forwarding for Remote Pi: when the LLM calls
-`ask_user` while one or more phones are connected, the pi-extension blocks the
-local `ask_user` tool call, broadcasts a rich prompt card to the mobile apps, and
-turns the first mobile answer into a follow-up/steering user message for the
-agent.
+Implement dual-surface `ask_user` prompts for Remote Pi: when the LLM calls
+`ask_user` while one or more phones are connected, the pi-extension mirrors a
+rich prompt card to mobile apps while the normal local CLI `ask_user` UI remains
+active. Whichever surface answers first resolves the other and returns a normal
+`ask_user` tool result to the agent.
 
 ## Non-goals
 
@@ -95,10 +104,10 @@ resolving the card across multiple phones.
 }
 ```
 
-The extension accepts the first response for a pending id. It formats the answer
-as a normal user message, broadcasts that user message to all owners, and injects
-it into Pi via `sendUserMessage(..., { deliverAs: "steer" })` so it works whether
-the blocked turn has fully unwound yet or is still marked working.
+The extension accepts the first response for a pending id. In v2, an Android
+response is delivered to the still-running local `pi-ask-user` tool via its
+external responder bridge, so the LLM receives a normal `AskToolDetails` result
+instead of a synthetic follow-up user message.
 
 ### Extension → app: `ask_user_resolved`
 
@@ -139,21 +148,21 @@ phones do not keep stale actionable cards.
 2. In `tool_execution_start`, suppress the generic informational `tool_request`
    for `ask_user` when forwarding is possible, so the app does not show both a
    tool card and a prompt card.
-3. In `tool_call`, when `event.toolName === "ask_user"` and at least one
-   active owner advertises `ask_user_prompt_cards` capability:
-   - register a pending prompt by `toolCallId`;
-   - broadcast `ask_user_prompt`;
-   - return `{ block: true, reason: "ask_user was forwarded to Remote Pi..." }`
-     so the local prompt never opens and the agent waits for the mobile reply.
-4. Route `ask_user_response` in `_routeClientMessageFrom` before the `_pi` guard.
-5. First response wins. Later responses are ignored or receive a correlated
+3. In `tool_call`, when `event.toolName === "ask_user"` and at least one active
+   owner advertises `ask_user_prompt_cards_v2`, register a pending prompt and
+   broadcast `ask_user_prompt`; return `undefined` so local CLI execution
+   continues.
+4. Listen for `pi-ask-user`'s external responder event and attach its responder
+   callback to the pending prompt. If Android already answered, resolve the CLI
+   prompt immediately when the responder attaches.
+5. Route `ask_user_response` in `_routeClientMessageFrom` before the `_pi` guard.
+6. First response wins. Later responses are ignored or receive a correlated
    `error`.
-6. Format the mobile answer into a normal user-message prompt containing the
-   original question/context and selected/freeform answer.
-7. Call `_wakeAgent(..., "steer")` with the generated answer text; after
-   synchronous acceptance, broadcast `ask_user_resolved` to capable owners and a
-   `user_message` echo to all owners.
-8. If no active capable owner is connected, do nothing; the installed
+7. When Android answers first, call the pending responder and broadcast
+   `ask_user_resolved` to capable owners. Do not inject a steering user message.
+8. When CLI answers first, consume `ask:answered` / `tool_result` and broadcast
+   `ask_user_resolved` so Android cards become non-actionable.
+9. If no active capable owner is connected, do nothing; the installed
    `pi-ask-user` tool keeps using local TUI/RPC UI as before.
 
 ## Steps
@@ -259,17 +268,19 @@ Files:
 
 Tests first:
 
-- `ask_user` tool calls with active owners are blocked with the same semantic
-  reason as pi-telegram and broadcast as `ask_user_prompt`.
-- Generic `tool_request` is not duplicated for forwarded `ask_user` prompts.
-- A first `ask_user_response` broadcasts `ask_user_resolved`, broadcasts a
-  user-message echo, and calls `_wakeAgent(..., "steer")` with the generated
-  answer prompt.
+- `ask_user` tool calls with active v2 owners broadcast `ask_user_prompt` and do
+  **not** return `{ block: true }`.
+- Generic `tool_request` is not duplicated for mirrored `ask_user` prompts.
+- A first Android `ask_user_response` broadcasts `ask_user_resolved`, calls the
+  attached `pi-ask-user` responder, and does not inject a steering user message.
+- If Android answers before the responder is attached, the response is stored and
+  applied as soon as `pi-ask-user` emits its prompt bridge event.
+- A CLI `ask:answered` / `tool_result` resolves the Android card.
 - A second owner response for the same id is ignored or gets a correlated error;
   all owners keep the first resolution.
-- Selection, freeform, comment, and cancellation are formatted into clear agent
-  prompts that include the original question/context.
-- If no active owner is connected, no forwarding happens and the installed local
+- Selection, freeform, comment, and cancellation are converted to normal
+  `AskToolDetails` shape for the ask_user result.
+- If no active v2 owner is connected, no mirroring happens and installed local
   `pi-ask-user` behavior remains unchanged.
 
 Acceptance:
@@ -285,16 +296,17 @@ Manual cases:
 
 1. Android debug app connected to a normal interactive Pi TUI session.
 2. Trigger a real `ask_user` tool call.
-3. Verify no local ask_user overlay opens; the app shows the prompt card.
-4. Answer from Android; verify the card resolves, a user answer appears, and the
-   agent continues with the selected/freeform answer.
-5. Repeat single select, freeform, multi-select, comment, and cancel cases.
-6. Repeat on iOS simulator/device if available; if unavailable, at least run
+3. Verify the local ask_user overlay opens and the app shows the prompt card.
+4. Answer from Android; verify the CLI prompt closes/marks answered, the Android
+   card resolves, and the agent continues with the selected/freeform answer.
+5. Repeat with a CLI answer first; verify the Android card resolves.
+6. Repeat single select, freeform, multi-select, comment, and cancel cases.
+7. Repeat on iOS simulator/device if available; if unavailable, at least run
    `flutter build ios --no-codesign`.
 
 Acceptance:
 
-- Android smoke passes for real interactive TUI `ask_user` forwarding.
+- Android smoke passes for real interactive dual-surface `ask_user` prompts.
 - iOS build or smoke passes.
 
 Current smoke status:
@@ -309,8 +321,11 @@ Current smoke status:
 
 - [x] App protocol parses `ask_user_prompt` / `ask_user_resolved` and encodes
       `ask_user_response`.
-- [x] Pi-extension intercepts `ask_user` tool calls with active owners and emits
-      prompt request/resolution frames.
+- [x] App advertises only v2 `ask_user_prompt_cards_v2`, not broken v1.
+- [x] Pi-extension ignores v1 `ask_user_prompt_cards` and uses v2 dual-surface
+      prompt mirroring without `{ block: true }`.
+- [x] `pi-ask-user` exposes an external responder bridge so Android can answer
+      the still-running local prompt.
 - [x] App stores prompt cards in SSOT and survives navigation/rebuild.
 - [x] App renders single-select, multi-select, freeform, optional comment,
       cancel, and resolved states.
@@ -319,16 +334,17 @@ Current smoke status:
 - [x] Prompt response does not disturb streaming, steering, or Stop/cancel state.
 - [x] Relevant Flutter tests pass.
 - [x] Relevant pi-extension tests and typecheck pass.
-- [ ] Android manual smoke passes.
+- [ ] Android manual smoke proves Android answer resolves CLI prompt and agent continues.
 - [ ] iOS build/smoke verifies the shared Flutter implementation.
-- [ ] Real interactive TUI `ask_user` smoke proves the local overlay is bypassed
-      and the app answer continues the agent.
+- [ ] Real interactive TUI `ask_user` smoke proves CLI answer resolves Android
+      card and Android answer resolves CLI prompt.
 
 ## Risks
 
-1. **Blocked-tool semantics**: pi-telegram proves this is viable, but Remote Pi
-   must verify the LLM reliably waits for the subsequent app answer after the
-   blocked `ask_user` result.
+1. **Blocked-tool semantics (confirmed invalid for v1)**: Pi converts
+   `{ block: true }` into an immediate error tool result, which `pi-ask-user`
+   renders as `Cancelled`. V2 must never block the tool call; it resolves the
+   running `pi-ask-user` prompt instead.
 2. **Duplicate answers**: multiple phones may tap at once; extension must enforce
    first-response-wins.
 3. **Prompt replay**: `session_sync` currently replays chat/tool/assistant events.
@@ -336,8 +352,10 @@ Current smoke status:
    required beyond live connected owners.
 4. **Rollout ordering**: extension must not emit prompt frames to older apps that
    would show `unsupported_type` unless version gating is added.
-5. **Answer injection timing**: app responses may arrive while Pi still reports
-   working; use the existing steering-safe `_wakeAgent(..., "steer")` path.
+5. **Responder availability timing**: Android responses may arrive before
+   `pi-ask-user` has attached its responder callback. The pending prompt stores
+   the first response and resolves the CLI prompt as soon as the responder
+   appears.
 
 ## Next plans
 

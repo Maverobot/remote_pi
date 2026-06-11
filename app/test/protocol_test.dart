@@ -392,7 +392,8 @@ void main() {
       expect(decoded['type'], 'pair_request');
       expect(decoded['device_name'], 'iPhone do Jacob');
       expect(decoded['token'], 'qBcD3fG4h5J6k7L8m9N0pQ');
-      expect(decoded['capabilities'], contains('ask_user_prompt_cards'));
+      expect(decoded['capabilities'], contains('ask_user_prompt_cards_v2'));
+      expect(decoded['capabilities'], isNot(contains('ask_user_prompt_cards')));
     });
   });
 
@@ -445,6 +446,15 @@ void main() {
           jsonDecode(encodeClient(msg).trim()) as Map<String, dynamic>;
       expect(decoded['type'], 'cancel');
       expect(decoded['target_id'], 'target-x');
+    });
+
+    test('SessionSync advertises v2 ask_user prompt cards only', () {
+      final msg = SessionSync(id: 'sync-1');
+      final decoded =
+          jsonDecode(encodeClient(msg).trim()) as Map<String, dynamic>;
+      expect(decoded['type'], 'session_sync');
+      expect(decoded['capabilities'], contains('ask_user_prompt_cards_v2'));
+      expect(decoded['capabilities'], isNot(contains('ask_user_prompt_cards')));
     });
   });
 
