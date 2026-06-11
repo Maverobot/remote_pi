@@ -4,9 +4,9 @@ import 'dart:io';
 /// robusta — apps GUI não herdam a PATH do shell.
 ///
 /// Estratégia preferida:
-/// - **macOS/Linux**: `which <name>` rodado num **shell de login** (`$SHELL -lc`),
-///   que carrega o profile do usuário e enxerga a PATH real (npm global, nvm,
-///   Homebrew, etc.) — bem mais seguro que adivinhar prefixos.
+/// - **macOS/Linux**: `which <name>` no shell do usuário — primeiro login
+///   (`-lc`), e se não achar, interativo (`-ic`) pra cobrir nvm (PATH no
+///   `.bashrc`/`.zshrc`). Enxerga a PATH real — mais seguro que adivinhar prefixos.
 /// - **Windows**: `where <name>`, que já resolve PATHEXT (`pi.cmd`/`pi.exe`/…).
 ///
 /// Fallbacks (quando o which/where não acha): os caminhos conhecidos abaixo e,
@@ -63,27 +63,37 @@ Future<String> resolveExecutable(
   return name;
 }
 
-/// `which <name>` num shell de **login** do usuário (`-lc`). Carrega
-/// `.zprofile`/`.bash_profile`/`.profile` (ou equivalente) pra herdar a PATH real
-/// (nvm/npm/brew), que o processo GUI não tem. Devolve o 1º caminho existente,
-/// ou `null`.
+/// `which <name>` no shell do usuário, pra herdar a PATH real (npm/nvm/brew) que
+/// o processo GUI não tem. Devolve o 1º caminho existente, ou `null`.
 ///
-/// **Por que login e não interativo** (`-lc`, não `-lic`): um shell interativo
-/// sem tty quebra em alguns sistemas (Linux ARM: "bash: cannot set terminal
-/// process group / no job control"). O modo login basta pra carregar a PATH.
+/// Tenta em duas etapas:
+/// 1. **login** (`-lc`): carrega `.zprofile`/`.bash_profile`/`.profile`. Cobre
+///    Homebrew, npm global, instaladores que escrevem no profile de login. Não
+///    é interativo → sem o erro de job control.
+/// 2. **interativo** (`-ic`): só se o login não achar. Sourceia `.bashrc`/
+///    `.zshrc`, onde o **nvm** mete a PATH (guardada atrás do check de
+///    interatividade). Em sistemas sem tty (ex.: Linux ARM) o shell solta
+///    "cannot set terminal process group / no job control" no **stderr** — que
+///    o `Process.run` captura e nós ignoramos; lemos só o `stdout`. Por isso
+///    **não** gateamos no `exitCode`: parseamos a saída direto.
 Future<String?> _unixWhich(String name) async {
   final shell = Platform.environment['SHELL'] ?? '/bin/sh';
+  return await _runWhich(shell, ['-lc', 'which $name']) ??
+      await _runWhich(shell, ['-ic', 'which $name']);
+}
+
+/// Roda `which` e devolve o 1º caminho absoluto existente no stdout (ignora
+/// exitCode e ruído de stderr). `null` se não achar / timeout / erro.
+Future<String?> _runWhich(String shell, List<String> args) async {
   try {
-    final res = await Process.run(shell, ['-lc', 'which $name'])
+    final res = await Process.run(shell, args)
         .timeout(const Duration(seconds: 4));
-    if (res.exitCode != 0) return null;
     for (final line in (res.stdout as String? ?? '').split('\n')) {
       final p = line.trim();
-      // Ignora ruído de shell interativo; aceita só um caminho real.
       if (p.startsWith('/') && await File(p).exists()) return p;
     }
   } catch (_) {
-    // shell ausente / timeout / erro → cai pros fallbacks.
+    // shell ausente / timeout / erro → cai pra próxima tentativa/fallback.
   }
   return null;
 }
