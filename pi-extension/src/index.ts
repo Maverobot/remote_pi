@@ -555,11 +555,21 @@ function _anyPeerActive(): boolean {
   return _activePeers.size > 0;
 }
 
+function _askUserCapableActivePeerIds(): string[] {
+  return [..._activePeers.keys()].filter((peerId) => _askUserCapablePeers.has(peerId));
+}
+
 function _anyAskUserCapablePeerActive(): boolean {
-  for (const peerId of _activePeers.keys()) {
-    if (_askUserCapablePeers.has(peerId)) return true;
+  return _askUserCapableActivePeerIds().length > 0;
+}
+
+function _sendAskUserResolvedToPromptPeers(pending: PendingAskUserPrompt, msg: ServerMessage): void {
+  const peerIds = new Set([...pending.peerIds, ..._askUserCapableActivePeerIds()]);
+  for (const peerId of peerIds) {
+    const ch = _activePeers.get(peerId);
+    if (!ch) continue;
+    try { ch.send(msg); } catch { /* best-effort per channel */ }
   }
-  return false;
 }
 
 function _rememberClientCapabilities(appPeerId: string, msg: ClientMessage): void {
@@ -3118,7 +3128,10 @@ function _startAskUserPrompt(toolCallId: string, askUser: AskUserPromptNormalize
   const existing = _pendingAskUserPrompts.get(toolCallId);
   if (existing) return existing;
 
-  const pending: PendingAskUserPrompt = { prompt: askUser };
+  const pending: PendingAskUserPrompt = {
+    prompt: askUser,
+    peerIds: _askUserCapableActivePeerIds(),
+  };
   _pendingAskUserPrompts.set(toolCallId, pending);
   _mirroredAskUserToolIds.add(toolCallId);
   _messageBuffer.push({
@@ -3248,7 +3261,7 @@ function _resolveAskUserPrompt(
     answerLabel: resolved.answerLabel,
     cancelled: response.kind === "cancelled",
   });
-  _broadcastToAskUserCapable({
+  _sendAskUserResolvedToPromptPeers(pending, {
     type: "ask_user_resolved",
     id: toolCallId,
     answer_label: resolved.answerLabel,
@@ -3677,6 +3690,7 @@ type AskUserExternalResponder = (response: Exclude<AskUserResponsePayload, { kin
 
 type PendingAskUserPrompt = {
   prompt: AskUserPromptNormalized;
+  peerIds: string[];
   responder?: AskUserExternalResponder;
   resolved?: {
     response: AskUserResponsePayload;

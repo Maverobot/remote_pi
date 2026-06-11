@@ -2245,6 +2245,44 @@ describe("ask_user prompt forwarding", () => {
     });
   });
 
+  test("CLI answer resolves the Android card even if capabilities refresh after prompt", async () => {
+    await _pairForTest("peer-ask-cap-refresh");
+
+    const harness = captureEventHarness();
+    harness.handler("tool_call")({
+      type: "tool_call",
+      toolCallId: "tc_ask_cap_refresh",
+      toolName: "ask_user",
+      input: { question: "Pick one", options: ["A", "B"] },
+    } as unknown);
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "peer-ask-cap-refresh",
+      ct: Buffer.from(JSON.stringify({
+        type: "session_sync",
+        id: "sync-without-v2",
+        capabilities: [],
+      })).toString("base64"),
+    }));
+
+    const sendsBeforeAnswer = relayRef.current!.send.mock.calls.length;
+    harness.emitBus("ask:answered", {
+      toolCallId: "tc_ask_cap_refresh",
+      response: { kind: "selection", selections: ["B"] },
+    });
+
+    const sent = relayRef.current!.send.mock.calls
+      .slice(sendsBeforeAnswer)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    expect(sent.find((d) => d.peer === "peer-ask-cap-refresh" && d.inner.type === "ask_user_resolved")?.inner).toMatchObject({
+      type: "ask_user_resolved",
+      id: "tc_ask_cap_refresh",
+      answer_label: "B",
+      cancelled: false,
+    });
+  });
+
   test("local CLI ask_user answer marks Android prompt card resolved", async () => {
     await _pairForTest("peer-ask-cli-answer");
 
