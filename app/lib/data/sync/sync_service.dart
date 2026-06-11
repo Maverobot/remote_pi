@@ -724,24 +724,51 @@ class SyncService extends Service {
     final historyIds = {for (final r in rows) _key(r.role, r.id)};
     await _enqueue(() async {
       final box = await _boxes.msgsBox(epk, room);
-      // Preserve local pending user rows the Pi hasn't echoed yet and open
-      // ask_user prompts from older extensions that do not replay prompt
-      // events in session_history.
+      // Preserve local pending user rows the Pi hasn't echoed yet and ask_user
+      // prompts from older extensions that do not replay prompt events in
+      // session_history. Ask-user resolution is monotonic: a stale
+      // session_history response requested before a CLI/Android answer must
+      // never reopen a prompt that was resolved by a newer live frame.
       final preserved = <MessageRecord>[];
+      final liveResolvedAskById = <String, AskUserPromptData>{};
       for (final v in box.values) {
         final r = MessageRecord.fromJson(_coerce(v));
+        final ask = r.askUser;
+        if (r.role == MsgRole.askUser && (ask?.resolved ?? false)) {
+          liveResolvedAskById[r.id] = ask!;
+        }
         final missingFromHistory = !historyIds.contains(_key(r.role, r.id));
         if (r.role == MsgRole.user && r.pending && missingFromHistory) {
           preserved.add(r);
         } else if (r.role == MsgRole.askUser &&
-            !(r.askUser?.resolved ?? false) &&
+            ask != null &&
+            !ask.resolved &&
             missingFromHistory) {
           preserved.add(r);
         }
       }
+      MessageRecord mergeLiveAskResolution(MessageRecord row) {
+        final ask = row.askUser;
+        final live = liveResolvedAskById[row.id];
+        if (row.role != MsgRole.askUser ||
+            ask == null ||
+            live == null ||
+            ask.resolved) {
+          return row;
+        }
+        return row.copyWith(
+          askUser: ask.copyWith(
+            resolved: true,
+            cancelled: live.cancelled,
+            answerLabel: live.answerLabel,
+          ),
+        );
+      }
+
       // Desired ordered state: history (seq = index) then preserved pending.
       final desired = <MessageRecord>[
-        for (var i = 0; i < rows.length; i++) rows[i].copyWith(seq: i),
+        for (var i = 0; i < rows.length; i++)
+          mergeLiveAskResolution(rows[i]).copyWith(seq: i),
         for (var j = 0; j < preserved.length; j++)
           preserved[j].copyWith(seq: rows.length + j),
       ];

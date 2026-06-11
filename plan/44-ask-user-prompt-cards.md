@@ -311,9 +311,16 @@ Acceptance:
 
 Current smoke status:
 
-- Android smoke is blocked on this host: `adb` is not installed, `flutter
-  devices` only shows Linux desktop, and `flutter emulators` finds no Android
-  emulator sources.
+- Android answer → CLI prompt resolution passed in a real interactive smoke.
+- CLI answer was persisted and appeared after leaving/re-entering the room, but
+  initially did not update the active Android card live. Root cause: a stale
+  `session_history` response requested before the CLI answer could arrive after
+  the live `ask_user_resolved` frame and reopen the prompt. The app now treats
+  ask_user resolution as monotonic when reconciling history; after installing a
+  rebuilt Android app, CLI answer → Android card resolution passed in-place.
+- Android device automation is blocked on this host: `adb` is not installed,
+  `flutter devices` only shows Linux desktop, and `flutter emulators` finds no
+  Android emulator sources.
 - iOS build/smoke is blocked on this host: this Flutter install exposes no
   `flutter build ios` subcommand on Linux.
 
@@ -334,9 +341,9 @@ Current smoke status:
 - [x] Prompt response does not disturb streaming, steering, or Stop/cancel state.
 - [x] Relevant Flutter tests pass.
 - [x] Relevant pi-extension tests and typecheck pass.
-- [ ] Android manual smoke proves Android answer resolves CLI prompt and agent continues.
+- [x] Android manual smoke proves Android answer resolves CLI prompt and agent continues.
 - [ ] iOS build/smoke verifies the shared Flutter implementation.
-- [ ] Real interactive TUI `ask_user` smoke proves CLI answer resolves Android
+- [x] Real interactive TUI `ask_user` smoke proves CLI answer resolves Android
       card and Android answer resolves CLI prompt.
 
 ## Risks

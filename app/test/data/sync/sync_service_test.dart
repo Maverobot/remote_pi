@@ -676,6 +676,154 @@ void main() {
   });
 
   test(
+    'stale session_history cannot reopen a live-resolved ask_user card',
+    () async {
+      final s = await setup();
+      s.ch.push(
+        AskUserPrompt(
+          id: 'ask-stale-history',
+          question: 'Pick one',
+          context: 'ctx',
+          options: const [AskUserPromptOption(title: 'A')],
+          allowMultiple: false,
+          allowFreeform: false,
+          allowComment: false,
+        ),
+      );
+      await _settle();
+      s.ch.push(
+        AskUserResolved(
+          id: 'ask-stale-history',
+          answerLabel: 'A',
+          cancelled: false,
+        ),
+      );
+      await _settle();
+      expect(
+        messages(
+          s.epk,
+        ).singleWhere((r) => r.role == MsgRole.askUser).askUser?.resolved,
+        isTrue,
+      );
+
+      // A session_sync requested before the CLI answer can arrive late with
+      // only the prompt event. Resolution is monotonic; stale history must not
+      // reopen the Android prompt until a fresh sync arrives.
+      s.ch.push(
+        SessionHistory(
+          inReplyTo: 'h-stale-before-answer',
+          sessionStartedAt: 0,
+          eos: true,
+          events: const [
+            AskUserPromptEvt(
+              ts: 10,
+              id: 'ask-stale-history',
+              question: 'Pick one',
+              context: 'ctx',
+              options: [AskUserPromptOption(title: 'A')],
+              allowMultiple: false,
+              allowFreeform: false,
+              allowComment: false,
+            ),
+          ],
+        ),
+      );
+      await _settle();
+
+      final ask = messages(s.epk).singleWhere((r) => r.role == MsgRole.askUser);
+      expect(ask.askUser?.resolved, isTrue);
+      expect(ask.askUser?.answerLabel, 'A');
+
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  test('empty session_history clears a resolved ask_user card', () async {
+    final s = await setup();
+    s.ch.push(
+      AskUserPrompt(
+        id: 'ask-reset',
+        question: 'Old prompt',
+        context: '',
+        options: const [],
+        allowMultiple: false,
+        allowFreeform: true,
+        allowComment: false,
+      ),
+    );
+    await _settle();
+    s.ch.push(
+      AskUserResolved(id: 'ask-reset', answerLabel: 'done', cancelled: false),
+    );
+    await _settle();
+    expect(
+      messages(s.epk).where((r) => r.role == MsgRole.askUser),
+      hasLength(1),
+    );
+
+    s.ch.push(
+      SessionHistory(
+        inReplyTo: 'h-reset',
+        sessionStartedAt: 0,
+        eos: true,
+        events: const [],
+      ),
+    );
+    await _settle();
+
+    expect(messages(s.epk), isEmpty);
+
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test(
+    'truncated session_history omission does not append old resolved ask_user',
+    () async {
+      final s = await setup();
+      s.ch.push(
+        AskUserPrompt(
+          id: 'ask-truncated-away',
+          question: 'Old prompt',
+          context: '',
+          options: const [],
+          allowMultiple: false,
+          allowFreeform: true,
+          allowComment: false,
+        ),
+      );
+      await _settle();
+      s.ch.push(
+        AskUserResolved(
+          id: 'ask-truncated-away',
+          answerLabel: 'done',
+          cancelled: false,
+        ),
+      );
+      await _settle();
+
+      s.ch.push(
+        SessionHistory(
+          inReplyTo: 'h-truncated',
+          sessionStartedAt: 0,
+          eos: true,
+          truncated: true,
+          events: const [UserInputEvt(ts: 99, id: 'tail', text: 'latest')],
+        ),
+      );
+      await _settle();
+
+      final rows = messages(s.epk);
+      expect(rows.map((r) => r.role), [MsgRole.user]);
+      expect(rows.single.id, 'tail');
+
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  test(
     'switching the writer to a new session: a late frame from the OLD '
     "connection is dropped — it neither writes the new box nor appears in the "
     "new session's read projection (plan/32f session-switch bleed)",
