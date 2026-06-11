@@ -942,6 +942,7 @@ class AskUserPrompt extends ServerMessage {
   final bool allowMultiple;
   final bool allowFreeform;
   final bool allowComment;
+  final String? roomId;
 
   AskUserPrompt({
     required this.id,
@@ -951,6 +952,7 @@ class AskUserPrompt extends ServerMessage {
     required this.allowMultiple,
     required this.allowFreeform,
     required this.allowComment,
+    this.roomId,
   });
 
   factory AskUserPrompt.fromJson(Map<String, dynamic> j) {
@@ -972,6 +974,7 @@ class AskUserPrompt extends ServerMessage {
       allowFreeform:
           _asBool(j['allow_freeform']) || _asBool(j['allowFreeform']),
       allowComment: _asBool(j['allow_comment']) || _asBool(j['allowComment']),
+      roomId: j['room_id'] as String?,
     );
   }
 }
@@ -980,17 +983,20 @@ class AskUserResolved extends ServerMessage {
   final String id;
   final String? answerLabel;
   final bool cancelled;
+  final String? roomId;
 
   AskUserResolved({
     required this.id,
     required this.answerLabel,
     required this.cancelled,
+    this.roomId,
   });
 
   factory AskUserResolved.fromJson(Map<String, dynamic> j) => AskUserResolved(
     id: j['id'] as String,
     answerLabel: j['answer_label'] as String?,
     cancelled: _asBool(j['cancelled']),
+    roomId: j['room_id'] as String?,
   );
 }
 
@@ -1251,12 +1257,14 @@ class SessionHistory extends ServerMessage {
   final List<SessionHistoryEvent> events;
   final bool eos;
   final bool truncated;
+  final String? roomId;
   SessionHistory({
     required this.inReplyTo,
     required this.sessionStartedAt,
     required this.events,
     required this.eos,
     this.truncated = false,
+    this.roomId,
   });
 
   factory SessionHistory.fromJson(Map<String, dynamic> j) => SessionHistory(
@@ -1268,6 +1276,7 @@ class SessionHistory extends ServerMessage {
     eos: j['eos'] as bool,
     // Tolerate absence during the protocol transition window.
     truncated: (j['truncated'] as bool?) ?? false,
+    roomId: j['room_id'] as String?,
   );
 }
 

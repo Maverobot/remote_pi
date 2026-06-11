@@ -95,6 +95,7 @@ export type SessionHistoryEvent =
       allow_multiple: boolean;
       allow_freeform: boolean;
       allow_comment: boolean;
+      room_id?: string;
     }
   | {
       ts: number;
@@ -102,6 +103,7 @@ export type SessionHistoryEvent =
       id: string;
       answer_label: string;
       cancelled: boolean;
+      room_id?: string;
     }
   | {
       ts: number;
@@ -178,12 +180,14 @@ export type ServerMessage =
       allow_multiple: boolean;
       allow_freeform: boolean;
       allow_comment: boolean;
+      room_id?: string;
     }
   | {
       type: "ask_user_resolved";
       id: string;
       answer_label: string;
       cancelled: boolean;
+      room_id?: string;
     }
   | { type: "queued_message_state"; id?: string; text?: string }
   | { type: "agent_chunk"; in_reply_to: string; delta: string }
@@ -205,6 +209,7 @@ export type ServerMessage =
       events: SessionHistoryEvent[];
       eos: boolean;
       truncated: boolean;
+      room_id?: string;
     }
   // Plan/28 — Replies for typed app actions.
   // `action_ok` / `action_error` carry the original `ActionName` so the

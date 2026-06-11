@@ -79,6 +79,13 @@ void main() {
       expect(qr!.roomId, isNull);
     });
 
+    test('trims pasted QR whitespace', () {
+      final raw = '  remotepi://pair?t=$goodToken&epk=$goodEpk&n=$sessionName  ';
+      final qr = QrPairPayload.tryParse(raw);
+      expect(qr, isNotNull);
+      expect(qr!.sessionName, 'test session');
+    });
+
     test('empty rm= is treated as null', () {
       final raw = 'remotepi://pair?t=$goodToken&epk=$goodEpk&'
           'rm=&n=$sessionName';

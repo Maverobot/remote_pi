@@ -80,8 +80,8 @@ void main() {
     return (conn: conn, ch: ch, sync: sync, epk: epk);
   }
 
-  List<MessageRecord> messages(String epk) {
-    final box = LocalBoxes().openMsgsBox(epk, 'main');
+  List<MessageRecord> messages(String epk, [String room = 'main']) {
+    final box = LocalBoxes().openMsgsBox(epk, room);
     final out = [
       for (final v in box.values)
         MessageRecord.fromJson((v as Map).cast<String, dynamic>()),
@@ -440,6 +440,42 @@ void main() {
     expect(row.askUser?.options, hasLength(2));
     expect(row.askUser?.allowFreeform, isTrue);
     expect(row.askUser?.resolved, isFalse);
+
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test('ask_user prompt with mismatched room_id is ignored', () async {
+    final s = await setup();
+    s.ch.push(
+      AskUserPrompt(
+        id: 'ask-wrong-room',
+        question: 'Should not show here',
+        context: '',
+        options: const [],
+        allowMultiple: false,
+        allowFreeform: true,
+        allowComment: false,
+        roomId: 'other-room',
+      ),
+    );
+    await _settle();
+    expect(messages(s.epk), isEmpty);
+
+    s.ch.push(
+      AskUserPrompt(
+        id: 'ask-main-room',
+        question: 'Should show here',
+        context: '',
+        options: const [],
+        allowMultiple: false,
+        allowFreeform: true,
+        allowComment: false,
+        roomId: 'main',
+      ),
+    );
+    await _settle();
+    expect(messages(s.epk).single.id, 'ask-main-room');
 
     s.conn.dispose();
     s.sync.dispose();

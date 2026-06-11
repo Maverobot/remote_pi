@@ -442,6 +442,8 @@ class SyncService extends Service {
     if (_pendingSyncRequest) requestSync();
   }
 
+  bool _isForActiveRoom(String? roomId) => roomId == null || roomId == _activeRoomId;
+
   void _onServerMessage(ServerMessage msg, [String? originEpk]) {
     // Plan/32f — drop frames from a peer whose channel is no longer the active
     // session (a stale connection still draining after `switchTo`). Without
@@ -534,7 +536,9 @@ class SyncService extends Service {
         :final allowMultiple,
         :final allowFreeform,
         :final allowComment,
+        :final roomId,
       ):
+        if (!_isForActiveRoom(roomId)) break;
         // Persist/refresh ask-user prompt rows in SSOT. These are
         // UI affordances; they must not alter streaming or working state.
         // ignore: discarded_futures
@@ -559,7 +563,13 @@ class SyncService extends Service {
           );
         });
 
-      case AskUserResolved(:final id, :final answerLabel, :final cancelled):
+      case AskUserResolved(
+        :final id,
+        :final answerLabel,
+        :final cancelled,
+        :final roomId,
+      ):
+        if (!_isForActiveRoom(roomId)) break;
         // Persist prompt resolution without affecting current working/streaming.
         // ignore: discarded_futures
         _upsert(MsgRole.askUser, id, (seq, existing) {
@@ -652,7 +662,8 @@ class SyncService extends Service {
           _conn.switchTo(peer);
         }
 
-      case SessionHistory():
+      case SessionHistory(:final roomId):
+        if (!_isForActiveRoom(roomId)) break;
         // ignore: discarded_futures
         _applyHistory(msg);
 

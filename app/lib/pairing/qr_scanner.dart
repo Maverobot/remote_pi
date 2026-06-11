@@ -41,7 +41,7 @@ class QrPairPayload {
 
   static QrPairPayload? tryParse(String raw) {
     try {
-      final uri = Uri.parse(raw);
+      final uri = Uri.parse(raw.trim());
       if (uri.scheme != 'remotepi' || uri.host != 'pair') return null;
       final t = uri.queryParameters['t'];
       final epk = uri.queryParameters['epk'];

@@ -326,6 +326,7 @@ type BufferMsg = {
   askUser?: AskUserPromptNormalized;
   answerLabel?: string;
   cancelled?: boolean;
+  roomId?: string;
   /** Plan/32: pre-compaction token count, set on the synthetic
    *  `role:"compaction"` marker pushed in `session_compact`. */
   tokensBefore?: number;
@@ -3139,6 +3140,7 @@ function _startAskUserPrompt(toolCallId: string, askUser: AskUserPromptNormalize
     timestamp: Date.now(),
     toolCallId,
     askUser,
+    roomId: _myRoomId ?? undefined,
   });
   _broadcastToAskUserCapable({
     type: "ask_user_prompt",
@@ -3149,6 +3151,7 @@ function _startAskUserPrompt(toolCallId: string, askUser: AskUserPromptNormalize
     allow_multiple: askUser.allowMultiple,
     allow_freeform: askUser.allowFreeform,
     allow_comment: askUser.allowComment,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
   return pending;
 }
@@ -3260,12 +3263,14 @@ function _resolveAskUserPrompt(
     toolCallId,
     answerLabel: resolved.answerLabel,
     cancelled: response.kind === "cancelled",
+    roomId: _myRoomId ?? undefined,
   });
   _sendAskUserResolvedToPromptPeers(pending, {
     type: "ask_user_resolved",
     id: toolCallId,
     answer_label: resolved.answerLabel,
     cancelled: response.kind === "cancelled",
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
 
   if (options.deleteAfterResolve) {
@@ -3609,6 +3614,7 @@ function _handleSessionSync(
       events: [],
       eos: true,
       truncated: false,
+      ...(_myRoomId ? { room_id: _myRoomId } : {}),
     });
     return;
   }
@@ -3630,6 +3636,7 @@ function _handleSessionSync(
     events: slice,
     eos: true,
     truncated,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
 }
 
@@ -3659,6 +3666,7 @@ function _resetSessionForNew(inReplyTo: string): void {
     events: [],
     eos: true,
     truncated: false,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
 }
 
@@ -4099,6 +4107,7 @@ export function _mapAgentMessagesToEvents(
         allow_multiple: askUser.allowMultiple,
         allow_freeform: askUser.allowFreeform,
         allow_comment: askUser.allowComment,
+        ...(m.roomId ? { room_id: m.roomId } : {}),
       });
     } else if (m.role === "ask_user_resolved") {
       events.push({
@@ -4107,6 +4116,7 @@ export function _mapAgentMessagesToEvents(
         id: String(m.toolCallId ?? ""),
         answer_label: typeof m.answerLabel === "string" ? m.answerLabel : "",
         cancelled: m.cancelled === true,
+        ...(m.roomId ? { room_id: m.roomId } : {}),
       });
     } else if (m.role === "compaction") {
       // Plan/32: re-render the compaction notice on history re-sync.

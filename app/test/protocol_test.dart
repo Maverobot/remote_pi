@@ -133,6 +133,25 @@ void main() {
       expect(prompt.allowFreeform, isTrue);
     });
 
+    test('parses ask_user room_id for app-side room filtering', () {
+      final prompt = ServerMessage.fromJson({
+        'type': 'ask_user_prompt',
+        'id': 'ask_room',
+        'question': 'Room scoped?',
+        'room_id': 'room-current',
+      }) as AskUserPrompt;
+      final resolved = ServerMessage.fromJson({
+        'type': 'ask_user_resolved',
+        'id': 'ask_room',
+        'answer_label': 'A',
+        'cancelled': false,
+        'room_id': 'room-current',
+      }) as AskUserResolved;
+
+      expect(prompt.roomId, 'room-current');
+      expect(resolved.roomId, 'room-current');
+    });
+
     test('parses ask_user_resolved with cancellation flag', () {
       final msg = ServerMessage.fromJson({
         'type': 'ask_user_resolved',
@@ -186,6 +205,7 @@ void main() {
                 'in_reply_to': 'sync1',
                 'session_started_at': 0,
                 'eos': true,
+                'room_id': 'room-hist',
                 'events': [
                   {
                     'type': 'ask_user_prompt',
@@ -210,6 +230,7 @@ void main() {
                 ],
               })
               as SessionHistory;
+      expect(hist.roomId, 'room-hist');
       expect(hist.events, hasLength(2));
       expect(hist.events[0], isA<AskUserPromptEvt>());
       expect(hist.events[1], isA<AskUserResolvedEvt>());

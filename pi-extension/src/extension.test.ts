@@ -2965,7 +2965,7 @@ describe("rooms wiring", () => {
     expect(_getState()).toBe("idle");
   });
 
-  test("PeerChannel outer envelope omits `room` field (defensive, until W1.A/C ready)", async () => {
+  test("PeerChannel tags outbound app frames with source_room for legacy relay demux", async () => {
     captureHandler("remote-pi");
     await _connectForTest(makeMockCtx("/tmp/remote-pi-room-test"));
 
@@ -2985,13 +2985,15 @@ describe("rooms wiring", () => {
     await new Promise((r) => setTimeout(r, 30));
 
     const sent = relayRef.current!.send.mock.calls.map((c) => c[0] as string);
-    const allFrames = sent.map((line) => JSON.parse(line) as { peer: string; room?: string; ct: string });
-    const channelFrames = allFrames.filter((o) => o.peer === "peer-room-test");
-    expect(channelFrames.length).toBeGreaterThan(0);
-    // Defensive: no frame should carry `room` until downstream is ready.
-    for (const f of channelFrames) {
-      expect(f.room).toBeUndefined();
-    }
+    const allFrames = sent.map((line) => JSON.parse(line) as { peer: string; room?: string; source_room?: string; ct: string });
+    const pongFrame = allFrames.find((outer) => {
+      if (outer.peer !== "peer-room-test") return false;
+      const inner = JSON.parse(Buffer.from(outer.ct, "base64").toString("utf8")) as { type?: string };
+      return inner.type === "pong";
+    });
+    expect(pongFrame).toBeDefined();
+    expect(pongFrame?.room).toBeUndefined();
+    expect(pongFrame?.source_room).toMatch(/^[A-Za-z0-9_-]{12}$/);
   });
 });
 
