@@ -7,7 +7,7 @@ project(runner LANGUAGES CXX)
 set(BINARY_NAME "cockpit")
 # The unique GTK application identifier for this application. See:
 # https://wiki.gnome.org/HowDoI/ChooseApplicationID
-set(APPLICATION_ID "com.example.cockpit")
+set(APPLICATION_ID "work.jacobmoura.cockpit")
 
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
@@ -126,3 +126,19 @@ if(NOT CMAKE_BUILD_TYPE MATCHES "Debug")
   install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_LIB_DIR}"
     COMPONENT Runtime)
 endif()
+
+# === Desktop integration (nome + ícone para publicação) ===
+# .desktop com Name=Cockpit, e ícones do tema hicolor nomeados pelo
+# APPLICATION_ID (work.jacobmoura.cockpit) — é assim que o launcher/dock e a
+# barra de tarefas resolvem nome e ícone do app empacotado (deb/AppImage/snap).
+install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/cockpit.desktop"
+  DESTINATION "${CMAKE_INSTALL_PREFIX}/share/applications"
+  RENAME "${APPLICATION_ID}.desktop"
+  COMPONENT Runtime)
+
+foreach(icon_size 64 128 256 512 1024)
+  install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/runner/resources/app_icon_${icon_size}.png"
+    DESTINATION "${CMAKE_INSTALL_PREFIX}/share/icons/hicolor/${icon_size}x${icon_size}/apps"
+    RENAME "${APPLICATION_ID}.png"
+    COMPONENT Runtime)
+endforeach()

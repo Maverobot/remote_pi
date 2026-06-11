@@ -54,6 +54,10 @@ static void my_application_activate(GApplication* application) {
 
   gtk_window_set_default_size(window, 1280, 720);
 
+  // Ícone da janela/taskbar: usa o ícone do tema cujo nome é o APPLICATION_ID
+  // (instalado em share/icons/hicolor/.../work.jacobmoura.cockpit.png).
+  gtk_window_set_default_icon_name(APPLICATION_ID);
+
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(
       project, self->dart_entrypoint_arguments);
