@@ -1242,6 +1242,49 @@ void _registerRoomsTests() {
     );
 
     test(
+      'room discovery does not override an explicit same-peer room switch',
+      () async {
+        final storage = _FakeStorage([]);
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: storage,
+          emitDebounce: Duration.zero,
+        );
+        const pairedPeer = PeerRecord(
+          remoteEpk: 'epk_room_aware',
+          sessionName: 'Pi',
+          relayUrl: 'wss://x',
+          pairedAt: '2026-01-01T00:00:00Z',
+          roomId: 'room-original',
+        );
+        await cm.connectTo(pairedPeer);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        cm.switchRoom('room-selected-by-user');
+        expect(cm.activeRoomId, 'room-selected-by-user');
+
+        ch.pushControl(const RoomAnnounced(
+          peer: 'epk_room_aware',
+          roomId: 'room-other-session',
+          name: 'other session',
+          cwd: '/tmp/other',
+          startedAt: 1000,
+        ));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        expect(
+          cm.activeRoomId,
+          'room-selected-by-user',
+          reason: 'room discovery is only for legacy peers without roomId',
+        );
+        expect(storage.savedPeers, isEmpty);
+
+        cm.dispose();
+      },
+    );
+
+    test(
       'RoomMetaUpdated patches the model on an existing room (plan 18)',
       () async {
         final ch = _ControllableChannel();

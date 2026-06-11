@@ -985,8 +985,11 @@ class ConnectionManager extends Service {
     final active = _activePeer;
     if (active == null) return;
     if (toStandardB64(active.remoteEpk) != peerKey) return;
-    if (active.roomId != null && active.roomId == _activeRoomId) {
-      return; // already bound — discovery is a no-op
+    if (active.roomId != null) {
+      return; // already room-aware — never let discovery override user switches
+    }
+    if (_activeRoomId != 'main') {
+      return; // user already selected a room before legacy discovery completed
     }
     _activeRoomId = discoveredRoom;
     final cur = _status;
