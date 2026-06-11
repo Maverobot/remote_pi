@@ -417,6 +417,98 @@ void main() {
     },
   );
 
+  test('ask_user prompt is upserted as SSOT row', () async {
+    final s = await setup();
+    s.ch.push(
+      AskUserPrompt(
+        id: 'ask1',
+        question: 'Pick one?',
+        context: 'task context',
+        options: [
+          AskUserPromptOption(title: 'A', description: 'Fast'),
+          const AskUserPromptOption(title: 'B'),
+        ],
+        allowMultiple: false,
+        allowFreeform: true,
+        allowComment: true,
+      ),
+    );
+    await _settle();
+
+    final row = messages(s.epk).singleWhere((r) => r.role == MsgRole.askUser);
+    expect(row.askUser?.question, 'Pick one?');
+    expect(row.askUser?.options, hasLength(2));
+    expect(row.askUser?.allowFreeform, isTrue);
+    expect(row.askUser?.resolved, isFalse);
+
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test(
+    'respondAskUser sends AskUserResponse and marks the card resolved',
+    () async {
+      final s = await setup();
+      s.ch.push(
+        AskUserPrompt(
+          id: 'ask2',
+          question: 'Need answer',
+          context: '',
+          options: const [AskUserPromptOption(title: 'A')],
+          allowMultiple: false,
+          allowFreeform: false,
+          allowComment: false,
+        ),
+      );
+      await _settle();
+
+      await s.sync.respondAskUser(
+        AskUserResponse.selection(id: 'ask2', selections: const ['A']),
+      );
+      await _settle();
+
+      final sent = s.ch.sent.whereType<AskUserResponse>().lastWhere(
+        (m) => m.id == 'ask2',
+      );
+      expect(sent.id, 'ask2');
+      expect(sent, isA<AskUserResponse>());
+      expect(
+        messages(
+          s.epk,
+        ).singleWhere((r) => r.role == MsgRole.askUser).askUser!.resolved,
+        isTrue,
+      );
+
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  test('ask_user_resolved updates existing card as resolved', () async {
+    final s = await setup();
+    s.ch.push(
+      AskUserPrompt(
+        id: 'ask3',
+        question: 'Need answer',
+        context: '',
+        options: const [AskUserPromptOption(title: 'A')],
+        allowMultiple: false,
+        allowFreeform: false,
+        allowComment: false,
+      ),
+    );
+    await _settle();
+    s.ch.push(AskUserResolved(id: 'ask3', answerLabel: 'A', cancelled: false));
+    await _settle();
+
+    final row = messages(s.epk).singleWhere((r) => r.role == MsgRole.askUser);
+    expect(row.askUser?.resolved, isTrue);
+    expect(row.askUser?.answerLabel, 'A');
+
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
   test('cursor: a chunk appends onto the seeded empty buffer', () async {
     final s = await setup();
     s.ch.push(UserInput(id: 'u1', text: 'hi'));
@@ -500,6 +592,85 @@ void main() {
     );
 
     await sub.cancel();
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test(
+    'session_history without prompt replay preserves open ask_user card',
+    () async {
+      final s = await setup();
+      s.ch.push(
+        AskUserPrompt(
+          id: 'ask-open',
+          question: 'Still open?',
+          context: '',
+          options: const [],
+          allowMultiple: false,
+          allowFreeform: true,
+          allowComment: false,
+        ),
+      );
+      await _settle();
+
+      s.ch.push(
+        SessionHistory(
+          inReplyTo: 'h-no-ask',
+          sessionStartedAt: 0,
+          eos: true,
+          events: const [UserInputEvt(ts: 1, id: 'u1', text: 'hi')],
+        ),
+      );
+      await _settle();
+
+      final rows = messages(s.epk);
+      expect(rows.any((r) => r.role == MsgRole.user && r.id == 'u1'), isTrue);
+      final ask = rows.singleWhere((r) => r.role == MsgRole.askUser);
+      expect(ask.id, 'ask-open');
+      expect(ask.askUser?.resolved, isFalse);
+
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  test('session_history ask-user events resolve a single card row', () async {
+    final s = await setup();
+    s.ch.push(
+      SessionHistory(
+        inReplyTo: 'h-ask-1',
+        sessionStartedAt: 0,
+        eos: true,
+        events: const [
+          AskUserPromptEvt(
+            ts: 10,
+            id: 'ask4',
+            question: 'Pick one',
+            context: 'ctx',
+            options: [
+              AskUserPromptOption(title: 'A'),
+              AskUserPromptOption(title: 'B'),
+            ],
+            allowMultiple: false,
+            allowFreeform: false,
+            allowComment: false,
+          ),
+          AskUserResolvedEvt(
+            ts: 11,
+            id: 'ask4',
+            answerLabel: 'A',
+            cancelled: false,
+          ),
+        ],
+      ),
+    );
+    await _settle();
+
+    final rows = messages(s.epk);
+    expect(rows.map((r) => r.role), [MsgRole.askUser]);
+    expect(rows.single.askUser?.resolved, isTrue);
+    expect(rows.single.askUser?.answerLabel, 'A');
+
     s.conn.dispose();
     s.sync.dispose();
   });

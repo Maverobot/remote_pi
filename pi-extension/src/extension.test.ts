@@ -153,6 +153,7 @@ const {
   _getLockedNameForTest,
   _resetCwdLockForTest,
   _handleControl,
+  _routeClientMessageFrom,
   CTRL_PREFIX,
 } = await import("./index.js");
 const { acquireCwdLock } = await import("./session/cwd_lock.js");
@@ -620,9 +621,9 @@ describe("contract fixtures: pair_*", () => {
     }
   });
 
-  test("all 31 fixture files present", () => {
+  test("all 34 fixture files present", () => {
     const files = readdirSync(fixtureDir).filter((f) => f.endsWith(".jsonl"));
-    expect(files).toHaveLength(31);
+    expect(files).toHaveLength(34);
   });
 });
 
@@ -824,13 +825,20 @@ function captureEventHandler(eventName: string): EventHandler {
   return captured;
 }
 
-async function _pairForTest(appPeerId: string): Promise<void> {
+async function _pairForTest(
+  appPeerId: string,
+  capabilities: string[] | undefined = ["ask_user_prompt_cards"],
+): Promise<void> {
   captureHandler("remote-pi");
   await _connectForTest(makeMockCtx());
   relayRef.current!.emit("message", JSON.stringify({
     peer: appPeerId,
     ct: Buffer.from(JSON.stringify({
-      type: "pair_request", id: "req-1", token: "test-token", device_name: "Phone",
+      type: "pair_request",
+      id: "req-1",
+      token: "test-token",
+      device_name: "Phone",
+      ...(capabilities ? { capabilities } : {}),
     })).toString("base64"),
   }));
   await vi.waitFor(() => expect(_getState()).toBe("paired"), { timeout: 2000 });
@@ -842,7 +850,11 @@ async function _pairAdditionalForTest(appPeerId: string, deviceName: string): Pr
   relayRef.current!.emit("message", JSON.stringify({
     peer: appPeerId,
     ct: Buffer.from(JSON.stringify({
-      type: "pair_request", id: `req-${appPeerId.slice(0, 6)}`, token: "test-token", device_name: deviceName,
+      type: "pair_request",
+      id: `req-${appPeerId.slice(0, 6)}`,
+      token: "test-token",
+      device_name: deviceName,
+      capabilities: ["ask_user_prompt_cards"],
     })).toString("base64"),
   }));
   await vi.waitFor(
@@ -860,7 +872,11 @@ async function _pairForTestWithCtx(
   relayRef.current!.emit("message", JSON.stringify({
     peer: appPeerId,
     ct: Buffer.from(JSON.stringify({
-      type: "pair_request", id: "req-1", token: "test-token", device_name: "Phone",
+      type: "pair_request",
+      id: "req-1",
+      token: "test-token",
+      device_name: "Phone",
+      capabilities: ["ask_user_prompt_cards"],
     })).toString("base64"),
   }));
   await vi.waitFor(() => expect(_getState()).toBe("paired"), { timeout: 2000 });
@@ -1534,6 +1550,135 @@ describe("tool visibility", () => {
     });
   });
 
+  test("tool_call ask_user with active owner forwards prompt, blocks local UI", async () => {
+    await _pairForTest("peer-ask-forward");
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    const onToolCall = captureEventHandler("tool_call");
+    const onToolStart = captureEventHandler("tool_execution_start");
+
+    const result = onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_1",
+      toolName: "ask_user",
+      input: {
+        question: "Deploy now?",
+        context: "A production decision",
+        options: ["Canary", { title: "Blue-green", description: "Full rollout" }],
+        allow_multiple: false,
+        allow_freeform: true,
+        allow_comment: false,
+      },
+    } as unknown);
+
+    const sentAfterToolCall = relayRef.current!.send.mock.calls
+      .slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    const prompt = sentAfterToolCall.find((d) => d.inner.type === "ask_user_prompt");
+    expect(result).toMatchObject({ block: true, reason: expect.stringContaining("forwarded") });
+    expect(prompt).toBeDefined();
+    expect(prompt!.inner).toMatchObject({
+      type: "ask_user_prompt",
+      id: "tc_ask_1",
+      question: "Deploy now?",
+      context: "A production decision",
+      options: [{ title: "Canary" }, { title: "Blue-green", description: "Full rollout" }],
+      allow_multiple: false,
+      allow_freeform: true,
+      allow_comment: false,
+    });
+
+    const beforeExecution = relayRef.current!.send.mock.calls.length;
+    onToolStart({
+      type: "tool_execution_start",
+      toolCallId: "tc_ask_1",
+      toolName: "ask_user",
+      args: { question: "ignored" },
+    });
+
+    const live = relayRef.current!.send.mock.calls.slice(beforeExecution).map((c) => c[0] as string);
+    const requests = live.map(decodeSentCt).filter((d) => d.inner.type === "tool_request");
+    expect(requests).toHaveLength(0);
+  });
+
+  test("tool_call ask_user defaults freeform to enabled like pi-ask-user", async () => {
+    await _pairForTest("peer-ask-default-freeform");
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_default",
+      toolName: "ask_user",
+      input: { question: "What should we do?" },
+    } as unknown);
+
+    const prompt = relayRef.current!.send.mock.calls
+      .slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt)
+      .find((d) => d.inner.type === "ask_user_prompt");
+    expect(prompt?.inner).toMatchObject({
+      type: "ask_user_prompt",
+      id: "tc_ask_default",
+      question: "What should we do?",
+      allow_freeform: true,
+    });
+  });
+
+  test("tool_call ask_user with old app capability keeps local path unchanged", async () => {
+    await _pairForTest("peer-ask-old", []);
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+    const onToolCall = captureEventHandler("tool_call");
+    const onToolStart = captureEventHandler("tool_execution_start");
+
+    const result = onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_old",
+      toolName: "ask_user",
+      input: { question: "local fallback" },
+    } as unknown);
+
+    onToolStart({
+      type: "tool_execution_start",
+      toolCallId: "tc_ask_old",
+      toolName: "ask_user",
+      args: { question: "local fallback" },
+    });
+
+    const sent = relayRef.current!.send.mock.calls
+      .slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    expect(result).toBeUndefined();
+    expect(sent.some((d) => d.inner.type === "ask_user_prompt")).toBe(false);
+    expect(sent.some((d) => d.inner.type === "tool_request")).toBe(true);
+  });
+
+  test("tool_call ask_user without active owner keeps local path unchanged", () => {
+    const onToolCall = captureEventHandler("tool_call");
+    const onToolStart = captureEventHandler("tool_execution_start");
+
+    const result = onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_local",
+      toolName: "ask_user",
+      input: { question: "local fallback" },
+    } as unknown);
+
+    onToolStart({
+      type: "tool_execution_start",
+      toolCallId: "tc_ask_local",
+      toolName: "ask_user",
+      args: { question: "local fallback" },
+    });
+
+    expect(result).toBeUndefined();
+    // No paired owner, so no tool_request/ask_user_prompt can be emitted.
+    expect(relayRef.current).toBeNull();
+  });
+
   test("tool_execution_start enriches edit args with numbered context hunks", async () => {
     await _pairForTest("peer-edit");
     const cwd = mkdtempSync(join(tmpdir(), "remote-pi-edit-"));
@@ -1766,6 +1911,256 @@ describe("tool visibility", () => {
       { role: "toolResult", toolCallId: "tc_w", isError: true, content: [{ type: "text", text: "ping: cannot resolve host" }], timestamp: 1 },
     ])[0] as { error?: string };
     expect(hist.error).toBe(w?.inner.error);
+  });
+});
+
+describe("ask_user prompt forwarding", () => {
+  beforeEach(async () => {
+    vi.clearAllMocks();
+    _knownPeers.length = 0;
+    _addedPeers.length = 0;
+    _removedPeers.length = 0;
+    _consumeCalls.length = 0;
+    _setRelayCalls.length = 0;
+    _savedRelayUrl = null;
+    _tokenStatus = "ok";
+    relayRef.current = null;
+    const qr = await import("./pairing/qr.js");
+    (qr.qrSession.consumeToken as unknown as ReturnType<typeof vi.fn>).mockImplementation(
+      (token: string) => {
+        _consumeCalls.push(token);
+        return _tokenStatus;
+      },
+    );
+    const stop = captureHandler("remote-pi stop");
+    await stop("", makeMockCtx());
+  });
+
+  test("first ask_user_response resolves prompt and injects steer text", async () => {
+    await _pairForTest("peer-ask-response");
+
+    const sendsBeforePrompt = relayRef.current!.send.mock.calls.length;
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_2",
+      toolName: "ask_user",
+      input: {
+        question: "Which deployment path should we use?",
+        context: "Staging is green, prod needs quick decision.",
+        options: ["Canary", "Blue-green"],
+        allow_multiple: false,
+        allow_freeform: true,
+        allow_comment: true,
+      },
+    } as unknown);
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendMessage: vi.fn(), sendUserMessage });
+
+    const sender = { send: vi.fn() };
+    const sendsBeforeResponse = relayRef.current!.send.mock.calls.length;
+    _routeClientMessageFrom(sender as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_2",
+      response: { kind: "selection", selections: ["Canary"], comment: "safer" },
+    }, { abort: vi.fn() });
+
+    const sent = relayRef.current!.send.mock.calls
+      .slice(sendsBeforePrompt)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+
+    const prompt = sent.find((d) => d.inner.type === "ask_user_prompt");
+    const resolved = sent.find((d) => d.inner.type === "ask_user_resolved");
+    const echo = sent.find((d) => d.inner.type === "user_message" && d.inner.id === "ask_user_tc_ask_2");
+
+    expect(prompt).toBeDefined();
+    expect(resolved?.inner).toMatchObject({
+      type: "ask_user_resolved",
+      id: "tc_ask_2",
+      answer_label: "Canary",
+      cancelled: false,
+    });
+    expect(echo?.inner).toMatchObject({
+      type: "user_message",
+      id: "ask_user_tc_ask_2",
+      streaming_behavior: "steer",
+    });
+    expect((echo?.inner.text as string)).toContain("Question: Which deployment path should we use?");
+    expect((echo?.inner.text as string)).toContain("Context: Staging is green, prod needs quick decision.");
+    expect((echo?.inner.text as string)).toContain("Answer: Canary");
+    expect((echo?.inner.text as string)).toContain("Comment: safer");
+    expect(sendsBeforeResponse).toBeLessThanOrEqual(relayRef.current!.send.mock.calls.length);
+
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("ask_user response for id=tc_ask_2"),
+      { deliverAs: "steer" },
+    );
+    expect(_getCurrentTurnIdForTest()).toBe("ask_user_tc_ask_2");
+  });
+
+  test("freeform ask_user_response includes optional comment", async () => {
+    await _pairForTest("peer-ask-response-freeform");
+
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_freeform",
+      toolName: "ask_user",
+      input: {
+        question: "What should we do?",
+        allow_freeform: true,
+        allow_comment: true,
+      },
+    } as unknown);
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendMessage: vi.fn(), sendUserMessage });
+
+    const sender = { send: vi.fn() };
+    _routeClientMessageFrom(sender as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_freeform",
+      response: { kind: "freeform", text: "Use B", comment: "least risky" },
+    }, { abort: vi.fn() });
+
+    const injected = sendUserMessage.mock.calls[0]?.[0] as string;
+    expect(injected).toContain("Answer: Use B");
+    expect(injected).toContain("Comment: least risky");
+  });
+
+  test("ask_user_response stays pending when agent injection is unavailable", async () => {
+    await _pairForTest("peer-ask-response-wake-fail");
+
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_wake_fail",
+      toolName: "ask_user",
+      input: { question: "Retry?" },
+    } as unknown);
+
+    const sender1 = { send: vi.fn() };
+    const sendsBeforeFailedResponse = relayRef.current!.send.mock.calls.length;
+    _setPiForTest(null);
+    _routeClientMessageFrom(sender1 as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_wake_fail",
+      response: { kind: "selection", selections: ["A"] },
+    }, { abort: vi.fn() });
+
+    const failedSends = relayRef.current!.send.mock.calls
+      .slice(sendsBeforeFailedResponse)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    expect(sender1.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: "error",
+      code: "internal_error",
+      in_reply_to: "tc_ask_wake_fail",
+    }));
+    expect(failedSends.some((d) => d.inner.type === "ask_user_resolved")).toBe(false);
+    expect(_getCurrentTurnIdForTest()).toBeNull();
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendMessage: vi.fn(), sendUserMessage });
+    const sender2 = { send: vi.fn() };
+    _routeClientMessageFrom(sender2 as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_wake_fail",
+      response: { kind: "selection", selections: ["A"] },
+    }, { abort: vi.fn() });
+
+    expect(sender2.send).not.toHaveBeenCalled();
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test("cancelled ask_user_response resolves as cancelled and does not retry", async () => {
+    await _pairForTest("peer-ask-response-cancel");
+
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_cancel",
+      toolName: "ask_user",
+      input: {
+        question: "Can we continue?",
+      },
+    } as unknown);
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendMessage: vi.fn(), sendUserMessage });
+
+    const sender = { send: vi.fn() };
+    _routeClientMessageFrom(sender as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_cancel",
+      cancelled: true,
+    }, { abort: vi.fn() });
+
+    const sent = relayRef.current!.send.mock.calls
+      .map((c) => c[0] as string)
+      .map(decodeSentCt)
+      .filter((d) => d.inner.id === "tc_ask_cancel" || d.inner.id === "ask_user_tc_ask_cancel");
+
+    const resolved = sent.find((d) => d.inner.type === "ask_user_resolved");
+    const echo = sent.find((d) => d.inner.type === "user_message");
+
+    expect(resolved?.inner).toMatchObject({
+      type: "ask_user_resolved",
+      id: "tc_ask_cancel",
+      cancelled: true,
+    });
+    expect((echo?.inner.text as string)).toContain("Answer: Cancelled");
+    expect(sendUserMessage).toHaveBeenCalledWith(
+      expect.stringContaining("Answer: Cancelled"),
+      { deliverAs: "steer" },
+    );
+  });
+
+  test("second ask_user_response for same id is rejected (first response wins)", async () => {
+    await _pairForTest("peer-ask-response-2");
+
+    const onToolCall = captureEventHandler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_3",
+      toolName: "ask_user",
+      input: {
+        question: "Pick an option",
+      },
+    } as unknown);
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendMessage: vi.fn(), sendUserMessage });
+
+    const sender1 = { send: vi.fn() };
+    _routeClientMessageFrom(sender1 as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_3",
+      response: { kind: "selection", selections: ["A"] },
+    }, { abort: vi.fn() });
+
+    const firstCallCount = relayRef.current!.send.mock.calls.length;
+    const sender2 = { send: vi.fn() };
+    _routeClientMessageFrom(sender2 as unknown as { send: ReturnType<typeof vi.fn> }, {
+      type: "ask_user_response",
+      id: "tc_ask_3",
+      response: { kind: "freeform", text: "fallback" },
+    }, { abort: vi.fn() });
+
+    expect(sender2.send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "error",
+        code: "invalid_message",
+        in_reply_to: "tc_ask_3",
+      }),
+    );
+    // no extra resolved/user_message broadcast after first-resolution
+    expect(relayRef.current!.send.mock.calls).toHaveLength(firstCallCount);
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sender1.send).not.toHaveBeenCalled();
   });
 });
 
@@ -2571,6 +2966,50 @@ describe("session sync", () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: "user_input", text: "just text" });
     expect(events[0]).not.toHaveProperty("images");
+  });
+
+  test("mapping (plan/44): ask_user markers → prompt and resolved history events", () => {
+    const events = _mapAgentMessagesToEvents([
+      {
+        role: "ask_user_prompt",
+        toolCallId: "tc_ask_hist",
+        timestamp: 10,
+        askUser: {
+          question: "Pick?",
+          context: "ctx",
+          options: [{ title: "A" }],
+          allowMultiple: false,
+          allowFreeform: true,
+          allowComment: true,
+        },
+      },
+      {
+        role: "ask_user_resolved",
+        toolCallId: "tc_ask_hist",
+        timestamp: 11,
+        answerLabel: "A",
+        cancelled: false,
+      },
+    ] as unknown as Parameters<typeof _mapAgentMessagesToEvents>[0]);
+
+    expect(events).toHaveLength(2);
+    expect(events[0]).toMatchObject({
+      ts: 10,
+      type: "ask_user_prompt",
+      id: "tc_ask_hist",
+      question: "Pick?",
+      context: "ctx",
+      options: [{ title: "A" }],
+      allow_freeform: true,
+      allow_comment: true,
+    });
+    expect(events[1]).toMatchObject({
+      ts: 11,
+      type: "ask_user_resolved",
+      id: "tc_ask_hist",
+      answer_label: "A",
+      cancelled: false,
+    });
   });
 
   test("mapping (plan/32): compaction marker → compaction event (history re-sync)", () => {

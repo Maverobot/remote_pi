@@ -535,6 +535,87 @@ class Cancel extends ClientMessage {
   };
 }
 
+/// Plan/44 — answer to `ask_user_prompt` cards.
+///
+/// `ask_user_response` supports three wire shapes:
+/// 1) {
+///   type: 'ask_user_response',
+///   id: 'prompt-id',
+///   response: {
+///     kind: 'selection',
+///     selections: ['A', 'B'],
+///     comment: 'optional',
+///   },
+/// }
+/// 2) {
+///   type: 'ask_user_response',
+///   id: 'prompt-id',
+///   response: {kind: 'freeform', text: 'Use B'},
+/// }
+/// 3) { type: 'ask_user_response', id: 'prompt-id', cancelled: true }
+class AskUserResponse extends ClientMessage {
+  final String id;
+  final List<String> selections;
+  final String? freeform;
+  final bool cancelled;
+  final String? comment;
+
+  AskUserResponse._({
+    required this.id,
+    this.selections = const [],
+    this.freeform,
+    this.cancelled = false,
+    this.comment,
+  });
+
+  factory AskUserResponse.selection({
+    required String id,
+    required List<String> selections,
+    String? comment,
+  }) {
+    return AskUserResponse._(id: id, selections: selections, comment: comment);
+  }
+
+  factory AskUserResponse.freeform({
+    required String id,
+    required String text,
+    String? comment,
+  }) {
+    return AskUserResponse._(id: id, freeform: text, comment: comment);
+  }
+
+  factory AskUserResponse.cancelled(String id) =>
+      AskUserResponse._(id: id, cancelled: true);
+
+  /// Human-readable summary for SSOT rendering after optimistic local resolve.
+  String get answerLabel {
+    if (cancelled) return '';
+    if (freeform != null && freeform!.isNotEmpty) return freeform!;
+    if (selections.isNotEmpty) return selections.join(', ');
+    return '';
+  }
+
+  @override
+  Map<String, dynamic> toJson() => {
+    'type': 'ask_user_response',
+    'id': id,
+    if (cancelled)
+      'cancelled': true
+    else
+      'response': freeform != null
+          ? {
+              'kind': 'freeform',
+              'text': freeform,
+              if (comment != null) 'comment': comment,
+            }
+          : {
+              'kind': 'selection',
+              'selections': selections,
+              if (comment != null) 'comment': comment,
+            },
+  };
+}
+
 class Ping extends ClientMessage {
   final String id;
   Ping({required this.id});
@@ -542,6 +623,8 @@ class Ping extends ClientMessage {
   @override
   Map<String, dynamic> toJson() => {'type': 'ping', 'id': id};
 }
+
+const List<String> kRemotePiClientCapabilities = ['ask_user_prompt_cards'];
 
 class PairRequest extends ClientMessage {
   final String id;
@@ -559,6 +642,7 @@ class PairRequest extends ClientMessage {
     'id': id,
     'token': token,
     'device_name': deviceName,
+    'capabilities': kRemotePiClientCapabilities,
   };
 }
 
@@ -576,6 +660,7 @@ class SessionSync extends ClientMessage {
     'type': 'session_sync',
     'id': id,
     if (limit != null) 'limit': limit,
+    'capabilities': kRemotePiClientCapabilities,
   };
 }
 
@@ -765,6 +850,9 @@ sealed class ServerMessage {
       'pong' => Pong.fromJson(json),
       'pair_ok' => PairOk.fromJson(json),
       'pair_error' => PairError.fromJson(json),
+      // Plan/44 — server-prompt cards forwarded from `ask_user`.
+      'ask_user_prompt' => AskUserPrompt.fromJson(json),
+      'ask_user_resolved' => AskUserResolved.fromJson(json),
       // Plan/24-fix-app-source-of-truth + follow-up: Pi rebroadcasts
       // every accepted user_message via this stream. Some Pi-extension
       // versions emit `type: "user_input"` (mirror of a terminal-side
@@ -840,6 +928,101 @@ class ToolResult extends ServerMessage {
     error: j['error'] as String?,
   );
 }
+
+/// Plan/44 — app-side prompt card for `ask_user` tool calls.
+class AskUserPrompt extends ServerMessage {
+  final String id;
+  final String question;
+  final String context;
+  final List<AskUserPromptOption> options;
+  final bool allowMultiple;
+  final bool allowFreeform;
+  final bool allowComment;
+
+  AskUserPrompt({
+    required this.id,
+    required this.question,
+    required this.context,
+    required this.options,
+    required this.allowMultiple,
+    required this.allowFreeform,
+    required this.allowComment,
+  });
+
+  factory AskUserPrompt.fromJson(Map<String, dynamic> j) {
+    final optionsRaw = j['options'];
+    final options = optionsRaw is List
+        ? optionsRaw
+              .whereType<dynamic>()
+              .map((o) => AskUserPromptOption.fromJson(o))
+              .toList()
+        : const <AskUserPromptOption>[];
+
+    return AskUserPrompt(
+      id: j['id'] as String,
+      question: (j['question'] as String?) ?? '',
+      context: (j['context'] as String?) ?? '',
+      options: options,
+      allowMultiple:
+          _asBool(j['allow_multiple']) || _asBool(j['allowMultiple']),
+      allowFreeform:
+          _asBool(j['allow_freeform']) || _asBool(j['allowFreeform']),
+      allowComment: _asBool(j['allow_comment']) || _asBool(j['allowComment']),
+    );
+  }
+}
+
+class AskUserResolved extends ServerMessage {
+  final String id;
+  final String? answerLabel;
+  final bool cancelled;
+
+  AskUserResolved({
+    required this.id,
+    required this.answerLabel,
+    required this.cancelled,
+  });
+
+  factory AskUserResolved.fromJson(Map<String, dynamic> j) => AskUserResolved(
+    id: j['id'] as String,
+    answerLabel: j['answer_label'] as String?,
+    cancelled: _asBool(j['cancelled']),
+  );
+}
+
+class AskUserPromptOption {
+  final String title;
+  final String? description;
+
+  const AskUserPromptOption({required this.title, this.description});
+
+  factory AskUserPromptOption.fromJson(dynamic raw) {
+    if (raw is String) return AskUserPromptOption(title: raw);
+    if (raw is Map) {
+      return AskUserPromptOption(
+        title: (raw['title'] as String?) ?? '',
+        description: raw['description'] as String?,
+      );
+    }
+    return const AskUserPromptOption(title: '');
+  }
+
+  Map<String, dynamic> toJson() => {
+    'title': title,
+    if (description != null) 'description': description,
+  };
+
+  @override
+  bool operator ==(Object other) =>
+      other is AskUserPromptOption &&
+      other.title == title &&
+      other.description == description;
+
+  @override
+  int get hashCode => Object.hash(title, description);
+}
+
+bool _asBool(Object? value) => value is bool && value == true;
 
 class ErrorMessage extends ServerMessage {
   final String? inReplyTo;
@@ -1097,6 +1280,28 @@ sealed class SessionHistoryEvent {
         text: j['text'] as String,
         image: _firstImage(j['images']),
       ),
+      'ask_user_prompt' => AskUserPromptEvt(
+        ts: ts,
+        id: j['id'] as String,
+        question: (j['question'] as String?) ?? '',
+        context: (j['context'] as String?) ?? '',
+        options:
+            (j['options'] as List<dynamic>?)
+                ?.map((o) => AskUserPromptOption.fromJson(o))
+                .toList() ??
+            const <AskUserPromptOption>[],
+        allowMultiple:
+            _asBool(j['allow_multiple']) || _asBool(j['allowMultiple']),
+        allowFreeform:
+            _asBool(j['allow_freeform']) || _asBool(j['allowFreeform']),
+        allowComment: _asBool(j['allow_comment']) || _asBool(j['allowComment']),
+      ),
+      'ask_user_resolved' => AskUserResolvedEvt(
+        ts: ts,
+        id: j['id'] as String,
+        answerLabel: j['answer_label'] as String?,
+        cancelled: _asBool(j['cancelled']),
+      ),
       'tool_request' => ToolRequestEvt(
         ts: ts,
         toolCallId: j['tool_call_id'] as String,
@@ -1184,6 +1389,41 @@ class CompactionEvt extends SessionHistoryEvent {
     required super.ts,
     required this.summary,
     this.tokensBefore,
+  });
+}
+
+/// Prompt card event replayed via session history.
+class AskUserPromptEvt extends SessionHistoryEvent {
+  final String id;
+  final String question;
+  final String context;
+  final List<AskUserPromptOption> options;
+  final bool allowMultiple;
+  final bool allowFreeform;
+  final bool allowComment;
+
+  const AskUserPromptEvt({
+    required super.ts,
+    required this.id,
+    required this.question,
+    required this.context,
+    required this.options,
+    required this.allowMultiple,
+    required this.allowFreeform,
+    required this.allowComment,
+  });
+}
+
+/// Ask-user resolution event replayed via session history (or live broadcast).
+class AskUserResolvedEvt extends SessionHistoryEvent {
+  final String id;
+  final String? answerLabel;
+  final bool cancelled;
+  const AskUserResolvedEvt({
+    required super.ts,
+    required this.id,
+    required this.answerLabel,
+    required this.cancelled,
   });
 }
 
