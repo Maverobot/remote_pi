@@ -2479,6 +2479,67 @@ describe("ask_user prompt forwarding", () => {
     expect(sendUserMessage).not.toHaveBeenCalled();
     expect(sender1.send).not.toHaveBeenCalled();
   });
+
+  test("reconnected v2 owner receives pending ask_user prompt in session_sync after offline start", async () => {
+    await _pairForTest("peer-ask-reconnect");
+    expect(_getActivePeerCountForTest()).toBe(1);
+    _onPeerDisconnect("peer-ask-reconnect");
+    expect(_getActivePeerCountForTest()).toBe(0);
+    expect(_getState()).toBe("started");
+
+    const harness = captureEventHarness();
+    const onToolCall = harness.handler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_queued_offline",
+      toolName: "ask_user",
+      input: {
+        question: "Pending after disconnect?",
+        options: ["Yes", "No"],
+      },
+    } as unknown);
+    harness.emitBus("ask:prompt", {
+      toolCallId: "tc_ask_queued_offline",
+      question: "Pending after disconnect?",
+      context: "The app was inactive when this prompt started.",
+      options: ["Yes", { title: "No", description: "Keep waiting" }],
+      allowMultiple: false,
+      allowFreeform: true,
+      allowComment: true,
+      respond: vi.fn(),
+    });
+
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "peer-ask-reconnect",
+      ct: Buffer.from(JSON.stringify({
+        type: "session_sync",
+        id: "sync-reconnected-offline",
+        capabilities: ["ask_user_prompt_cards_v2"],
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    const histories = relayRef.current!.send.mock.calls
+      .slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt)
+      .filter((d) => d.inner.type === "session_history" && d.inner.in_reply_to === "sync-reconnected-offline");
+    expect(histories).toHaveLength(1);
+
+    const events = histories[0]!.inner["events"] as Array<Record<string, unknown>>;
+    const prompt = events.find((e) => e.type === "ask_user_prompt" && e.id === "tc_ask_queued_offline");
+    expect(prompt).toMatchObject({
+      type: "ask_user_prompt",
+      id: "tc_ask_queued_offline",
+      question: "Pending after disconnect?",
+      context: "The app was inactive when this prompt started.",
+      options: [{ title: "Yes" }, { title: "No", description: "Keep waiting" }],
+      allow_multiple: false,
+      allow_freeform: true,
+      allow_comment: true,
+    });
+  });
 });
 
 // ── /remote-pi set-relay + /remote-pi config ──────────────────────────────────
@@ -3044,6 +3105,49 @@ describe("session sync", () => {
       eos: true,
       truncated: false,
     });
+  });
+
+  test("session_sync filters ask_user prompt history for clients without v2 capability", async () => {
+    await _pairForTest("peer-ss-ask-filter");
+    _onPeerDisconnect("peer-ss-ask-filter");
+    const harness = captureEventHarness();
+    const onToolCall = harness.handler("tool_call");
+    onToolCall({
+      type: "tool_call",
+      toolCallId: "tc_ask_sync_filter",
+      toolName: "ask_user",
+      input: {
+        question: "Legacy clients should not see this",
+        options: ["Yes", "No"],
+      },
+    } as unknown);
+    harness.emitBus("ask:prompt", {
+      toolCallId: "tc_ask_sync_filter",
+      respond: vi.fn(),
+    });
+
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "peer-ss-ask-filter",
+      ct: Buffer.from(JSON.stringify({
+        type: "session_sync",
+        id: "req-ask-filter-legacy",
+        capabilities: [],
+      })).toString("base64"),
+    }));
+
+    await new Promise<void>((r) => setImmediate(r));
+
+    const sent = relayRef.current!.send.mock.calls
+      .slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt)
+      .filter((d) => d.inner.type === "session_history" && d.inner.in_reply_to === "req-ask-filter-legacy");
+    expect(sent).toHaveLength(1);
+
+    const events = sent[0]!.inner["events"] as Array<{ type?: string; id?: string }>;
+    expect(events.find((e) => e.type === "ask_user_prompt")).toBeUndefined();
+    expect(events.find((e) => e.type === "ask_user_resolved")).toBeUndefined();
   });
 
   test("no limit in request → server uses env default (30)", async () => {

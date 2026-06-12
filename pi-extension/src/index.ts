@@ -3171,7 +3171,6 @@ function _registerAskUserEventBridge(pi: ExtensionAPI): void {
     if (!toolCallId) return;
 
     const existing = _pendingAskUserPrompts.get(toolCallId);
-    if (!existing && !_anyAskUserCapablePeerActive()) return;
     const pending = existing ?? _startAskUserPrompt(toolCallId, _normalizeAskUserToolInput(event));
     const responder = typeof event.respond === "function"
       ? event.respond
@@ -3625,9 +3624,15 @@ function _handleSessionSync(
   const requested = msg.limit ?? serverLimit;
   const effectiveLimit = Math.min(requested, serverLimit);  // server clamps
 
+  const supportsAskUserPromptCards = Array.isArray(msg.capabilities)
+    ? msg.capabilities.includes(ASK_USER_PROMPT_CAPABILITY)
+    : false;
   const allEvents = _mapAgentMessagesToEvents(_messageBuffer);
-  const slice = effectiveLimit > 0 ? allEvents.slice(-effectiveLimit) : [];
-  const truncated = allEvents.length > effectiveLimit;
+  const visibleEvents = supportsAskUserPromptCards
+    ? allEvents
+    : allEvents.filter((event) => event.type !== "ask_user_prompt" && event.type !== "ask_user_resolved");
+  const slice = effectiveLimit > 0 ? visibleEvents.slice(-effectiveLimit) : [];
+  const truncated = visibleEvents.length > effectiveLimit;
 
   sender.send({
     type: "session_history",
