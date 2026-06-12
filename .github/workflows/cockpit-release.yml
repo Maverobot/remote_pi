@@ -146,14 +146,13 @@ jobs:
       - name: Prepara Fastforge e Inno Setup
         run: |
           dart pub global activate fastforge
-          echo "$LOCALAPPDATA\\Pub\\Cache\\bin" >> "$GITHUB_PATH"
           echo "C:\\Program Files (x86)\\Inno Setup 6" >> "$GITHUB_PATH"
 
       - name: Build + empacota
         run: |
           flutter pub get
           flutter build windows --release
-          fastforge package --platform windows --targets exe
+          dart pub global run fastforge:fastforge package --platform windows --targets exe
           EXE=$(find dist -name "*.exe" | head -1)
           test -n "$EXE"
           mkdir -p out
@@ -169,6 +168,7 @@ jobs:
     name: Linux deb+rpm (${{ matrix.deb_arch }})
     needs: meta
     strategy:
+      fail-fast: false
       matrix:
         include:
           - runner: ubuntu-24.04
@@ -185,25 +185,36 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ env.RELEASE_TAG }}
-      - uses: subosito/flutter-action@v2
+      - name: Flutter x64 (SDK empacotado)
+        if: matrix.deb_arch == 'amd64'
+        uses: subosito/flutter-action@v2
         with:
           flutter-version: ${{ env.FLUTTER_VERSION }}
           channel: stable
           cache: true
 
+      # Não existe SDK empacotado de Flutter pra linux-arm64 (flutter-action
+      # falha em host ARM). O caminho suportado é rodar a partir do git: o
+      # tool se bootstrapa e baixa os artefatos de engine arm64.
+      - name: Flutter arm64 (via git)
+        if: matrix.deb_arch == 'arm64'
+        run: |
+          git clone --depth 1 --branch "$FLUTTER_VERSION" https://github.com/flutter/flutter.git "$RUNNER_TEMP/flutter"
+          echo "$RUNNER_TEMP/flutter/bin" >> "$GITHUB_PATH"
+
       - name: Deps de sistema (GTK, ninja, rpmbuild)
         run: |
           sudo apt-get update
           sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev rpm
+          flutter --version
           dart pub global activate fastforge
-          echo "$HOME/.pub-cache/bin" >> "$GITHUB_PATH"
 
       - name: Build + empacota
         run: |
           flutter pub get
           flutter build linux --release
-          fastforge package --platform linux --targets deb
-          fastforge package --platform linux --targets rpm
+          dart pub global run fastforge:fastforge package --platform linux --targets deb
+          dart pub global run fastforge:fastforge package --platform linux --targets rpm
           DEB=$(find dist -name "*.deb" | head -1); test -n "$DEB"
           RPM=$(find dist -name "*.rpm" | head -1); test -n "$RPM"
           mkdir -p out
