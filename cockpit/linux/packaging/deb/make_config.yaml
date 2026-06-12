@@ -5,6 +5,10 @@
 # Artefato resultante: remote-pi-cockpit_<versão>_<arch>.deb
 display_name: Remote Pi Cockpit
 package_name: remote-pi-cockpit
+# Installed-Size do pacote .deb, em KB (campo obrigatório do maker do Fastforge).
+# Estimativa do bundle Flutter Linux release (~150 MB); recalibrar com
+# `du -sk build/linux/*/release/bundle` quando houver build Linux real.
+installed_size: 150000
 maintainer:
   name: Jacob Moura
   email: jacobaraujo7@gmail.com
