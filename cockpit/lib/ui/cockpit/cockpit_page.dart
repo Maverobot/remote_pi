@@ -403,6 +403,7 @@ class _CockpitPageState extends State<CockpitPage> {
                             rootPath: vm.selectedProject?.path ?? '',
                             listChildren: vm.listChildren,
                             onOpenFile: vm.openFile,
+                            onOpenWith: vm.openWithDefaultApp,
                             onCreateInFolder: (sub, terminal) =>
                                 vm.newTabIn(sub, terminal: terminal),
                           ),

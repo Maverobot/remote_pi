@@ -1,3 +1,5 @@
+import 'dart:io' show Platform;
+
 import 'package:cockpit/domain/entities/file_node.dart';
 import 'package:cockpit/ui/cockpit/widgets/app_menu.dart';
 import 'package:cockpit/ui/core/file_icons/file_icons.dart';
@@ -15,6 +17,7 @@ class FileTreePanel extends StatefulWidget {
     required this.rootPath,
     required this.listChildren,
     required this.onOpenFile,
+    required this.onOpenWith,
     required this.onCreateInFolder,
     this.width = 300,
   });
@@ -24,6 +27,9 @@ class FileTreePanel extends StatefulWidget {
 
   /// Duplo-clique num arquivo → abre no pane.
   final ValueChanged<String> onOpenFile;
+
+  /// "Open with" do menu de contexto → abre o arquivo no app padrão do SO.
+  final ValueChanged<String> onOpenWith;
 
   /// Menu de contexto de uma **pasta**: cria uma aba (agente/terminal) nela. O
   /// 1º arg é o caminho relativo à raiz do workspace; o 2º, `true` = terminal.
@@ -109,6 +115,7 @@ class _FileTreePanelState extends State<FileTreePanel> {
                       selectedPath: _selectedPath,
                       onSelect: (p) => setState(() => _selectedPath = p),
                       onOpenFile: widget.onOpenFile,
+                      onOpenWith: widget.onOpenWith,
                       onCreateInFolder: widget.onCreateInFolder,
                       listChildren: widget.listChildren,
                     ),
@@ -131,6 +138,7 @@ class _DirView extends StatefulWidget {
     required this.selectedPath,
     required this.onSelect,
     required this.onOpenFile,
+    required this.onOpenWith,
     required this.onCreateInFolder,
     required this.listChildren,
   });
@@ -142,6 +150,7 @@ class _DirView extends StatefulWidget {
   final String? selectedPath;
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onOpenFile;
+  final ValueChanged<String> onOpenWith;
   final void Function(String relativeSub, bool terminal) onCreateInFolder;
   final Future<List<FileNode>> Function(String path) listChildren;
 
@@ -186,6 +195,7 @@ class _DirViewState extends State<_DirView> {
               selectedPath: widget.selectedPath,
               onSelect: widget.onSelect,
               onOpenFile: widget.onOpenFile,
+              onOpenWith: widget.onOpenWith,
               onCreateInFolder: widget.onCreateInFolder,
               listChildren: widget.listChildren,
             )
@@ -206,6 +216,7 @@ class _DirViewState extends State<_DirView> {
                 selected: node.path == widget.selectedPath,
                 onTap: () => widget.onSelect(node.path),
                 onDoubleTap: () => widget.onOpenFile(node.path),
+                onOpenWith: () => widget.onOpenWith(node.path),
               ),
             ),
       ],
@@ -222,6 +233,7 @@ class _Folder extends StatefulWidget {
     required this.selectedPath,
     required this.onSelect,
     required this.onOpenFile,
+    required this.onOpenWith,
     required this.onCreateInFolder,
     required this.listChildren,
   });
@@ -233,6 +245,7 @@ class _Folder extends StatefulWidget {
   final String? selectedPath;
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onOpenFile;
+  final ValueChanged<String> onOpenWith;
   final void Function(String relativeSub, bool terminal) onCreateInFolder;
   final Future<List<FileNode>> Function(String path) listChildren;
 
@@ -257,6 +270,9 @@ class _FolderState extends State<_Folder> {
           rootPath: widget.rootPath,
           selected: widget.node.path == widget.selectedPath,
           onCreateInFolder: widget.onCreateInFolder,
+          // "Abrir no explorador do SO" (Finder/Explorer/Nautilus) — abre a
+          // pasta no gerenciador de arquivos padrão.
+          onOpenWith: () => widget.onOpenWith(widget.node.path),
           // Clicar numa pasta seleciona E expande/recolhe.
           onTap: () {
             widget.onSelect(widget.node.path);
@@ -272,6 +288,7 @@ class _FolderState extends State<_Folder> {
             selectedPath: widget.selectedPath,
             onSelect: widget.onSelect,
             onOpenFile: widget.onOpenFile,
+            onOpenWith: widget.onOpenWith,
             onCreateInFolder: widget.onCreateInFolder,
             listChildren: widget.listChildren,
           ),
@@ -291,6 +308,7 @@ class _Row extends StatefulWidget {
     this.selected = false,
     this.onTap,
     this.onDoubleTap,
+    this.onOpenWith,
     this.onCreateInFolder,
   });
 
@@ -303,6 +321,9 @@ class _Row extends StatefulWidget {
   final bool selected;
   final VoidCallback? onTap;
   final VoidCallback? onDoubleTap;
+
+  /// Só em arquivos: "Open with" → abre no app padrão do SO.
+  final VoidCallback? onOpenWith;
 
   /// Só em pastas: cria agente/terminal nela (relativo, terminal?).
   final void Function(String relativeSub, bool terminal)? onCreateInFolder;
@@ -341,12 +362,30 @@ class _RowState extends State<_Row> {
     }
   }
 
-  void _showMenu(BuildContext context) {
+  /// Rótulo do "abrir no explorador do SO" (a ação `open`/`xdg-open`/`start`
+  /// abre a pasta no gerenciador de arquivos padrão).
+  String get _fileExplorerLabel {
+    if (Platform.isMacOS) return 'Open in Finder';
+    if (Platform.isWindows) return 'Open in Explorer';
+    return 'Open in file manager';
+  }
+
+  void _showMenu(BuildContext context, Offset globalPosition) {
     final canCreate = widget.isFolder && widget.onCreateInFolder != null;
+    final isFile = !widget.isFolder;
     showAppMenu<String>(
       context,
       minWidth: 220,
+      globalPosition: globalPosition,
       items: [
+        if (isFile) ...const [
+          AppMenuItem(value: 'open', label: 'Open', icon: Icons.open_in_new),
+          AppMenuItem(
+            value: 'openwith',
+            label: 'Open with',
+            icon: Icons.launch_outlined,
+          ),
+        ],
         if (canCreate) ...const [
           AppMenuItem(
             value: 'agent',
@@ -359,6 +398,12 @@ class _RowState extends State<_Row> {
             icon: Icons.terminal_outlined,
           ),
         ],
+        if (widget.isFolder)
+          AppMenuItem(
+            value: 'reveal',
+            label: _fileExplorerLabel,
+            icon: Icons.folder_open_outlined,
+          ),
         const AppMenuItem(
           value: 'rel',
           label: 'Copy relative path',
@@ -372,6 +417,12 @@ class _RowState extends State<_Row> {
       ],
     ).then((value) {
       switch (value) {
+        case 'open':
+          // "Open" = abrir no pane (mesma ação do duplo-clique no arquivo).
+          widget.onDoubleTap?.call();
+        case 'openwith':
+        case 'reveal':
+          widget.onOpenWith?.call();
         case 'agent':
           widget.onCreateInFolder?.call(_relative, false);
         case 'terminal':
@@ -392,7 +443,7 @@ class _RowState extends State<_Row> {
       borderRadius: BorderRadius.circular(5),
       child: InkWell(
         onTap: _handleTap,
-        onSecondaryTapUp: (_) => _showMenu(context),
+        onSecondaryTapUp: (d) => _showMenu(context, d.globalPosition),
         hoverColor: colors.panel,
         borderRadius: BorderRadius.circular(5),
         child: Padding(

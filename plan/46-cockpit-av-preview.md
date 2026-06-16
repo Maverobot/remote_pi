@@ -120,12 +120,13 @@ pausado no ponto. Dois vídeos em abas diferentes não tocam juntos.
 
 ## Definition of Done
 
-- [ ] `media_kit` integrado e inicializado; sem regressão no viewer atual
-- [ ] `.mp4/.mov/.mkv/.webm/...` e `.mp3/.wav/.flac/...` abrem com player + controles, carregados pausados
-- [ ] Trocar de aba pausa a mídia; fechar dá dispose (zero áudio fantasma); dois players não tocam juntos
-- [ ] Teste unitário da detecção (vídeo/áudio → tipos novos)
-- [ ] Pacotes Linux declaram libmpv (deb `libmpv2`, rpm `mpv-libs`); CI instala `libmpv-dev` no build; deb/rpm instalam e linkam
-- [ ] `flutter analyze` zero issues; validado no macOS (Windows/Linux pelo pipeline)
+- [x] `media_kit` integrado e inicializado; sem regressão no viewer atual (build macOS linka libmpv via pods)
+- [x] `.mp4/.mov/.mkv/.webm/...` e `.mp3/.wav/.flac/...` abrem com player + controles, carregados pausados
+- [x] Trocar de aba pausa a mídia; fechar dá dispose (zero áudio fantasma) — implementado via `active = tabId == pane.active`; **validação tátil no macOS pendente**
+- [x] Teste unitário da detecção (vídeo/áudio → tipos novos) — 5/5
+- [x] Pacotes Linux declaram libmpv (deb `libmpv2`, rpm `mpv-libs`); CI instala `libmpv-dev` no build — feito 2026-06-12; deb/rpm instalam e linkam → valida no CI
+- [x] `flutter analyze` zero issues; build macOS ok (Windows/Linux pelo pipeline)
+- [ ] Validação tátil no macOS + primeira release com A/V (deb/rpm linkando libmpv no CI)
 
 ## Próximos planos / fora de escopo
 

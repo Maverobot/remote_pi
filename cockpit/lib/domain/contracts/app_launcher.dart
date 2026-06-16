@@ -8,4 +8,8 @@ abstract class AppLauncherGateway {
 
   /// Abre [path] no [app]. IDEs usam `open -a`; Finder usa `open`.
   Future<void> launch(LaunchableApp app, String path);
+
+  /// Abre [path] no **app padrão do SO** para aquele tipo de arquivo (macOS
+  /// `open`, Linux `xdg-open`, Windows `start`). Funciona para arquivo e pasta.
+  Future<void> openWithDefaultApp(String path);
 }

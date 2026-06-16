@@ -85,6 +85,21 @@ class AppLauncherImpl implements AppLauncherGateway {
     if (Platform.isLinux) return _launchLinux(app, path);
   }
 
+  @override
+  Future<void> openWithDefaultApp(String path) async {
+    if (Platform.isMacOS) {
+      // `open <path>` abre com o app padrão do tipo (arquivo) ou Finder (pasta).
+      await Process.run('open', [path]);
+    } else if (Platform.isLinux) {
+      final xdg = await unixWhich('xdg-open') ?? 'xdg-open';
+      await Process.run(xdg, [path]);
+    } else if (Platform.isWindows) {
+      // `start` (builtin do cmd) abre com o app padrão via ShellExecute. O `""`
+      // é o título da janela — obrigatório quando o alvo pode vir entre aspas.
+      await Process.run('cmd', ['/c', 'start', '', path]);
+    }
+  }
+
   // ---- macOS ----------------------------------------------------------------
 
   Future<List<LaunchableApp>> _probeMacOS() async {

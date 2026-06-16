@@ -297,6 +297,10 @@ class CockpitViewModel extends ChangeNotifier {
     await _launcher.launch(app, project.path);
   }
 
+  /// Abre [path] no app padrão do SO ("Open with" do menu do file tree).
+  Future<void> openWithDefaultApp(String path) =>
+      _launcher.openWithDefaultApp(path);
+
   // ---- projects -------------------------------------------------------------
   /// Cria (ou seleciona, se já existir) um workspace pra [path]. [name] e
   /// [colorValue] permitem sobrescrever os defaults (fluxo "Criar Workspace",

@@ -19,34 +19,51 @@ class AppMenuItem<T> {
   final bool danger;
 }
 
-/// Menu popup **compacto**, ancorado ao widget que chamou (via [context]): abre
-/// logo **abaixo** do trigger e sobe sozinho se não couber. Ícone à esquerda,
-/// check à direita do item selecionado. Devolve o `value` escolhido (ou `null`).
+/// Menu popup **compacto**. Por padrão ancora no widget que chamou (via
+/// [context]): abre logo **abaixo** do trigger — ideal pra botões. Passando
+/// [globalPosition] (ex.: `onSecondaryTapUp(d).globalPosition`), abre no **ponto
+/// do clique** — ideal pra menu de contexto (botão direito). Sobe/recua sozinho
+/// se não couber. Ícone à esquerda, check à direita do selecionado. Devolve o
+/// `value` escolhido (ou `null`).
 ///
 /// Componente único do app — todos os menus passam por aqui.
 Future<T?> showAppMenu<T>(
   BuildContext context, {
   required List<AppMenuItem<T>> items,
   double minWidth = 200,
+  Offset? globalPosition,
 }) {
-  final trigger = context.findRenderObject() as RenderBox?;
   final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-  if (trigger == null || overlay == null) return Future<T?>.value();
+  if (overlay == null) return Future<T?>.value();
 
   final colors = context.colors;
-  final topLeft = trigger.localToGlobal(Offset.zero, ancestor: overlay);
-  final bottomLeft = trigger.localToGlobal(
-    trigger.size.bottomLeft(Offset.zero),
-    ancestor: overlay,
-  );
-  // Âncora na borda inferior-esquerda do trigger; o showMenu sobe sozinho se
-  // não couber abaixo (ex.: composer no rodapé).
-  final position = RelativeRect.fromLTRB(
-    topLeft.dx,
-    bottomLeft.dy + 4,
-    overlay.size.width - topLeft.dx,
-    0,
-  );
+  final RelativeRect position;
+  if (globalPosition != null) {
+    // Menu de contexto: âncora no cursor (abre logo abaixo-direita do clique).
+    final local = overlay.globalToLocal(globalPosition);
+    position = RelativeRect.fromLTRB(
+      local.dx,
+      local.dy,
+      overlay.size.width - local.dx,
+      0,
+    );
+  } else {
+    final trigger = context.findRenderObject() as RenderBox?;
+    if (trigger == null) return Future<T?>.value();
+    final topLeft = trigger.localToGlobal(Offset.zero, ancestor: overlay);
+    final bottomLeft = trigger.localToGlobal(
+      trigger.size.bottomLeft(Offset.zero),
+      ancestor: overlay,
+    );
+    // Âncora na borda inferior-esquerda do trigger; o showMenu sobe sozinho se
+    // não couber abaixo (ex.: composer no rodapé).
+    position = RelativeRect.fromLTRB(
+      topLeft.dx,
+      bottomLeft.dy + 4,
+      overlay.size.width - topLeft.dx,
+      0,
+    );
+  }
 
   return showMenu<T>(
     context: context,
