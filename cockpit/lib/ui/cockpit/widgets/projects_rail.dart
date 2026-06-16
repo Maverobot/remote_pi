@@ -794,10 +794,11 @@ class _WorkspaceReorderableState extends State<_WorkspaceReorderable> {
         final caret = candidate.isNotEmpty ? _before : null;
         return Stack(
           children: [
-            // Long-press pra pegar — num ListView vertical, o Draggable imediato
-            // brigaria com o gesto de scroll. Segurar e arrastar reposiciona; o
-            // tap continua selecionando e o botão de menu continua abrindo.
-            LongPressDraggable<String>(
+            // Click-drag imediato pra reposicionar (sem segurar). No desktop a
+            // rolagem do rail é via roda/trackpad (PointerScroll, não gesto de
+            // arrasto), então o Draggable imediato não briga com o scroll; o tap
+            // continua selecionando e o botão de menu continua abrindo.
+            Draggable<String>(
               data: widget.projectId,
               dragAnchorStrategy: pointerDragAnchorStrategy,
               feedback: Transform.translate(

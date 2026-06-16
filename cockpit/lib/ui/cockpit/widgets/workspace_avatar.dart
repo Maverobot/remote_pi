@@ -2,11 +2,13 @@ import 'dart:io';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 /// Avatar de um workspace. Por padrão é o quadrado colorido com a inicial do
-/// nome; quando há [imagePath] (PNG/JPG escolhido em Workspace Settings), mostra
-/// a imagem recortada no mesmo formato. Se o arquivo sumir/for ilegível, cai
-/// num **placeholder de erro** (ícone de imagem quebrada) — nunca quebra a UI.
+/// nome; quando há [imagePath] (PNG/JPG/SVG escolhido em Workspace Settings),
+/// mostra a imagem recortada no mesmo formato (SVG renderiza vetorial → nítido
+/// em qualquer tamanho). Se o arquivo sumir/for ilegível, cai num **placeholder
+/// de erro** (ícone de imagem quebrada) — nunca quebra a UI.
 class WorkspaceAvatar extends StatelessWidget {
   const WorkspaceAvatar({
     super.key,
@@ -28,24 +30,27 @@ class WorkspaceAvatar extends StatelessWidget {
   Widget build(BuildContext context) {
     final path = imagePath;
     if (path != null && path.isNotEmpty) {
+      final isSvg = path.toLowerCase().endsWith('.svg');
       return ClipRRect(
         borderRadius: BorderRadius.circular(radius),
-        child: Image.file(
-          File(path),
-          width: size,
-          height: size,
-          fit: BoxFit.cover,
-          filterQuality: FilterQuality.medium,
-          // Arquivo movido/deletado/corrompido → placeholder de erro.
-          errorBuilder: (context, _, _) => _box(
-            context,
-            child: Icon(
-              Icons.broken_image_outlined,
-              size: size * 0.5,
-              color: Colors.white,
-            ),
-          ),
-        ),
+        // Arquivo movido/deletado/corrompido → placeholder de erro (ambos os
+        // loaders têm errorBuilder, então cobre raster e vetor do mesmo jeito).
+        child: isSvg
+            ? SvgPicture.file(
+                File(path),
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                errorBuilder: (context, _, _) => _errorBox(context),
+              )
+            : Image.file(
+                File(path),
+                width: size,
+                height: size,
+                fit: BoxFit.cover,
+                filterQuality: FilterQuality.medium,
+                errorBuilder: (context, _, _) => _errorBox(context),
+              ),
       );
     }
     // Sem imagem: quadrado colorido com a inicial.
@@ -60,6 +65,15 @@ class WorkspaceAvatar extends StatelessWidget {
       ),
     );
   }
+
+  Widget _errorBox(BuildContext context) => _box(
+    context,
+    child: Icon(
+      Icons.broken_image_outlined,
+      size: size * 0.5,
+      color: Colors.white,
+    ),
+  );
 
   Widget _box(BuildContext context, {required Widget child}) {
     return Container(

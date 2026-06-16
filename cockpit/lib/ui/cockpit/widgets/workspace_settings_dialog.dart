@@ -108,7 +108,7 @@ class _WorkspaceSettingsDialogState extends State<_WorkspaceSettingsDialog> {
   Future<void> _pickImage() async {
     final result = await FilePicker.platform.pickFiles(
       type: FileType.custom,
-      allowedExtensions: const ['png', 'jpg', 'jpeg'],
+      allowedExtensions: const ['png', 'jpg', 'jpeg', 'svg'],
       dialogTitle: 'Choose workspace photo',
     );
     if (!mounted || result == null) return;
