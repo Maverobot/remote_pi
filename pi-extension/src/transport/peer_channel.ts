@@ -20,6 +20,8 @@ export interface PeerChannel {
 interface OuterEnvelope {
   peer: string;
   room?: string;
+  /** Sender room for legacy relays that raw-forward envelopes without rewriting `room`. */
+  source_room?: string;
   ct: string;
 }
 
@@ -41,12 +43,9 @@ export class PlainPeerChannel implements PeerChannel {
   constructor(
     private readonly relay: RelayClient,
     private readonly remotePeerId: string,
-    /**
-     * This Pi's room id. Currently NOT injected in the outer envelope
-     * (defensive — relay/app not yet ready). Kept in the constructor for
-     * forward-compat so callers don't need to change again when we re-enable.
-     */
-    myRoomId: string | undefined,
+    /** This Pi's room id. Sent as `source_room` for app-side demux when a
+     * legacy relay raw-forwards envelopes instead of rewriting `room`. */
+    private readonly myRoomId: string | undefined,
     private readonly onMessage: (msg: ClientMessage) => void,
     /** Called when this specific peer connection is considered lost. */
     _onDisconnect?: () => void,
@@ -55,26 +54,22 @@ export class PlainPeerChannel implements PeerChannel {
     relay.on("message", listener);
     this._unsubscribe = () => relay.off("message", listener);
     void _onDisconnect;
-    void myRoomId;  // intentionally unused — see send() comment
   }
 
   // ── PeerChannel interface ──────────────────────────────────────────────────
 
   send(msg: ServerMessage): void {
     const ct = Buffer.from(JSON.stringify(msg)).toString("base64");
-    // NOTE: `room` removed from the outer envelope until relay (W1.A) + app
-    // (W1.C) accept the field. Multi-Pi multiplexing already works via
-    // `room_id`/`room_meta` in the WS-level `hello` — outer routing stays by
-    // `peer` alone. Re-add the field once downstream is ready.
-    const outer: OuterEnvelope = { peer: this.remotePeerId, ct };
-    // Best-effort delivery. The relay WS can be mid-reconnect (idle/NAT drop, or
-    // a session_new/session-replacement teardown) when we push a server→app frame
-    // — notably the action_ok/action_error ack a handler emits right after
-    // newSession. `relay.send` throws "relay: not connected" in that window; since
-    // this runs inside an async SDK event callback, letting it propagate becomes an
-    // uncaughtException that kills the whole pi process. The relay auto-reconnects
-    // and the app re-syncs via session_sync, so a dropped frame is recoverable — a
-    // crash is not. Mirrors RelayClient.sendControl's no-op-when-closed policy.
+    // `room` is the relay destination room and intentionally omitted so the
+    // relay defaults to the app's `main` room. `source_room` survives legacy
+    // raw-forward relays so updated apps can drop frames from inactive Pi rooms.
+    const outer: OuterEnvelope = {
+      peer: this.remotePeerId,
+      ...(this.myRoomId ? { source_room: this.myRoomId } : {}),
+      ct,
+    };
+    // Best-effort delivery: reconnect + session_sync recover dropped frames;
+    // throwing here can kill the pi process from async SDK callbacks.
     try {
       this.relay.send(JSON.stringify(outer));
     } catch {

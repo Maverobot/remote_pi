@@ -163,6 +163,75 @@ class ToolEvent extends ChatMessage {
   int get hashCode => Object.hash(id, toolCallId, status);
 }
 
+/// Plan/44 — question + answer metadata for `ask_user_prompt` cards.
+class AskUserPromptChoice {
+  final String title;
+  final String? description;
+  const AskUserPromptChoice({required this.title, this.description});
+
+  @override
+  bool operator ==(Object other) =>
+      other is AskUserPromptChoice &&
+      other.title == title &&
+      other.description == description;
+
+  @override
+  int get hashCode => Object.hash(title, description);
+}
+
+class AskUserPromptMsg extends ChatMessage {
+  final String question;
+  final String context;
+  final List<AskUserPromptChoice> options;
+  final bool allowMultiple;
+  final bool allowFreeform;
+  final bool allowComment;
+  final bool resolved;
+  final bool cancelled;
+  final String? answerLabel;
+
+  const AskUserPromptMsg({
+    required super.id,
+    required this.question,
+    required this.context,
+    required this.options,
+    required this.allowMultiple,
+    required this.allowFreeform,
+    required this.allowComment,
+    this.resolved = false,
+    this.cancelled = false,
+    this.answerLabel,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is AskUserPromptMsg &&
+      other.id == id &&
+      other.question == question &&
+      other.context == context &&
+      other.options == options &&
+      other.allowMultiple == allowMultiple &&
+      other.allowFreeform == allowFreeform &&
+      other.allowComment == allowComment &&
+      other.resolved == resolved &&
+      other.cancelled == cancelled &&
+      other.answerLabel == answerLabel;
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    question,
+    context,
+    options,
+    allowMultiple,
+    allowFreeform,
+    allowComment,
+    resolved,
+    cancelled,
+    answerLabel,
+  );
+}
+
 /// Plan/32 — `denied` = the user/SDK declined the tool; `failed` = the tool
 /// ran but errored (a distinct, red outcome). `expired` = approval timed out.
 enum ToolEventStatus { pending, allowed, denied, expired, completed, failed }
