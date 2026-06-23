@@ -24,8 +24,9 @@
  * Architecture note — why we don't use AgentBridge directly here:
  *   AgentBridge.beforeToolCallHook is designed to be passed to createAgentSession().
  *   Inside an extension Pi already owns the AgentSession, so we can't re-bind
- *   beforeToolCall after the fact. The equivalent is pi.on("tool_call", …) which
- *   fires BEFORE execution and supports { block: true }.
+ *   beforeToolCall after the fact. The equivalent is pi.on("tool_call", …),
+ *   which fires BEFORE execution. Note: `{ block: true }` is a hard denial that
+ *   produces an error tool result; it is not a waiting/remote-response primitive.
  *   AgentBridge (src/session/agent_bridge.ts) remains the tested, mockable unit
  *   for integration tests.
  */
@@ -66,6 +67,8 @@ import type {
   ThinkingLevel,
   WireImage,
   QueuedMessageItem,
+  AskUserOption,
+  AskUserResponsePayload as WireAskUserResponsePayload,
 } from "./protocol/types.js";
 import { RelayClient, RoomAlreadyOpenError } from "./transport/relay_client.js";
 import { PlainPeerChannel } from "./transport/peer_channel.js";
@@ -166,6 +169,13 @@ let _relayUrl: string | null = null;  // URL used by current _relay connection
  *     `/remote-pi status` output both derive from this.
  */
 const _activePeers = new Map<string, PlainPeerChannel>();
+// v1 `ask_user_prompt_cards` used `tool_call` + `{ block:true }`, which Pi
+// converts into an immediate error result rendered by pi-ask-user as
+// `Cancelled`. v2 means dual-surface mode: Android gets the prompt card while
+// the local CLI ask_user still opens, and the first answer resolves all
+// surfaces.
+const ASK_USER_PROMPT_CAPABILITY = "ask_user_prompt_cards_v2";
+const _askUserCapablePeers = new Set<string>();
 let _peerShort = "";  // shortid of the most recently attached peer (UX hint only)
 
 const REMOTE_PI_RECEIVED_IMAGE_TYPE = "remote-pi:received-image";
@@ -808,7 +818,12 @@ type BufferMsg = {
   toolCallId?: string;
   toolName?: string;
   isError?: boolean;
+  details?: unknown;
   usage?: { input?: number; output?: number };
+  askUser?: AskUserPromptNormalized;
+  answerLabel?: string;
+  cancelled?: boolean;
+  roomId?: string;
   /** Plan/32: pre-compaction token count, set on the synthetic
    *  `role:"compaction"` marker pushed in `session_compact`. */
   tokensBefore?: number;
@@ -1180,9 +1195,52 @@ function _broadcastToActive(msg: ServerMessage): void {
   }
 }
 
+function _broadcastToAskUserCapable(msg: ServerMessage): void {
+  for (const [peerId, ch] of _activePeers.entries()) {
+    if (!_askUserCapablePeers.has(peerId)) continue;
+    try { ch.send(msg); } catch { /* best-effort per channel */ }
+  }
+}
+
+function _broadcastToAskUserIncapable(msg: ServerMessage): void {
+  for (const [peerId, ch] of _activePeers.entries()) {
+    if (_askUserCapablePeers.has(peerId)) continue;
+    try { ch.send(msg); } catch { /* best-effort per channel */ }
+  }
+}
+
 /** Returns true when at least one owner is attached. Derived `paired` UX. */
 function _anyPeerActive(): boolean {
   return _activePeers.size > 0;
+}
+
+function _askUserCapableActivePeerIds(): string[] {
+  return [..._activePeers.keys()].filter((peerId) => _askUserCapablePeers.has(peerId));
+}
+
+function _anyAskUserCapablePeerActive(): boolean {
+  return _askUserCapableActivePeerIds().length > 0;
+}
+
+function _sendAskUserResolvedToPromptPeers(pending: PendingAskUserPrompt, msg: ServerMessage): void {
+  const peerIds = new Set([...pending.peerIds, ..._askUserCapableActivePeerIds()]);
+  for (const peerId of peerIds) {
+    const ch = _activePeers.get(peerId);
+    if (!ch) continue;
+    try { ch.send(msg); } catch { /* best-effort per channel */ }
+  }
+}
+
+function _rememberClientCapabilities(appPeerId: string, msg: ClientMessage): void {
+  if (msg.type !== "pair_request" && msg.type !== "session_sync") return;
+  const caps = Array.isArray(msg.capabilities)
+    ? msg.capabilities.filter((cap): cap is string => typeof cap === "string")
+    : [];
+  if (caps.includes(ASK_USER_PROMPT_CAPABILITY)) {
+    _askUserCapablePeers.add(appPeerId);
+  } else {
+    _askUserCapablePeers.delete(appPeerId);
+  }
 }
 
 /**
@@ -1202,6 +1260,7 @@ function _detachPeerChannel(appPeerId: string): void {
   if (!ch) return;
   try { ch.detach(); } catch { /* best-effort */ }
   _activePeers.delete(appPeerId);
+  _askUserCapablePeers.delete(appPeerId);
   if (_peerShort === appPeerId.slice(0, 8)) {
     // Pick a different remaining peer for the UX hint, or clear when none.
     const next = _activePeers.keys().next().value;
@@ -1381,6 +1440,7 @@ function _goIdle(byeReason?: import("./protocol/types.js").ByeReason): void {
     try { ch.detach(); } catch { /* best-effort */ }
   }
   _activePeers.clear();
+  _askUserCapablePeers.clear();
   _peerShort = "";
   _currentTurnId = null;
   _pendingReceivedImagePreviews.length = 0;
@@ -1441,6 +1501,7 @@ function _onRelayClose(closedRelay: RelayClient): void {
   }
   if (_queuedItems.length > 0) _resetQueuedItems({ broadcast: true });
   _activePeers.clear();
+  _askUserCapablePeers.clear();
   _peerShort = "";
   _currentTurnId = null;
   _pendingSteers = [];
@@ -1757,7 +1818,10 @@ function _attachOwner(
     relay,
     appPeerId,
     _myRoomId ?? undefined,
-    (msg) => _routeClientMessageFrom(channel, msg, (_liveCtx() as typeof _noopCtx) ?? _noopCtx),
+    (msg) => {
+      _rememberClientCapabilities(appPeerId, msg);
+      _routeClientMessageFrom(channel, msg, (_liveCtx() as typeof _noopCtx) ?? _noopCtx);
+    },
     () => _onPeerDisconnect(appPeerId),
   );
 
@@ -1826,6 +1890,7 @@ function _installAutoListener(relay: RelayClient): () => void {
     const appPeerId = outer.peer;
 
     if (inner.type === "pair_request") {
+      _rememberClientCapabilities(appPeerId, inner);
       await _handlePairRequest(relay, appPeerId, inner, hasListenerAuthority);
       return;
     }
@@ -1840,6 +1905,7 @@ function _installAutoListener(relay: RelayClient): () => void {
       // The PlainPeerChannel listener for this owner won't have seen the
       // line that triggered the attach (we already consumed it); route
       // it explicitly via the new channel so the sender gets a reply.
+      _rememberClientCapabilities(appPeerId, inner);
       // Use _liveCtx (session_start-fresh) — not bare _lastCtx (#55).
       _routeClientMessageFrom(channel, inner, (_liveCtx() as typeof _noopCtx) ?? _noopCtx);
       return;
@@ -2056,6 +2122,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     messages: _filterReceivedImageMessagesFromContext(event.messages),
   }));
 
+  _registerAskUserEventBridge(pi);
+
   // Tool calls execute without prompting the remote user. The Pi SDK has no
   // native `requiresApproval` per tool, and a hardcoded gate (Bash/Edit/Write)
   // misfired on every custom tool from third-party packages. Approval will
@@ -2134,22 +2202,44 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     }
   });
 
+  // Plan/44 v2: `ask:prompt` from pi-ask-user is the capability signal for an
+  // actionable remote prompt. `tool_call` alone is only the model's requested
+  // tool args; old/no-bridge pi-ask-user versions can reach this hook but cannot
+  // be externally resolved. Do not show an answerable card until ask:prompt.
+  pi.on("tool_call", (event) => {
+    if (event.toolName.toLowerCase() !== "ask_user") return;
+    return undefined;
+  });
+
   // Notify every connected owner that a tool is about to run (visibility
   // only, NOT approval). tool_execution_start fires before the tool
   // executes; tool_execution_end closes the loop with the result. Together
   // they render a "Tool running… done" timeline in each paired app.
+  // For ask_user prompts forwarded to owners, suppression happens here to
+  // avoid duplicated tool_request cards.
   pi.on("tool_execution_start", (event) => {
     if (!_anyPeerActive()) return;
-    _broadcastToActive({
+    const msg: ServerMessage = {
       type: "tool_request",
       tool_call_id: event.toolCallId,
       tool: event.toolName,
       args: _enrichToolArgs(event.toolName, event.args),
-    });
+    };
+    if (event.toolName.toLowerCase() === "ask_user" && _anyAskUserCapablePeerActive()) {
+      _broadcastToAskUserIncapable(msg);
+      return;
+    }
+    _broadcastToActive(msg);
+  });
+
+  pi.on("tool_result", (event) => {
+    if (event.toolName.toLowerCase() !== "ask_user") return;
+    return _handleAskUserToolResult(event.toolCallId, event.details, event.content, event.isError);
   });
 
   pi.on("tool_execution_end", (event) => {
     if (!_anyPeerActive()) return;
+    const mirroredAskUser = event.toolName.toLowerCase() === "ask_user" && _mirroredAskUserToolIds.has(event.toolCallId);
     // Stringify like the history mapper (same helper) so the live text == what
     // a session_sync replays for this tool. Raw `String(event.result)` turned
     // a content-array/object into "[object Object]" and the success branch sent
@@ -2158,6 +2248,10 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     const msg: ServerMessage = event.isError
       ? { type: "tool_result", tool_call_id: event.toolCallId, error: text }
       : { type: "tool_result", tool_call_id: event.toolCallId, result: text };
+    if (mirroredAskUser) {
+      _broadcastToAskUserIncapable(msg);
+      return;
+    }
     _broadcastToActive(msg);
   });
 
@@ -4201,6 +4295,266 @@ function _abortCurrentTurn(
   return false;
 }
 
+function _startAskUserPrompt(toolCallId: string, askUser: AskUserPromptNormalized): PendingAskUserPrompt {
+  const existing = _pendingAskUserPrompts.get(toolCallId);
+  if (existing) return existing;
+
+  const pending: PendingAskUserPrompt = {
+    prompt: askUser,
+    peerIds: _askUserCapableActivePeerIds(),
+  };
+  _pendingAskUserPrompts.set(toolCallId, pending);
+  _mirroredAskUserToolIds.add(toolCallId);
+  _messageBuffer.push({
+    role: "ask_user_prompt",
+    timestamp: Date.now(),
+    toolCallId,
+    askUser,
+    roomId: _myRoomId ?? undefined,
+  });
+  _broadcastToAskUserCapable({
+    type: "ask_user_prompt",
+    id: toolCallId,
+    question: askUser.question,
+    ...(askUser.context ? { context: askUser.context } : {}),
+    options: askUser.options,
+    allow_multiple: askUser.allowMultiple,
+    allow_freeform: askUser.allowFreeform,
+    allow_comment: askUser.allowComment,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
+  });
+  return pending;
+}
+
+function _registerAskUserEventBridge(pi: ExtensionAPI): void {
+  const events = pi.events;
+  if (!events || typeof events.on !== "function") return;
+
+  events.on("ask:prompt", (raw) => {
+    const event = raw as AskUserPromptBridgeEvent | null | undefined;
+    if (!event || typeof event !== "object") return;
+    const toolCallId = typeof event.toolCallId === "string"
+      ? event.toolCallId
+      : typeof event.id === "string"
+        ? event.id
+        : undefined;
+    if (!toolCallId) return;
+
+    const responder = typeof event.respond === "function"
+      ? event.respond
+      : typeof event.resolve === "function"
+        ? event.resolve
+        : undefined;
+    if (!responder) return;
+
+    const existing = _pendingAskUserPrompts.get(toolCallId);
+    const pending = existing ?? _startAskUserPrompt(toolCallId, _normalizeAskUserToolInput(event));
+    pending.responder = responder;
+    if (pending.resolved?.source === "app" && !_respondToLocalAskUser(pending, pending.resolved.response)) {
+      pending.resolved = undefined;
+    }
+  });
+
+  events.on("ask:answered", (raw) => {
+    const parsed = _parseAskUserAnsweredBridgeEvent(raw);
+    if (!parsed) return;
+    _resolveAskUserPrompt(parsed.toolCallId, parsed.response, "cli", { deleteAfterResolve: true });
+  });
+
+  events.on("ask:cancelled", (raw) => {
+    const toolCallId = _findAskUserPromptId(raw as AskUserAnsweredBridgeEvent | null | undefined);
+    if (!toolCallId) return;
+    _resolveAskUserPrompt(toolCallId, { kind: "cancelled" }, "cli", { deleteAfterResolve: true });
+  });
+}
+
+function _parseAskUserAnsweredBridgeEvent(raw: unknown): { toolCallId: string; response: AskUserResponsePayload } | undefined {
+  if (!raw || typeof raw !== "object") return undefined;
+  const event = raw as AskUserAnsweredBridgeEvent;
+  const toolCallId = _findAskUserPromptId(event);
+  if (!toolCallId) return undefined;
+  const response = _parseAskUserResponsePayload(event.response);
+  if (!response) return undefined;
+  return { toolCallId, response };
+}
+
+function _findAskUserPromptId(event: AskUserAnsweredBridgeEvent | null | undefined): string | undefined {
+  const direct = typeof event?.toolCallId === "string"
+    ? event.toolCallId
+    : typeof event?.id === "string"
+      ? event.id
+      : undefined;
+  if (direct && _pendingAskUserPrompts.has(direct)) return direct;
+
+  const entries = [..._pendingAskUserPrompts.entries()];
+  if (event?.question) {
+    const matched = entries.find(([, pending]) => (
+      pending.prompt.question === event.question
+      && (!event.context || pending.prompt.context === event.context)
+    ));
+    if (matched) return matched[0];
+  }
+
+  return entries.length === 1 ? entries[0]![0] : undefined;
+}
+
+function _respondToLocalAskUser(pending: PendingAskUserPrompt, response: AskUserResponsePayload): boolean {
+  if (!pending.responder) return false;
+  const payload = response.kind === "cancelled" ? null : response;
+  try {
+    return pending.responder(payload) !== false;
+  } catch (err) {
+    console.error(`[remote-pi] failed to resolve local ask_user prompt: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+function _resolveAskUserPrompt(
+  toolCallId: string,
+  response: AskUserResponsePayload,
+  source: "app" | "cli",
+  options: { deleteAfterResolve?: boolean } = {},
+): PendingAskUserPrompt | undefined {
+  const pending = _pendingAskUserPrompts.get(toolCallId);
+  if (!pending) return undefined;
+  if (pending.resolved) return pending;
+
+  if (source === "app" && pending.responder && !_respondToLocalAskUser(pending, response)) {
+    return undefined;
+  }
+
+  const answerLabel = _formatAskUserAnswerLabel(response);
+  pending.resolved = { response, answerLabel, source };
+
+  _messageBuffer.push({
+    role: "ask_user_resolved",
+    timestamp: Date.now(),
+    toolCallId,
+    answerLabel,
+    cancelled: response.kind === "cancelled",
+    roomId: _myRoomId ?? undefined,
+  });
+  _sendAskUserResolvedToPromptPeers(pending, {
+    type: "ask_user_resolved",
+    id: toolCallId,
+    answer_label: answerLabel,
+    cancelled: response.kind === "cancelled",
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
+  });
+
+  if (options.deleteAfterResolve) {
+    _pendingAskUserPrompts.delete(toolCallId);
+  }
+  return pending;
+}
+
+function _toolResultForAskUserResolution(
+  pending: PendingAskUserPrompt,
+): { content: { type: "text"; text: string }[]; details: Record<string, unknown>; isError: boolean } {
+  const response = pending.resolved?.response;
+  if (!response || response.kind === "cancelled") {
+    return {
+      content: [{ type: "text", text: "User cancelled the question" }],
+      details: {
+        question: pending.prompt.question,
+        context: pending.prompt.context,
+        options: pending.prompt.options,
+        response: null,
+        cancelled: true,
+      },
+      isError: false,
+    };
+  }
+
+  const summary = _formatAskUserToolResultSummary(response);
+  return {
+    content: [{ type: "text", text: `User answered: ${summary}` }],
+    details: {
+      question: pending.prompt.question,
+      context: pending.prompt.context,
+      options: pending.prompt.options,
+      response,
+      cancelled: false,
+    },
+    isError: false,
+  };
+}
+
+function _handleAskUserToolResult(
+  toolCallId: string,
+  details: unknown,
+  content: unknown,
+  isError: boolean,
+): { content?: { type: "text"; text: string }[]; details?: Record<string, unknown>; isError?: boolean } | undefined {
+  const pending = _pendingAskUserPrompts.get(toolCallId);
+  if (!pending) return undefined;
+
+  if (pending.resolved?.source === "app") {
+    _pendingAskUserPrompts.delete(toolCallId);
+    return _toolResultForAskUserResolution(pending);
+  }
+
+  const response = _parseAskUserToolResult(details, content, isError);
+  if (!response) return undefined;
+  _resolveAskUserPrompt(toolCallId, response, "cli", { deleteAfterResolve: true });
+  return undefined;
+}
+
+function _handleAskUserResponse(
+  sender: PlainPeerChannel,
+  msg: Extract<ClientMessage, { type: "ask_user_response" }>,
+): void {
+  const pending = _pendingAskUserPrompts.get(msg.id);
+  if (!pending) {
+    sender.send({
+      type: "error",
+      code: "invalid_message",
+      in_reply_to: msg.id,
+      message: `No pending ask_user prompt for id ${msg.id}`,
+    });
+    return;
+  }
+  if (pending.resolved) {
+    sender.send({
+      type: "error",
+      code: "invalid_message",
+      in_reply_to: msg.id,
+      message: `ask_user prompt ${msg.id} is already resolved`,
+    });
+    return;
+  }
+
+  const parsed = msg.cancelled || _isNestedAskUserCancel(msg.response)
+    ? ({ kind: "cancelled" } as const)
+    : _parseAskUserResponsePayload(msg.response);
+  if (!parsed) {
+    sender.send({
+      type: "error",
+      code: "invalid_message",
+      in_reply_to: msg.id,
+      message: "Invalid ask_user_response payload",
+    });
+    return;
+  }
+
+  const resolved = _resolveAskUserPrompt(msg.id, parsed, "app");
+  if (!resolved) {
+    sender.send({
+      type: "error",
+      code: "invalid_message",
+      in_reply_to: msg.id,
+      message: `ask_user prompt ${msg.id} response was not accepted locally; retry`,
+    });
+    return;
+  }
+  if (!pending.responder) {
+    _lastCtx?.ui.notify?.(
+      "Remote Pi received an Android ask_user answer, but this pi-ask-user version cannot be resolved externally. Update pi-ask-user to enable true Android↔CLI first-answer-wins.",
+      "warning",
+    );
+  }
+}
+
 export function _routeClientMessageFrom(
   sender: PlainPeerChannel,
   msg: ClientMessage,
@@ -4210,6 +4564,10 @@ export function _routeClientMessageFrom(
   // pi-binding guard so a missing _pi doesn't drop the reply.
   if (msg.type === "session_sync") {
     _handleSessionSync(sender, msg);
+    return;
+  }
+  if (msg.type === "ask_user_response") {
+    _handleAskUserResponse(sender, msg);
     return;
   }
   if (msg.type === "cancel") {
@@ -4461,6 +4819,7 @@ function _handleSessionSync(
       events: [],
       eos: true,
       truncated: false,
+      ...(_myRoomId ? { room_id: _myRoomId } : {}),
     });
     return;
   }
@@ -4471,9 +4830,15 @@ function _handleSessionSync(
   const requested = msg.limit ?? serverLimit;
   const effectiveLimit = Math.min(requested, serverLimit);  // server clamps
 
+  const supportsAskUserPromptCards = Array.isArray(msg.capabilities)
+    ? msg.capabilities.includes(ASK_USER_PROMPT_CAPABILITY)
+    : false;
   const allEvents = _mapAgentMessagesToEvents(_messageBuffer);
-  const slice = effectiveLimit > 0 ? allEvents.slice(-effectiveLimit) : [];
-  const truncated = allEvents.length > effectiveLimit;
+  const visibleEvents = supportsAskUserPromptCards
+    ? allEvents
+    : allEvents.filter((event) => event.type !== "ask_user_prompt" && event.type !== "ask_user_resolved");
+  const slice = effectiveLimit > 0 ? visibleEvents.slice(-effectiveLimit) : [];
+  const truncated = visibleEvents.length > effectiveLimit;
 
   sender.send({
     type: "session_history",
@@ -4482,6 +4847,7 @@ function _handleSessionSync(
     events: slice,
     eos: true,
     truncated,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
 }
 
@@ -4505,6 +4871,8 @@ function _resetSessionForNew(inReplyTo: string): void {
   _pendingSteers = [];
   _lastConsumedSteerText = null;
   _resetQueuedItems({ broadcast: true });
+  _pendingAskUserPrompts.clear();
+  _mirroredAskUserToolIds.clear();
   _sessionStartedAt = Date.now();
   _broadcastToActive({
     type: "session_history",
@@ -4513,15 +4881,57 @@ function _resetSessionForNew(inReplyTo: string): void {
     events: [],
     eos: true,
     truncated: false,
+    ...(_myRoomId ? { room_id: _myRoomId } : {}),
   });
 }
 
 type ToolArgs = Record<string, unknown>;
+type AskUserPromptNormalized = {
+  question: string;
+  context?: string;
+  options: AskUserOption[];
+  allowMultiple: boolean;
+  allowFreeform: boolean;
+  allowComment: boolean;
+};
+type AskUserResponsePayload = WireAskUserResponsePayload | { kind: "cancelled" };
+
+type AskUserExternalResponder = (response: Exclude<AskUserResponsePayload, { kind: "cancelled" }> | null) => void | boolean;
+
+type PendingAskUserPrompt = {
+  prompt: AskUserPromptNormalized;
+  peerIds: string[];
+  responder?: AskUserExternalResponder;
+  resolved?: {
+    response: AskUserResponsePayload;
+    answerLabel: string;
+    source: "app" | "cli";
+  };
+};
+
+type AskUserPromptBridgeEvent = Partial<AskUserPromptNormalized> & {
+  toolCallId?: string;
+  id?: string;
+  respond?: AskUserExternalResponder;
+  resolve?: AskUserExternalResponder;
+};
+
+type AskUserAnsweredBridgeEvent = {
+  toolCallId?: string;
+  id?: string;
+  question?: string;
+  context?: string;
+  response?: unknown;
+};
+
 type DiffLine =
   | { kind: "context"; oldLine?: number; newLine?: number; text: string }
   | { kind: "remove"; oldLine?: number; text: string }
   | { kind: "add"; newLine?: number; text: string }
   | { kind: "ellipsis" };
+
+const _pendingAskUserPrompts = new Map<string, PendingAskUserPrompt>();
+const _mirroredAskUserToolIds = new Set<string>();
 
 function _enrichToolArgs(tool: string, args: unknown): ToolArgs {
   if (!args || typeof args !== "object") return {};
@@ -4662,6 +5072,128 @@ function _stringArg(args: ToolArgs, keys: string[]): string {
   return "";
 }
 
+function _boolArg(value: unknown): boolean {
+  return typeof value === "boolean" ? value : false;
+}
+
+function _normalizeAskUserOptions(raw: unknown): AskUserOption[] {
+  if (!Array.isArray(raw)) return [];
+
+  const out: AskUserOption[] = [];
+  for (const rawItem of raw) {
+    if (typeof rawItem === "string") {
+      const title = rawItem.trim();
+      if (title) out.push({ title });
+      continue;
+    }
+
+    if (!rawItem || typeof rawItem !== "object") continue;
+    const item = rawItem as Record<string, unknown>;
+    const title = typeof item.title === "string"
+      ? item.title.trim()
+      : "";
+    if (!title) continue;
+
+    const option: AskUserOption = { title };
+    const description = typeof item.description === "string"
+      ? item.description.trim()
+      : "";
+    if (description) option.description = description;
+    out.push(option);
+  }
+
+  return out;
+}
+
+function _normalizeAskUserToolInput(input: unknown): AskUserPromptNormalized {
+  const obj = typeof input === "object" && input !== null ? input as Record<string, unknown> : {};
+
+  const question = typeof obj.question === "string" ? obj.question : "";
+  const context = typeof obj.context === "string" ? obj.context : undefined;
+  const options = _normalizeAskUserOptions(obj.options);
+
+  const allowMultiple = _boolArg(obj.allow_multiple ?? obj.allowMultiple);
+  const allowFreeform = (obj.allow_freeform ?? obj.allowFreeform) !== false;
+  const allowComment = _boolArg(obj.allow_comment ?? obj.allowComment);
+
+  return {
+    question,
+    context,
+    options,
+    allowMultiple,
+    allowFreeform,
+    allowComment,
+  };
+}
+
+function _isNestedAskUserCancel(payload: unknown): boolean {
+  return !!payload && typeof payload === "object" && (payload as Record<string, unknown>).cancelled === true;
+}
+
+function _parseAskUserResponsePayload(payload: unknown): AskUserResponsePayload | undefined {
+  if (!payload || typeof payload !== "object") return undefined;
+
+  const obj = payload as Record<string, unknown>;
+  const kind = obj.kind;
+  if (kind === "selection") {
+    const rawSelections = Array.isArray(obj.selections) ? obj.selections : [];
+    const selections = rawSelections
+      .filter((item): item is string => typeof item === "string")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0);
+    const comment = typeof obj.comment === "string" ? obj.comment.trim() : undefined;
+    if (selections.length === 0) return undefined;
+    return { kind: "selection", selections, ...(comment ? { comment } : {}) };
+  }
+
+  if (kind === "freeform") {
+    const text = typeof obj.text === "string" ? obj.text.trim() : "";
+    const comment = typeof obj.comment === "string" ? obj.comment.trim() : undefined;
+    if (!text) return undefined;
+    return { kind: "freeform", text, ...(comment ? { comment } : {}) };
+  }
+
+  return undefined;
+}
+
+function _parseAskUserToolResult(
+  details: unknown,
+  content: unknown,
+  isError: boolean,
+): AskUserResponsePayload | undefined {
+  if (details && typeof details === "object") {
+    const obj = details as Record<string, unknown>;
+    if (obj.cancelled === true) return { kind: "cancelled" };
+    const parsed = _parseAskUserResponsePayload(obj.response);
+    if (parsed) return parsed;
+  }
+
+  if (isError) return undefined;
+
+  const text = _stringifyContent(content).trim();
+  const prefix = "User answered:";
+  if (text.startsWith(prefix)) {
+    const answer = text.slice(prefix.length).trim();
+    if (answer) return { kind: "freeform", text: answer };
+  }
+  if (/cancelled/i.test(text)) return { kind: "cancelled" };
+  return undefined;
+}
+
+function _formatAskUserToolResultSummary(response: Exclude<AskUserResponsePayload, { kind: "cancelled" }>): string {
+  if (response.kind === "selection") {
+    const selections = response.selections.join(", ");
+    return response.comment ? `${selections} — ${response.comment}` : selections;
+  }
+  return response.comment ? `${response.text} — ${response.comment}` : response.text;
+}
+
+function _formatAskUserAnswerLabel(response: AskUserResponsePayload): string {
+  if (response.kind === "cancelled") return "Cancelled";
+  if (response.kind === "selection") return response.selections.join(", ");
+  return response.text;
+}
+
 function _stringifyContent(content: unknown): string {
   if (typeof content === "string") return content;
   if (!Array.isArray(content)) return "";
@@ -4732,11 +5264,42 @@ export function _mapAgentMessagesToEvents(
 ): SessionHistoryEvent[] {
   const events: SessionHistoryEvent[] = [];
   let lastUserId: string | null = null;
+  const askUserPrompts = new Map<string, { prompt: AskUserPromptNormalized; roomId?: string }>();
+  const resolvedAskUserIds = new Set<string>();
 
   for (const m of messages) {
     const ts = typeof m.timestamp === "number" ? m.timestamp : 0;
 
-    if (m.role === "compaction") {
+    if (m.role === "ask_user_prompt") {
+      const askUser = m.askUser;
+      const id = String(m.toolCallId ?? "");
+      if (!askUser) continue;
+      askUserPrompts.set(id, { prompt: askUser, ...(m.roomId ? { roomId: m.roomId } : {}) });
+      events.push({
+        ts,
+        type: "ask_user_prompt",
+        id,
+        question: askUser.question,
+        ...(askUser.context ? { context: askUser.context } : {}),
+        options: askUser.options,
+        allow_multiple: askUser.allowMultiple,
+        allow_freeform: askUser.allowFreeform,
+        allow_comment: askUser.allowComment,
+        ...(m.roomId ? { room_id: m.roomId } : {}),
+      });
+    } else if (m.role === "ask_user_resolved") {
+      const id = String(m.toolCallId ?? "");
+      if (resolvedAskUserIds.has(id)) continue;
+      resolvedAskUserIds.add(id);
+      events.push({
+        ts,
+        type: "ask_user_resolved",
+        id,
+        answer_label: typeof m.answerLabel === "string" ? m.answerLabel : "",
+        cancelled: m.cancelled === true,
+        ...(m.roomId ? { room_id: m.roomId } : {}),
+      });
+    } else if (m.role === "compaction") {
       // Plan/32: re-render the compaction notice on history re-sync.
       events.push({
         ts,
@@ -4792,6 +5355,24 @@ export function _mapAgentMessagesToEvents(
       // Same helper as the live `tool_execution_end` broadcast → live == re-sync.
       const text = _stringifyToolResult(m.content);
       const tcid = String(m.toolCallId ?? "");
+      const isAskUser = String(m.toolName ?? "").toLowerCase() === "ask_user";
+      if (isAskUser) {
+        const prompt = askUserPrompts.get(tcid);
+        const response = _parseAskUserToolResult(m.details, m.content, m.isError === true);
+        if (prompt && response && !resolvedAskUserIds.has(tcid)) {
+          const answerLabel = _formatAskUserAnswerLabel(response);
+          resolvedAskUserIds.add(tcid);
+          events.push({
+            ts,
+            type: "ask_user_resolved",
+            id: tcid,
+            answer_label: answerLabel,
+            cancelled: response.kind === "cancelled",
+            ...(prompt.roomId ? { room_id: prompt.roomId } : {}),
+          });
+        }
+        if (prompt || _mirroredAskUserToolIds.has(tcid)) continue;
+      }
       events.push(
         m.isError
           ? { ts, type: "tool_result", tool_call_id: tcid, error: text }
