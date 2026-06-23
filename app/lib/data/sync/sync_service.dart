@@ -311,6 +311,57 @@ class SyncService extends Service {
     });
   }
 
+  Future<void> respondAskUser(AskUserResponse response) async {
+    final ch = _conn.channel;
+    if (ch == null) return;
+    await ch.send(response);
+  }
+
+  List<AskUserPromptChoice> _toAskUserChoices(
+    List<AskUserPromptOption> options,
+  ) => options
+      .map(
+        (o) => AskUserPromptChoice(title: o.title, description: o.description),
+      )
+      .toList();
+
+  bool _isTerminalAskUserError(String code, String message) =>
+      code == 'invalid_message' &&
+      (message.contains('No pending ask_user prompt') ||
+          (message.contains('ask_user prompt') &&
+              message.contains('already resolved')));
+
+  void _markAskUserAlreadyResolved(String id) {
+    final epk = _activeEpk;
+    if (epk == null) return;
+    final room = _activeRoomId;
+    // ignore: discarded_futures
+    _enqueue(() async {
+      final box = await _boxes.msgsBox(epk, room);
+      for (final key in box.keys.toList()) {
+        final row = MessageRecord.fromJson(_coerce(box.get(key)));
+        final ask = row.askUser;
+        if (row.role != MsgRole.askUser || row.id != id || ask == null) {
+          continue;
+        }
+        if (ask.resolved) return;
+        await box.put(
+          key,
+          row
+              .copyWith(
+                askUser: ask.copyWith(
+                  resolved: true,
+                  cancelled: false,
+                  answerLabel: 'Already resolved',
+                ),
+              )
+              .toJson(),
+        );
+        return;
+      }
+    });
+  }
+
   void requestSync() {
     final ch = _conn.channel;
     if (ch == null || _activeEpk == null) {
@@ -380,6 +431,9 @@ class SyncService extends Service {
     _syncDebounce = Timer(const Duration(milliseconds: 200), requestSync);
     if (_pendingSyncRequest) requestSync();
   }
+
+  bool _isForActiveRoom(String? roomId) =>
+      roomId == null || roomId == _activeRoomId;
 
   void _onServerMessage(ServerMessage msg, [String? originEpk]) {
     // Plan/32f — drop frames from a peer whose channel is no longer the active
@@ -465,6 +519,71 @@ class SyncService extends Service {
           }
         }
 
+      case AskUserPrompt(
+        :final id,
+        :final question,
+        :final context,
+        :final options,
+        :final allowMultiple,
+        :final allowFreeform,
+        :final allowComment,
+        :final roomId,
+      ):
+        if (!_isForActiveRoom(roomId)) break;
+        // Persist/refresh ask-user prompt rows in SSOT. These are
+        // UI affordances; they must not alter streaming or working state.
+        // ignore: discarded_futures
+        _upsert(MsgRole.askUser, id, (seq, existing) {
+          final current = existing?.askUser;
+          return MessageRecord(
+            id: id,
+            seq: existing == null ? seq : existing.seq,
+            role: MsgRole.askUser,
+            ts: DateTime.now(),
+            askUser: AskUserPromptData(
+              question: question,
+              context: context,
+              options: _toAskUserChoices(options),
+              allowMultiple: allowMultiple,
+              allowFreeform: allowFreeform,
+              allowComment: allowComment,
+              resolved: current?.resolved ?? false,
+              cancelled: current?.cancelled ?? false,
+              answerLabel: current?.answerLabel,
+            ),
+          );
+        });
+
+      case AskUserResolved(
+        :final id,
+        :final answerLabel,
+        :final cancelled,
+        :final roomId,
+      ):
+        if (!_isForActiveRoom(roomId)) break;
+        // Persist prompt resolution without affecting current working/streaming.
+        // ignore: discarded_futures
+        _upsert(MsgRole.askUser, id, (seq, existing) {
+          final current = existing?.askUser;
+          return MessageRecord(
+            id: id,
+            seq: existing == null ? seq : existing.seq,
+            role: MsgRole.askUser,
+            ts: DateTime.now(),
+            askUser: AskUserPromptData(
+              question: current?.question ?? '',
+              context: current?.context ?? '',
+              options: current?.options ?? const [],
+              allowMultiple: current?.allowMultiple ?? false,
+              allowFreeform: current?.allowFreeform ?? false,
+              allowComment: current?.allowComment ?? false,
+              resolved: true,
+              cancelled: cancelled,
+              answerLabel: answerLabel,
+            ),
+          );
+        });
+
       case ToolRequest(:final toolCallId, :final tool, :final args):
         // Sequential ordering: close the current text segment as its own row
         // BEFORE the tool, so "narration → command → narration" renders in
@@ -534,15 +653,20 @@ class SyncService extends Service {
           _conn.switchTo(peer);
         }
 
-      case SessionHistory():
+      case SessionHistory(:final roomId):
+        if (!_isForActiveRoom(roomId)) break;
         // ignore: discarded_futures
         _applyHistory(msg);
 
-      case ErrorMessage(:final code, :final message):
+      case ErrorMessage(:final inReplyTo, :final code, :final message):
         if (code.contains('unknown_peer')) {
           if (!_eventController.isClosed) {
             _eventController.add(const PairingRevoked());
           }
+          break;
+        }
+        if (_isTerminalAskUserError(code, message) && inReplyTo != null) {
+          _markAskUserAlreadyResolved(inReplyTo);
           break;
         }
         _discardStreamingState();
@@ -606,19 +730,44 @@ class SyncService extends Service {
     final historyIds = {for (final r in rows) _key(r.role, r.id)};
     await _enqueue(() async {
       final box = await _boxes.msgsBox(epk, room);
-      // Preserve local pending user rows the Pi hasn't echoed yet.
+      // Preserve local pending user rows the Pi hasn't echoed yet. Ask-user
+      // rows are server-authoritative: if session_history omits a prompt, the
+      // Android card must close instead of leaving an already-answered dialog.
       final preserved = <MessageRecord>[];
+      final liveResolvedAskById = <String, AskUserPromptData>{};
       for (final v in box.values) {
         final r = MessageRecord.fromJson(_coerce(v));
-        if (r.role == MsgRole.user &&
-            r.pending &&
-            !historyIds.contains(_key(r.role, r.id))) {
+        final ask = r.askUser;
+        if (r.role == MsgRole.askUser && (ask?.resolved ?? false)) {
+          liveResolvedAskById[r.id] = ask!;
+        }
+        final missingFromHistory = !historyIds.contains(_key(r.role, r.id));
+        if (r.role == MsgRole.user && r.pending && missingFromHistory) {
           preserved.add(r);
         }
       }
+      MessageRecord mergeLiveAskResolution(MessageRecord row) {
+        final ask = row.askUser;
+        final live = liveResolvedAskById[row.id];
+        if (row.role != MsgRole.askUser ||
+            ask == null ||
+            live == null ||
+            ask.resolved) {
+          return row;
+        }
+        return row.copyWith(
+          askUser: ask.copyWith(
+            resolved: true,
+            cancelled: live.cancelled,
+            answerLabel: live.answerLabel,
+          ),
+        );
+      }
+
       // Desired ordered state: history (seq = index) then preserved pending.
       final desired = <MessageRecord>[
-        for (var i = 0; i < rows.length; i++) rows[i].copyWith(seq: i),
+        for (var i = 0; i < rows.length; i++)
+          mergeLiveAskResolution(rows[i]).copyWith(seq: i),
         for (var j = 0; j < preserved.length; j++)
           preserved[j].copyWith(seq: rows.length + j),
       ];
@@ -740,6 +889,78 @@ class SyncService extends Service {
                   status: status,
                   result: result,
                   error: error,
+                ),
+              ),
+            );
+          }
+        case AskUserPromptEvt(
+          :final id,
+          :final question,
+          :final context,
+          :final options,
+          :final allowMultiple,
+          :final allowFreeform,
+          :final allowComment,
+        ):
+          out.add(
+            MessageRecord(
+              id: id,
+              seq: seq++,
+              role: MsgRole.askUser,
+              ts: DateTime.fromMillisecondsSinceEpoch(e.ts),
+              askUser: AskUserPromptData(
+                question: question,
+                context: context,
+                options: _toAskUserChoices(options),
+                allowMultiple: allowMultiple,
+                allowFreeform: allowFreeform,
+                allowComment: allowComment,
+              ),
+            ),
+          );
+        case AskUserResolvedEvt(
+          :final id,
+          :final answerLabel,
+          :final cancelled,
+        ):
+          final idx = out.lastIndexWhere(
+            (m) => m.role == MsgRole.askUser && m.id == id,
+          );
+          if (idx >= 0) {
+            final base =
+                out[idx].askUser ??
+                const AskUserPromptData(
+                  question: '',
+                  context: '',
+                  options: [],
+                  allowMultiple: false,
+                  allowFreeform: false,
+                  allowComment: false,
+                );
+            out[idx] = out[idx].copyWith(
+              askUser: base.copyWith(
+                resolved: true,
+                cancelled: cancelled,
+                answerLabel: answerLabel,
+              ),
+            );
+          } else {
+            out.add(
+              MessageRecord(
+                id: id,
+                seq: seq++,
+                role: MsgRole.askUser,
+                ts: DateTime.fromMillisecondsSinceEpoch(e.ts),
+                askUser: AskUserPromptData(
+                  question: '',
+                  context: '',
+                  options: const [],
+                  allowMultiple: false,
+                  allowFreeform: false,
+                  allowComment: false,
+                  resolved: true,
+                  cancelled: cancelled,
+                  answerLabel: answerLabel,
                 ),
               ),
             );

@@ -89,6 +89,8 @@ dependencies:
 dev_dependencies:
   flutter_test:
     sdk: flutter
+  integration_test:
+    sdk: flutter
 
   # Plan 29 — deterministic virtual clock for the voice elapsed-timer /
   # 60s-cap tests (no real waiting). Already resolved transitively; pinned
