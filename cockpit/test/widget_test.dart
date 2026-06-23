@@ -1,14 +1,14 @@
 // Testes do núcleo do multiplexador: a árvore de splits (puro, sem Flutter).
 
-import 'package:cockpit/domain/contracts/environment_installer.dart';
-import 'package:cockpit/domain/contracts/environment_probe.dart';
-import 'package:cockpit/domain/contracts/system_permissions.dart';
-import 'package:cockpit/domain/entities/install_result.dart';
-import 'package:cockpit/domain/entities/setup_check.dart';
-import 'package:cockpit/ui/cockpit/states/pane_node.dart';
-import 'package:cockpit/ui/cockpit/viewmodels/setup_viewmodel.dart';
-import 'package:cockpit/ui/core/file_icons/file_icon.dart';
-import 'package:cockpit/ui/core/file_icons/file_icon_map.g.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/environment_installer.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/environment_probe.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/system_permissions.dart';
+import 'package:cockpit/app/cockpit/domain/entities/install_result.dart';
+import 'package:cockpit/app/cockpit/domain/entities/setup_check.dart';
+import 'package:cockpit/app/cockpit/ui/states/pane_node.dart';
+import 'package:cockpit/app/cockpit/ui/viewmodels/setup_viewmodel.dart';
+import 'package:cockpit/app/core/ui/file_icons/file_icon.dart';
+import 'package:cockpit/app/core/ui/file_icons/file_icon_map.g.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -239,19 +239,31 @@ void main() {
     });
 
     test('um passo faltando bloqueia', () async {
-      final vm = SetupViewModel(_FakeEnv(ext: false), _FakePerms(), _FakeInstaller());
+      final vm = SetupViewModel(
+        _FakeEnv(ext: false),
+        _FakePerms(),
+        _FakeInstaller(),
+      );
       await vm.recheckAll();
       expect(vm.extension, CheckStatus.missing);
       expect(vm.canCreate, isFalse);
     });
 
     test('pi ou supervisor faltando também bloqueia', () async {
-      final a = SetupViewModel(_FakeEnv(pi: false), _FakePerms(), _FakeInstaller());
+      final a = SetupViewModel(
+        _FakeEnv(pi: false),
+        _FakePerms(),
+        _FakeInstaller(),
+      );
       await a.recheckAll();
       expect(a.pi, CheckStatus.missing);
       expect(a.canCreate, isFalse);
 
-      final b = SetupViewModel(_FakeEnv(sup: false), _FakePerms(), _FakeInstaller());
+      final b = SetupViewModel(
+        _FakeEnv(sup: false),
+        _FakePerms(),
+        _FakeInstaller(),
+      );
       await b.recheckAll();
       expect(b.supervisor, CheckStatus.missing);
       expect(b.canCreate, isFalse);

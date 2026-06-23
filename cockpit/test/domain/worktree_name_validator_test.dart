@@ -1,4 +1,4 @@
-import 'package:cockpit/domain/validators/worktree_name_validator.dart';
+import 'package:cockpit/app/cockpit/domain/validators/worktree_name_validator.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -8,12 +8,11 @@ void main() {
     String name, {
     Set<String> branches = const <String>{},
     Set<String> worktrees = const <String>{},
-  }) =>
-      validator.validate(
-        name,
-        existingBranches: branches,
-        existingWorktreeNames: worktrees,
-      );
+  }) => validator.validate(
+    name,
+    existingBranches: branches,
+    existingWorktreeNames: worktrees,
+  );
 
   group('formato', () {
     test('vazio', () {
@@ -31,7 +30,15 @@ void main() {
     });
 
     test('caracteres proibidos do git', () {
-      for (final n in <String>['a~b', 'a^b', 'a:b', 'a?b', 'a*b', 'a[b', r'a\b']) {
+      for (final n in <String>[
+        'a~b',
+        'a^b',
+        'a:b',
+        'a?b',
+        'a*b',
+        'a[b',
+        r'a\b',
+      ]) {
         expect(check(n).error, WorktreeNameError.invalidChar, reason: n);
       }
     });

@@ -1,34 +1,85 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:cockpit/config/app_intents.dart';
-import 'package:cockpit/config/dependencies.dart';
-import 'package:cockpit/domain/entities/app_settings.dart';
-import 'package:cockpit/routing/router.dart';
-import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:cockpit/ui/settings/settings_controller.dart';
-import 'package:flutter/services.dart' show LogicalKeyboardKey;
-import 'package:shadcn_flutter/shadcn_flutter.dart';
-import 'package:go_router/go_router.dart';
+import 'package:cockpit/app/app_module.dart';
+import 'package:cockpit/app/app_widget.dart';
+import 'package:cockpit/app/cockpit/data/notifications/local_notifier.dart';
+import 'package:cockpit/app/cockpit/data/repositories/hive_project_repository.dart';
+import 'package:cockpit/app/cockpit/data/repositories/hive_workspace_layout_store.dart';
+import 'package:cockpit/app/cockpit/data/rpc/pi_process_registry.dart';
+import 'package:cockpit/app/core/data/repositories/hive_settings_store.dart';
+import 'package:cockpit/app/core/env.dart';
+import 'package:cockpit/app/core/ui/settings_controller.dart';
+import 'package:flutter/foundation.dart' show kDebugMode, debugPrint;
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:provider/provider.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:window_manager/window_manager.dart';
+
+/// Subdiretório raiz das boxes do Hive. Em debug usa `cockpit-debug` para não
+/// colidir com as boxes da build de produção (que costuma ficar aberta em
+/// paralelo durante o desenvolvimento). Todas as boxes — inclusive a
+/// `window_state` — herdam esse diretório via `Hive.initFlutter`.
+const String hiveSubdir = kDebugMode ? 'cockpit-debug' : 'cockpit';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await setupDependencies();
+
+  // Plano 46 — inicializa o media_kit (libmpv) antes de qualquer Player.
+  MediaKit.ensureInitialized();
+
+  // Mata processos `pi --mode rpc` órfãos do ciclo anterior antes de qualquer
+  // novo spawn (cobre hot restart e cold restart com crash).
+  await PiProcessRegistry.cleanOrphans();
+
+  // Subdiretório próprio; em debug separado da build de produção.
+  await Hive.initFlutter(hiveSubdir);
+  final projectBox = await Hive.openBox<dynamic>(HiveProjectRepository.boxName);
+  final layoutBox = await Hive.openBox<dynamic>(
+    HiveWorkspaceLayoutStore.boxName,
+  );
+  final settingsBox = await Hive.openBox<dynamic>(HiveSettingsStore.boxName);
+
+  final config = await PiSpawnConfig.resolve();
+  final appVersion = (await PackageInfo.fromPlatform()).version;
+
+  // Notificações do SO — init pede permissão; falha não pode derrubar o boot.
+  final notifier = LocalNotifier();
+  try {
+    await notifier.init();
+  } catch (error) {
+    debugPrint('Falha ao iniciar notificações: $error');
+  }
+
   // Preferências carregadas ANTES do primeiro frame → o app já abre no tema
-  // salvo (sem flash de tema errado).
-  final settings = buildSettingsController();
+  // salvo (sem flash). App-scoped: provido via `ModularApp.provide`, acima do
+  // `ShadcnApp` → trocar tema/fonte repinta tudo.
+  final settings = SettingsController(HiveSettingsStore(settingsBox));
   await settings.load();
-  // Hive já foi inicializado em setupDependencies(); abre (ou reaproveita) a
-  // box de estado da janela.
+
   final winBox = await Hive.openBox<dynamic>('window_state');
   await _setupWindow(winBox);
+
+  // Módulos construídos uma vez, com os valores resolvidos no bootstrap async.
+  final appModule = buildAppModule(
+    config: config,
+    projectBox: projectBox,
+    layoutBox: layoutBox,
+    settingsBox: settingsBox,
+    appVersion: appVersion,
+    notifier: notifier,
+  );
+
   runApp(
     _WindowStateKeeper(
       box: winBox,
-      child: CockpitApp(router: buildRouter(), settings: settings),
+      child: ModularApp(
+        module: appModule,
+        provide: (s) => s.addChangeNotifier<SettingsController>(() => settings),
+        child: const AppRoot(),
+      ),
     ),
   );
 }
@@ -90,160 +141,4 @@ class _WindowStateKeeperState extends State<_WindowStateKeeper>
 
   @override
   Widget build(BuildContext context) => widget.child;
-}
-
-class CockpitApp extends StatelessWidget {
-  const CockpitApp({super.key, required this.router, required this.settings});
-
-  final GoRouter router;
-  final SettingsController settings;
-
-  @override
-  Widget build(BuildContext context) {
-    // O controller fica ACIMA do ShadcnApp → trocar tema/fonte repinta tudo,
-    // e a tela de Configurações o consome via Provider.
-    return ChangeNotifierProvider<SettingsController>.value(
-      value: settings,
-      child: Consumer<SettingsController>(
-        builder: (context, controller, _) {
-          final s = controller.settings;
-          // "Tamanho da interface" = **zoom do app inteiro** (texto, panes,
-          // ícones, app bar, terminal). Baseline 14 = 1.0x. Ver [_AppZoom].
-          final uiScale = s.interfaceSize / 14.0;
-          return ShadcnApp.router(
-            title: 'Cockpit',
-            debugShowCheckedModeBanner: false,
-            theme: buildTheme(brightness: Brightness.light, settings: s),
-            darkTheme: buildTheme(brightness: Brightness.dark, settings: s),
-            themeMode: _themeMode(s.themeMode),
-            routerConfig: router,
-            builder: (context, child) {
-              // Brightness efetiva (já resolvida pelo ShadcnApp via themeMode):
-              // monta os tokens bespoke e os instala via CockpitTheme — é o que
-              // alimenta context.colors/typo/syntax em toda a árvore de rotas.
-              final tokens = buildTokens(
-                brightness: Theme.of(context).brightness,
-                settings: s,
-              );
-              return CallbackShortcuts(
-                // Atalhos globais (sempre na cadeia de foco): zoom (⌘=/⌘-/⌘0) e
-                // foco do input (⌘L). CallbackShortcuts é aditivo (não quebra
-                // copiar/colar) e funciona mesmo sem nada focado.
-                bindings: {..._zoomBindings(controller), ..._focusBindings()},
-                child: _AppZoom(
-                  scale: uiScale,
-                  child: CockpitTheme(
-                    colors: tokens.colors,
-                    typo: tokens.typo,
-                    syntax: tokens.syntax,
-                    child: child ?? const SizedBox(),
-                  ),
-                ),
-              );
-            },
-          );
-        },
-      ),
-    );
-  }
-
-  ThemeMode _themeMode(AppThemeMode mode) => switch (mode) {
-    AppThemeMode.system => ThemeMode.system,
-    AppThemeMode.light => ThemeMode.light,
-    AppThemeMode.dark => ThemeMode.dark,
-  };
-
-  /// ⌘L / Ctrl+L → foca o input do agente focado (via ponte global, resolvida
-  /// pelo `CockpitPage`). Fica aqui (não no shell) pra disparar mesmo quando o
-  /// foco caiu num espaço vazio.
-  Map<ShortcutActivator, VoidCallback> _focusBindings() {
-    void focus() => requestFocusActiveComposer?.call();
-    return <ShortcutActivator, VoidCallback>{
-      const SingleActivator(LogicalKeyboardKey.keyL, meta: true): focus,
-      const SingleActivator(LogicalKeyboardKey.keyL, control: true): focus,
-    };
-  }
-
-  /// Atalhos de zoom (tamanho da interface). `meta` = ⌘ (macOS); `control` =
-  /// Ctrl (Windows/Linux). `=`/numpad+ aumenta, `-`/numpad- diminui, `0` reseta.
-  /// Step de 1, limitado a 11..22 (igual ao stepper das Configurações).
-  Map<ShortcutActivator, VoidCallback> _zoomBindings(
-    SettingsController controller,
-  ) {
-    void by(double delta) {
-      final next = (controller.settings.interfaceSize + delta).clamp(
-        11.0,
-        22.0,
-      );
-      controller.setInterfaceSize(next);
-    }
-
-    void reset() => controller.setInterfaceSize(14);
-
-    return <ShortcutActivator, VoidCallback>{
-      for (final mod in const [true, false]) ...{
-        SingleActivator(
-          LogicalKeyboardKey.equal,
-          meta: mod,
-          control: !mod,
-        ): () =>
-            by(1),
-        SingleActivator(
-          LogicalKeyboardKey.numpadAdd,
-          meta: mod,
-          control: !mod,
-        ): () =>
-            by(1),
-        SingleActivator(
-          LogicalKeyboardKey.minus,
-          meta: mod,
-          control: !mod,
-        ): () =>
-            by(-1),
-        SingleActivator(
-          LogicalKeyboardKey.numpadSubtract,
-          meta: mod,
-          control: !mod,
-        ): () =>
-            by(-1),
-        SingleActivator(LogicalKeyboardKey.digit0, meta: mod, control: !mod):
-            reset,
-      },
-    };
-  }
-}
-
-/// Zoom do **app inteiro**: lê o app num espaço lógico reduzido (`size/scale`) e
-/// escala de volta com `Transform`, então tudo (texto, ícones, panes, app bar)
-/// cresce junto — não só o texto. Vetores (texto/ícones) são re-rasterizados
-/// pelo Skia (nítidos); bitmaps (imagens) interpolam. `scale == 1` é no-op.
-class _AppZoom extends StatelessWidget {
-  const _AppZoom({required this.scale, required this.child});
-  final double scale;
-  final Widget child;
-
-  @override
-  Widget build(BuildContext context) {
-    if ((scale - 1.0).abs() < 0.001) return child;
-    final mq = MediaQuery.of(context);
-    final scaled = mq.size / scale;
-    return MediaQuery(
-      // Layout pensa numa tela menor (`size/scale`) → os elementos ocupam mais
-      // dela; o `FittedBox` amplia pro tamanho real da janela. Uso FittedBox (e
-      // não `Transform.scale` cru) porque ele **reporta o tamanho da janela** —
-      // o Transform reportaria o tamanho lógico reduzido e um ancestral cortaria
-      // a direita/baixo (Files e composer somindo). Gestos/hit-test são
-      // convertidos pro espaço lógico automaticamente.
-      data: mq.copyWith(size: scaled),
-      child: FittedBox(
-        fit: BoxFit.fill,
-        alignment: Alignment.topLeft,
-        child: SizedBox(
-          width: scaled.width,
-          height: scaled.height,
-          child: child,
-        ),
-      ),
-    );
-  }
 }

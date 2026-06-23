@@ -1,9 +1,9 @@
 import 'dart:io';
 
-import 'package:cockpit/data/filesystem/worktree_manager_impl.dart';
-import 'package:cockpit/domain/contracts/worktree_manager.dart';
-import 'package:cockpit/domain/entities/worktree.dart';
-import 'package:cockpit/domain/result.dart';
+import 'package:cockpit/app/cockpit/data/filesystem/worktree_manager_impl.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/worktree_manager.dart';
+import 'package:cockpit/app/cockpit/domain/entities/worktree.dart';
+import 'package:cockpit/app/core/domain/result.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -30,8 +30,11 @@ void main() {
     await File('${repo.path}/README.md').writeAsString('hello');
     await git(['add', '.']);
     await git(['commit', '-m', 'init']);
-    mainBranch =
-        (await git(['rev-parse', '--abbrev-ref', 'HEAD'])).stdout.toString().trim();
+    mainBranch = (await git([
+      'rev-parse',
+      '--abbrev-ref',
+      'HEAD',
+    ])).stdout.toString().trim();
   });
 
   tearDown(() async {
@@ -76,7 +79,10 @@ void main() {
     );
     expect(Directory(wt.path).existsSync(), isFalse);
     expect(await manager.list(repo.path), isEmpty);
-    expect((await manager.namespace(repo.path)).branches, isNot(contains('feat/sso')));
+    expect(
+      (await manager.namespace(repo.path)).branches,
+      isNot(contains('feat/sso')),
+    );
   });
 
   test('add falha (Failure com mensagem) em branch já existente', () async {
@@ -86,7 +92,10 @@ void main() {
     }
     final dup = await manager.add(repo.path, mainBranch);
     expect(dup.isFailure, isTrue);
-    expect((dup as Failure<Worktree, WorktreeOpError>).error.message, isNotEmpty);
+    expect(
+      (dup as Failure<Worktree, WorktreeOpError>).error.message,
+      isNotEmpty,
+    );
   });
 
   test('list/namespace de pasta não-git devolvem vazio', () async {
@@ -98,26 +107,28 @@ void main() {
     expect((await manager.namespace(tmp.path)).branches, isEmpty);
   });
 
-  test('isBranchMerged: true sem commits novos, false após commit no fork',
-      () async {
-    if (!await gitAvailable()) {
-      markTestSkipped('git não disponível no ambiente');
-      return;
-    }
-    final added = await manager.add(repo.path, 'feat/x');
-    final wt = (added as Success<Worktree, WorktreeOpError>).value;
+  test(
+    'isBranchMerged: true sem commits novos, false após commit no fork',
+    () async {
+      if (!await gitAvailable()) {
+        markTestSkipped('git não disponível no ambiente');
+        return;
+      }
+      final added = await manager.add(repo.path, 'feat/x');
+      final wt = (added as Success<Worktree, WorktreeOpError>).value;
 
-    // Recém-criada do HEAD, sem commits → mergeada (tip alcançável do HEAD).
-    expect(await manager.isBranchMerged(repo.path, 'feat/x'), isTrue);
+      // Recém-criada do HEAD, sem commits → mergeada (tip alcançável do HEAD).
+      expect(await manager.isBranchMerged(repo.path, 'feat/x'), isTrue);
 
-    // Commit novo no worktree → o tip deixa de ser alcançável do HEAD principal.
-    await File('${wt.path}/new.txt').writeAsString('x');
-    await git(['add', '.'], cwd: wt.path);
-    await git(['commit', '-m', 'work'], cwd: wt.path);
-    expect(await manager.isBranchMerged(repo.path, 'feat/x'), isFalse);
+      // Commit novo no worktree → o tip deixa de ser alcançável do HEAD principal.
+      await File('${wt.path}/new.txt').writeAsString('x');
+      await git(['add', '.'], cwd: wt.path);
+      await git(['commit', '-m', 'work'], cwd: wt.path);
+      expect(await manager.isBranchMerged(repo.path, 'feat/x'), isFalse);
 
-    // Branch vazia / inexistente → false (mostra o aviso por segurança).
-    expect(await manager.isBranchMerged(repo.path, ''), isFalse);
-    expect(await manager.isBranchMerged(repo.path, 'nao/existe'), isFalse);
-  });
+      // Branch vazia / inexistente → false (mostra o aviso por segurança).
+      expect(await manager.isBranchMerged(repo.path, ''), isFalse);
+      expect(await manager.isBranchMerged(repo.path, 'nao/existe'), isFalse);
+    },
+  );
 }

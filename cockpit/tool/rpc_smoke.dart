@@ -9,10 +9,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:cockpit/config/env.dart';
-import 'package:cockpit/data/rpc/pi_rpc_process.dart';
-import 'package:cockpit/domain/entities/rpc_event.dart';
-import 'package:cockpit/domain/entities/thinking_level.dart';
+import 'package:cockpit/app/core/env.dart';
+import 'package:cockpit/app/cockpit/data/rpc/pi_rpc_process.dart';
+import 'package:cockpit/app/cockpit/domain/entities/rpc_event.dart';
+import 'package:cockpit/app/cockpit/domain/entities/thinking_level.dart';
 
 Future<void> main(List<String> args) async {
   // dart run tool/rpc_smoke.dart [provider] [model]
@@ -67,7 +67,9 @@ Future<void> main(List<String> args) async {
   );
   final state = await gateway.state();
   state.fold(
-    (s) => stdout.writeln('[state] model=${s.model?.id} effort=${s.thinkingLevel.wire}'),
+    (s) => stdout.writeln(
+      '[state] model=${s.model?.id} effort=${s.thinkingLevel.wire}',
+    ),
     (e) => stdout.writeln('[state] erro: ${e.message}'),
   );
   final setLevel = await gateway.setThinkingLevel(ThinkingLevel.low);
@@ -77,9 +79,12 @@ Future<void> main(List<String> args) async {
     'List the files in the current directory using your tools, then one short sentence.',
   );
 
-  await ended.future.timeout(const Duration(seconds: 60), onTimeout: () {
-    stdout.writeln('[timeout]');
-  });
+  await ended.future.timeout(
+    const Duration(seconds: 60),
+    onTimeout: () {
+      stdout.writeln('[timeout]');
+    },
+  );
 
   final stats = await gateway.sessionStats();
   stats.fold(

@@ -1,7 +1,7 @@
 // Testes do Shift+Enter no terminal: rastreio do kitty keyboard protocol e a
 // escolha do byte (CSI-u quando ativo, `\n` quando legado).
 
-import 'package:cockpit/ui/cockpit/session/terminal_input.dart';
+import 'package:cockpit/app/cockpit/ui/session/terminal_input.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:xterm/xterm.dart';
 

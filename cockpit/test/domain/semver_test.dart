@@ -1,4 +1,4 @@
-import 'package:cockpit/domain/value_objects/semver.dart';
+import 'package:cockpit/app/cockpit/domain/value_objects/semver.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

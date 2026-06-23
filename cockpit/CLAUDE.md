@@ -25,16 +25,22 @@ Decisões fechadas (plano 37, 2026-06-05):
 
 - Flutter desktop / Dart (mesma major do `app/`)
 - Plataforma: **macOS first** (Windows/Linux possíveis via Flutter, não testados)
-- State management: `ViewModel<T>` (`ChangeNotifier` single-field) + `provider`
-- DI: `auto_injector` (registry em `lib/config/`)
-- Roteamento: `go_router`
+- DI + roteamento + estado: **`flutter_modular`** (v7). Cada feature é um módulo
+  (`createModule`) que declara **suas próprias rotas + binds**; estado page-scoped
+  via `provide`/`addChangeNotifier` (sobre `ChangeNotifier`), estado app-scoped
+  (tema/fonte) via `ModularApp.provide`. Substituiu `provider` + `auto_injector` +
+  `go_router`.
+- Consumo de estado na UI: `context.watch/read/select`, `Consumer`/`Selector`
+  (re-exportados pelo `flutter_modular` — API igual à do `provider`).
 - Resultado tipado: `Result<T, E>`
 - Subprocesso: `dart:io` `Process.start` (spawn do `pi --mode rpc`)
 - Menu nativo: `PlatformMenuBar`
 
-> É a **mesma arquitetura do `app/`**. A única diferença real de camadas está em
-> `data/`, que aqui gerencia **processos RPC + filesystem** em vez de
-> mesh/relay/crypto. O resto (config, domain, routing, ui) segue idêntico.
+> **Diverge do `app/` de propósito**: o cockpit é organizado em **fatias verticais
+> por feature** (`lib/app/<feature>/{domain,data,ui}`), não em camadas globais. A
+> motivação foi matar os god classes `router.dart`/`dependencies.dart` e deixar
+> cada feature auto-contida (cresce sem editar arquivos compartilhados). O `app/`
+> (mobile) segue na arquitetura por camadas — não espelhe um no outro.
 
 ## Comandos
 
@@ -45,46 +51,49 @@ Decisões fechadas (plano 37, 2026-06-05):
 - `dart format .` — formata
 - `flutter build macos` — build verificável
 
-## Arquitetura por camadas
+## Arquitetura — fatias verticais por feature
 
-O `lib/` segue a **mesma organização do `app/`**, com responsabilidades estritas.
-Cada pasta tem seu próprio `CLAUDE.md` descrevendo a persona daquela camada —
-**leia o CLAUDE.md da camada antes de editar qualquer arquivo dentro dela**.
+Tudo vive sob `lib/app/`. Cada **feature** é um mini-app auto-contido com suas
+próprias camadas `domain/ data/ ui/` e **um módulo** (`<feature>_module.dart`) que
+declara as rotas e os binds daquela feature. O `app/core/` guarda só o que é
+transversal (usado por 2+ features). **Leia [`lib/app/CLAUDE.md`](lib/app/CLAUDE.md)
+(convenções de feature/módulo) e [`lib/app/core/CLAUDE.md`](lib/app/core/CLAUDE.md)
+(o que é kernel) antes de editar.**
 
 ```
 lib/
-├── main.dart
-├── config/          # Bootstrap, DI, env, setup global  → config/CLAUDE.md
-│   └── utils/       # Helpers horizontais
-├── domain/          # Entidades, use cases, validators  → domain/CLAUDE.md
-│   └── contracts/   # Interfaces de baixo nível (process, filesystem)
-├── data/            # RPC process, filesystem, repos     → data/CLAUDE.md
-├── routing/         # GoRouter, paths, guards            → routing/CLAUDE.md
-└── ui/              # Páginas + ViewModels por feature   → ui/CLAUDE.md
-    ├── core/
-    │   ├── themes/      # tema dark (context.colors / context.typo)
-    │   └── viewmodel/   # ViewModel<T> base
-    └── <feature>/
-        ├── states/
-        ├── viewmodels/
-        ├── widgets/
-        └── <feature>_page.dart
+├── main.dart                 # bootstrap async (Hive/boxes/config/notifier) + runApp(ModularApp)
+└── app/
+    ├── app_module.dart       # raiz: compõe core + features (só composição)
+    ├── app_widget.dart       # AppRoot: ShadcnApp.router + watch<SettingsController>
+    ├── core/                 # kernel transversal (módulo SEM path → binds root-owned)
+    │   ├── core_module.dart  # binds compartilhados (PiSpawnConfig)
+    │   ├── routes.dart  env.dart  app_intents.dart
+    │   ├── domain/  data/    # markers (Service/Disposable), Result, contratos/impls compartilhados
+    │   └── ui/               # themes/  widgets/  file_icons/  settings_controller.dart (app-scoped)
+    ├── cockpit/              # FEATURE: o shell (projetos | panes/agentes/terminal | arquivos)
+    │   ├── cockpit_module.dart   # path '/', binds + route('/', provide: Cockpit/Setup/Update VMs)
+    │   └── domain/  data/  ui/   # ui/ = cockpit_page + viewmodels/ session/ states/ widgets/
+    └── settings/             # FEATURE: conectividade + daemon agents + agendamentos (cron)
+        ├── settings_module.dart  # path '/settings', binds + route('/', provide: Connectivity/Daemons/Cron VMs)
+        └── domain/  data/  ui/
 ```
 
-Regra de ouro do fluxo de dependência (idêntica ao `app/`):
+Fluxo de dependência **dentro de cada feature** (e do core):
 
 ```
 ui ──► domain ◄── data
         ▲
-        │
-     config (injeta tudo)
-     routing (compõe rotas + ViewModels)
+   <feature>_module.dart   (compõe: registra binds + declara rota + provê ViewModels)
 ```
 
-- `domain/` **não** importa nada de `data/`, `ui/`, `routing/`, `config/`.
+- `domain/` (de cada feature e do core) **não** importa `data/`, `ui/` nem módulos.
 - `data/` implementa contratos de `domain/`, nunca importa de `ui/`.
-- `ui/` consome `domain/` (use cases) via ViewModels — nunca chama `data/` direto.
-- `config/` é o único lugar que conhece todas as camadas (para registrar bindings).
+- `ui/` consome `domain/` via ViewModels page-scoped — nunca chama `data/` direto.
+- `<feature>_module.dart` é o único lugar que conhece as 3 camadas da feature.
+- Uma feature **pode importar de `core/`, nunca de outra feature**; o `core/` não
+  importa de feature nenhuma. (Ex.: o `SupervisorClientImpl`, que serve daemons **e**
+  cron, e o `SettingsController` global moram onde são compartilhados, não numa aba.)
 
 ## Convenções
 
@@ -96,10 +105,26 @@ ui ──► domain ◄── data
 - **Async**: prefira `Future`/`Stream` tipados, evite `dynamic` (o stream de
   eventos RPC é tipado em `domain/`, nunca `Map<String, dynamic>` cru na `ui/`)
 - **Erros**: `Result<T, E>` ou exceptions tipadas; nunca `catch (e)` genérico em produção
-- **ViewModels**: registrados em `config/` e injetados em `routing/` via Provider;
-  páginas nunca instanciam ViewModel diretamente — sempre `context.watch/read/select`
+- **ViewModels**: `ChangeNotifier` page-scoped, providos no `provide:` da rota
+  (`s.addChangeNotifier<T>(…)`) **dentro do `<feature>_module.dart`**; páginas nunca
+  instanciam ViewModel — sempre `context.watch/read/select`. Nascem ao montar a
+  rota e são `dispose()`-ados ao sair. Estado app-global (tema/fonte =
+  `SettingsController`) vive em `ModularApp.provide`, acima do `ShadcnApp`.
+- **Injeção via `.new`** (regra): registre binds e ViewModels com o **tear-off do
+  construtor** (`addChangeNotifier<Foo>(Foo.new)`, `addLazySingleton<Bar>(Bar.new)`)
+  e deixe o `auto_injector` resolver os parâmetros pelo grafo. **Não** escreva
+  `() => Foo(inject<A>(), inject<B>())` quando `Foo.new` resolve. Pós-construção
+  (`init()`/`check()`) roda no `initState` da página, não encadeada no factory.
+  Dois casos exigem um **tipo nomeado** para seguir `.new` (o parser de parâmetros
+  do `auto_injector` é regex sobre o `toString` do construtor):
+  - **dependência factory** ("crie um X novo a cada uso"): use uma **interface de
+    factory** (`abstract class XFactory { X create(); }`, impl no `data/`), **não**
+    `X Function()` — o parser quebra no `=>` e funde dois params factory seguidos.
+    Ver `PairingGatewayFactory` + `ConnectivityViewModel`.
+  - **vários primitivos ambíguos** (vários `String`): troque por um **value object
+    injetável** (ex.: `UpdateTarget` no `cockpit_module`).
 - **Tema**: nunca hardcode `Color(0x…)` / `TextStyle(fontFamily:…)`; leia via
-  `context.colors.<token>` / `context.typo.<estilo>` (barrel `ui/core/themes`)
+  `context.colors.<token>` / `context.typo.<estilo>` (barrel `app/core/ui/themes`)
 
 ## Regra crítica: `BuildContext` em código assíncrono
 
@@ -137,8 +162,12 @@ await viewModel.spawnAgent().onSuccess((_) {
 - Implementar crypto manual (não há crypto nesta fase)
 - Comitar `build/`, `.dart_tool/`, `macos/Pods/`
 - Adicionar dependência sem registrar no plano 37
-- Misturar responsabilidades entre camadas — quando bater dúvida, leia o
-  CLAUDE.md da camada alvo
+- Misturar responsabilidades entre camadas/features — quando bater dúvida, leia
+  [`lib/app/CLAUDE.md`](lib/app/CLAUDE.md) e o `domain/data/ui` da feature alvo
+- Importar de uma feature para outra, ou do `core/` para uma feature — só
+  feature→core é permitido (ver fluxo de dependência acima)
+- Recriar god classes: **não** centralize rotas ou binds num arquivo só — cada
+  feature declara os seus no próprio `<feature>_module.dart`
 
 ## Modo orquestrado
 

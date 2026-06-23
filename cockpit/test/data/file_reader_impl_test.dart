@@ -1,7 +1,7 @@
 import 'dart:io';
 
-import 'package:cockpit/data/filesystem/file_reader_impl.dart';
-import 'package:cockpit/domain/entities/file_view.dart';
+import 'package:cockpit/app/cockpit/data/filesystem/file_reader_impl.dart';
+import 'package:cockpit/app/cockpit/domain/entities/file_view.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

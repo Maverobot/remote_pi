@@ -1,6 +1,6 @@
 import 'dart:convert';
 
-import 'package:cockpit/domain/entities/update_info.dart';
+import 'package:cockpit/app/cockpit/domain/entities/update_info.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -46,7 +46,10 @@ void main() {
     });
 
     test('lança quando não é objeto / artifacts não é lista', () {
-      expect(() => UpdateInfo.fromJson(jsonDecode('[]')), throwsFormatException);
+      expect(
+        () => UpdateInfo.fromJson(jsonDecode('[]')),
+        throwsFormatException,
+      );
       expect(
         () => UpdateInfo.fromJson(jsonDecode('{"version":"1.0.0"}')),
         throwsFormatException,
@@ -64,7 +67,8 @@ void main() {
   });
 
   group('artifactFor', () {
-    final info = UpdateInfo.fromJson(jsonDecode('''
+    final info = UpdateInfo.fromJson(
+      jsonDecode('''
     {
       "version": "1.2.0",
       "artifacts": [
@@ -73,7 +77,8 @@ void main() {
         { "platform": "linux", "arch": "arm64", "format": "deb", "url": "arm.deb" }
       ]
     }
-    '''));
+    '''),
+    );
 
     test('casa platform+format e prefere a arch pedida', () {
       expect(
@@ -88,7 +93,8 @@ void main() {
 
     test('macOS: arch universal cai no primeiro do formato', () {
       expect(
-        info.artifactFor(platform: 'macos', format: 'dmg', arch: 'universal')
+        info
+            .artifactFor(platform: 'macos', format: 'dmg', arch: 'universal')
             ?.url,
         'mac.dmg',
       );

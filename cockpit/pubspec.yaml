@@ -44,10 +44,10 @@ dependencies:
   # `Icons`, então mantemos os Material Icons sem import extra.
   shadcn_flutter: 0.0.52
 
-  # Plano 37 — mesma stack do app/: state management + DI + routing.
-  provider: ^6.1.2
-  auto_injector: ^2.0.5
-  go_router: ^14.0.0
+  # DI + roteamento + estado page-scoped num pacote só: cada feature é um módulo
+  # (`createModule`) que declara suas rotas + binds. Substitui provider +
+  # auto_injector + go_router (removidos). Ver `lib/app/` e CLAUDE.md.
+  flutter_modular: ^7.0.2
 
   # Plano 37 — seleção de pasta (NSOpenPanel no macOS) para abrir um projeto.
   file_picker: ^8.1.2
