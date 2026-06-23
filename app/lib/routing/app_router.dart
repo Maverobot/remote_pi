@@ -5,15 +5,14 @@ import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/pairing/owner_identity_bridge.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/routing/adaptive.dart';
-import 'package:app/ui/core/themes/themes.dart';
 import 'package:app/ui/chat/attachment/viewmodels/attachment_viewmodel.dart';
 import 'package:app/ui/chat/chat_page.dart';
 import 'package:app/ui/chat/viewmodels/chat_viewmodel.dart';
 import 'package:app/ui/chat/voice/viewmodels/voice_input_viewmodel.dart';
 import 'package:app/ui/chat/widgets/detail_placeholder.dart';
+import 'package:app/ui/core/themes/themes.dart';
 import 'package:app/ui/home/home_page.dart';
 import 'package:app/ui/home/viewmodels/home_viewmodel.dart';
-import 'package:app/ui/update/viewmodels/update_banner_viewmodel.dart';
 import 'package:app/ui/onboarding/onboarding_page.dart';
 import 'package:app/ui/onboarding/viewmodels/onboarding_viewmodel.dart';
 import 'package:app/ui/pairing/pairing_page.dart';
@@ -21,6 +20,7 @@ import 'package:app/ui/pairing/viewmodels/pairing_viewmodel.dart';
 import 'package:app/ui/settings/settings_page.dart';
 import 'package:app/ui/settings/viewmodels/settings_viewmodel.dart';
 import 'package:app/ui/sync_required/sync_required_page.dart';
+import 'package:app/ui/update/viewmodels/update_banner_viewmodel.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
@@ -282,8 +282,6 @@ GoRouter buildRouter(
                 builder: (ctx, st) => MultiProvider(
                   providers: [
                     ViewmodelProvider<HomeViewModel>(),
-                    // Plan 44 — Android-only update notice rendered at the top
-                    // of Home. No-op on iOS / when there's no newer version.
                     ViewmodelProvider<UpdateBannerViewModel>(),
                   ],
                   child: const HomePage(),

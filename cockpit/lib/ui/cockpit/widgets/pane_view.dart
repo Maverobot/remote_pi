@@ -916,6 +916,29 @@ class _PaneBodyState extends State<_PaneBody> {
     super.dispose();
   }
 
+  /// Intercepta o atalho de **colar** no terminal pra suportar imagem.
+  ///
+  /// O `TerminalView` só cola texto; a imagem do clipboard nunca chegava ao
+  /// harness. No Cmd+V (macOS) / Ctrl+V (Linux/Windows) delegamos pro
+  /// [TerminalSession.pasteFromClipboard], que manda `\x16` quando há imagem.
+  /// No macOS o Ctrl+V cru é engolido pelo IME (vira `pageDown`), então lá o
+  /// atalho confiável de colar é o Cmd+V — por isso checamos a tecla certa por
+  /// plataforma. As demais teclas seguem o fluxo normal do terminal (`ignored`).
+  KeyEventResult _onTerminalKey(KeyEvent event, TerminalSession session) {
+    if (event is! KeyDownEvent ||
+        event.logicalKey != LogicalKeyboardKey.keyV) {
+      return KeyEventResult.ignored;
+    }
+    // Cmd+V no macOS (atalho confiável; o Ctrl+V cru é engolido pelo IME) e
+    // Ctrl+V no resto — mas também aceitamos Ctrl+V no macOS caso ele chegue.
+    final keys = HardwareKeyboard.instance;
+    final isPaste =
+        (Platform.isMacOS && keys.isMetaPressed) || keys.isControlPressed;
+    if (!isPaste) return KeyEventResult.ignored;
+    session.pasteFromClipboard();
+    return KeyEventResult.handled;
+  }
+
   void _maybeStickToBottom() {
     final bool stick;
     if (!_scroll.hasClients) {
@@ -963,6 +986,9 @@ class _PaneBodyState extends State<_PaneBody> {
             // modo só-hardware ignora o TextInput e lê KeyEvents crus. No
             // macOS mantemos o IME (melhor pra acentos/composição).
             hardwareKeyboardOnly: Platform.isWindows,
+            // Intercepta o atalho de colar pra suportar IMAGEM do clipboard
+            // (o paste padrão do xterm só cola texto). Ver `_onTerminalKey`.
+            onKeyEvent: (_, event) => _onTerminalKey(event, item),
             theme: cockpitTerminalThemeFor(Theme.of(context).brightness),
             textStyle: termStyle,
           ),

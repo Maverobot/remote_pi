@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:cockpit/domain/contracts/terminal_gateway.dart';
 import 'package:cockpit/ui/cockpit/session/pane_item.dart';
+import 'package:cockpit/ui/cockpit/session/terminal_input.dart';
+import 'package:pasteboard/pasteboard.dart';
 import 'package:xterm/xterm.dart';
 
 /// Uma aba de terminal: um shell num PTY ([TerminalGateway]) ligado a um
@@ -17,7 +19,16 @@ class TerminalSession extends PaneItem {
     String? title,
   }) : _gateway = gateway,
        _title = title ?? 'New terminal' {
-    terminal = Terminal(maxLines: 10000);
+    // O `ShiftEnterInputHandler` (antes do padrão) faz Shift+Enter virar quebra
+    // de linha nos harnesses (claude, codex, pi) em vez de submeter; ele lê o
+    // estado do kitty keyboard protocol que `_kitty` rastreia pela saída do PTY.
+    terminal = Terminal(
+      maxLines: 10000,
+      inputHandler: CascadeInputHandler([
+        ShiftEnterInputHandler(_kitty),
+        defaultInputHandler,
+      ]),
+    );
 
     // Sobe o shell e liga os dois lados. O `.cast<List<int>>()` re-vincula o
     // tipo do stream (o PTY emite Uint8List) para o `utf8.decoder` aceitar e
@@ -26,7 +37,10 @@ class TerminalSession extends PaneItem {
     _sub = _gateway.output
         .cast<List<int>>()
         .transform(const Utf8Decoder(allowMalformed: true))
-        .listen(terminal.write);
+        .listen((data) {
+          _kitty.feed(data); // observa push/pop do kitty antes de renderizar.
+          terminal.write(data);
+        });
     terminal.onOutput = (data) => _gateway.write(utf8.encode(data));
     terminal.onResize = (width, height, pixelWidth, pixelHeight) =>
         _gateway.resize(height, width);
@@ -52,6 +66,7 @@ class TerminalSession extends PaneItem {
   final String workingDirectory;
 
   final TerminalGateway _gateway;
+  final KittyKeyboardTracker _kitty = KittyKeyboardTracker();
   String _title;
   late final Terminal terminal;
   StreamSubscription<String>? _sub;
@@ -69,6 +84,27 @@ class TerminalSession extends PaneItem {
   /// Insere [text] diretamente no PTY como se o usuário tivesse digitado/colado
   /// (ex.: caminho de arquivo arrastado até o terminal).
   void insertText(String text) => _gateway.write(utf8.encode(text));
+
+  /// Cola do clipboard no terminal, com suporte a **imagem**.
+  ///
+  /// Se há uma imagem no clipboard, manda o byte de Ctrl+V (`\x16`) pro harness
+  /// em primeiro plano (claude/codex/pi) — todos eles, ao receber `\x16`, leem a
+  /// imagem do clipboard e a anexam (claude mostra `[Image #1]`, o pi grava num
+  /// `.png` temporário). Sem imagem, faz o paste de texto normal (respeitando o
+  /// bracketed paste mode).
+  ///
+  /// Por que existe: o `TerminalView` só cola texto (via `Clipboard`, que não lê
+  /// imagem) e, no macOS, o caminho de IME engole o Ctrl+V cru (vira `pageDown`),
+  /// então o `\x16` nunca era gerado e a imagem nunca chegava ao harness.
+  Future<void> pasteFromClipboard() async {
+    final image = await Pasteboard.image;
+    if (image != null && image.isNotEmpty) {
+      _gateway.write(const [0x16]); // Ctrl+V: o harness lê a imagem do clipboard.
+      return;
+    }
+    final text = await Pasteboard.text;
+    if (text != null && text.isNotEmpty) terminal.paste(text);
+  }
 
   @override
   Future<void> dispose() async {

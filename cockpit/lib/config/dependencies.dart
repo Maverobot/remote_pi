@@ -67,6 +67,13 @@ final CustomInjector _injector = CustomInjector();
 /// Acesso direto ao injector — só para bootstrap e composição de rotas.
 CustomInjector get injector => _injector;
 
+/// Subdiretório raiz das boxes do Hive. Em debug usa `cockpit-debug` para não
+/// colidir com as boxes da build de produção (que costuma ficar aberta em
+/// paralelo durante o desenvolvimento). Todas as boxes — inclusive a
+/// `window_state` aberta no `main` — herdam esse diretório via
+/// `Hive.initFlutter`.
+const String hiveSubdir = kDebugMode ? 'cockpit-debug' : 'cockpit';
+
 /// Inicializa Hive e registra as dependências. Chamado uma vez no `main`.
 Future<void> setupDependencies() async {
   // Plano 46 — inicializa o media_kit (libmpv) antes de qualquer Player. Idempotente.
@@ -77,8 +84,10 @@ Future<void> setupDependencies() async {
   // os filhos) e cold restart com crash (processo morre, filhos ficam órfãos).
   await PiProcessRegistry.cleanOrphans();
 
-  // Subdiretório próprio (evita poluir a raiz de ~/Documents).
-  await Hive.initFlutter('cockpit');
+  // Subdiretório próprio (evita poluir a raiz de ~/Documents). Em debug usa um
+  // diretório separado (`cockpit-debug`) — assim rodar o app pelo IDE/`flutter
+  // run` não toca nas boxes da build de produção que fica aberta em paralelo.
+  await Hive.initFlutter(hiveSubdir);
   final box = await Hive.openBox<dynamic>(HiveProjectRepository.boxName);
   final layoutBox = await Hive.openBox<dynamic>(
     HiveWorkspaceLayoutStore.boxName,

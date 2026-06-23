@@ -442,14 +442,6 @@ class _ForkMenuButton extends StatelessWidget {
     );
     if (pick == 'copy') {
       await Clipboard.setData(ClipboardData(text: branch));
-      if (context.mounted) {
-        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-          SnackBar(
-            content: Text('Branch "$branch" copied'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
     }
     if (pick == 'remove') onRemove();
   }
