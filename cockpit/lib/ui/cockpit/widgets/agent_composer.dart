@@ -13,13 +13,14 @@ import 'package:cockpit/ui/cockpit/widgets/app_menu.dart';
 import 'package:cockpit/ui/cockpit/widgets/model_picker.dart';
 import 'package:cockpit/ui/core/file_icons/file_icons.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show defaultTargetPlatform;
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:pasteboard/pasteboard.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Composer do design: input + toolbar (modelo · effort · aprovação · enviar).
 /// Modelo e effort são reais (set_model / set_thinking_level); aprovação é
@@ -185,10 +186,14 @@ class _AgentComposerState extends State<AgentComposer> {
   }
 
   void _notifyLimit() {
-    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-      const SnackBar(
-        content: Text('Maximum of $_maxImages images.'),
-        duration: Duration(seconds: 2),
+    showToast(
+      context: context,
+      location: ToastLocation.bottomRight,
+      builder: (context, overlay) => const SurfaceCard(
+        child: Padding(
+          padding: EdgeInsets.all(12),
+          child: Text('Maximum of $_maxImages images.'),
+        ),
       ),
     );
   }
@@ -286,7 +291,10 @@ class _AgentComposerState extends State<AgentComposer> {
 
   // --- slash command data ---
   static const List<PiCommand> _builtins = <PiCommand>[
-    PiCommand(name: 'new', description: 'New session — clears the conversation'),
+    PiCommand(
+      name: 'new',
+      description: 'New session — clears the conversation',
+    ),
     PiCommand(name: 'compact', description: 'Compacts the agent context'),
   ];
 
@@ -630,12 +638,14 @@ class _AgentComposerState extends State<AgentComposer> {
                           fontSize: 13.5,
                           color: colors.text,
                         ),
-                        decoration: InputDecoration(
-                          isCollapsed: true,
-                          border: InputBorder.none,
-                          hintText:
-                              'Message to the agent, use @files or /commands',
-                          hintStyle: context.typo.body.copyWith(
+                        // Campo embutido no Container do composer: chromeless
+                        // (sem fundo nem borda própria — antes era
+                        // InputDecoration(isCollapsed: true, border: none)).
+                        decoration: const BoxDecoration(),
+                        padding: EdgeInsets.zero,
+                        placeholder: Text(
+                          'Message to the agent, use @files or /commands',
+                          style: context.typo.body.copyWith(
                             fontSize: 13.5,
                             color: colors.text3,
                           ),
@@ -759,46 +769,45 @@ class _SuggestPalette extends StatelessWidget {
         itemBuilder: (context, i) {
           final item = items[i];
           final active = i == selected;
-          return InkWell(
-            onTap: () => onSelect(i),
-            canRequestFocus: false, // não rouba o foco do input
-            child: Container(
-              color: active ? colors.panel3 : Colors.transparent,
-              padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
-              child: Row(
-                children: [
-                  if (item.icon != null) ...[
-                    Icon(
-                      item.icon,
-                      size: 13,
-                      color: active ? colors.accentText : colors.text3,
-                    ),
-                    const SizedBox(width: 8),
-                  ],
-                  Flexible(
-                    child: Text(
-                      item.primary,
-                      overflow: TextOverflow.ellipsis,
-                      style: typo.mono.copyWith(
-                        fontSize: 12.5,
-                        color: active ? colors.accentText : colors.text,
-                        fontWeight: FontWeight.w500,
-                      ),
+          return HoverTap(
+            onTap: () =>
+                onSelect(i), // GestureDetector não rouba o foco do input
+            color: active ? colors.panel3 : Colors.transparent,
+            borderRadius: BorderRadius.zero,
+            padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 7),
+            child: Row(
+              children: [
+                if (item.icon != null) ...[
+                  Icon(
+                    item.icon,
+                    size: 13,
+                    color: active ? colors.accentText : colors.text3,
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                Flexible(
+                  child: Text(
+                    item.primary,
+                    overflow: TextOverflow.ellipsis,
+                    style: typo.mono.copyWith(
+                      fontSize: 12.5,
+                      color: active ? colors.accentText : colors.text,
+                      fontWeight: FontWeight.w500,
                     ),
                   ),
-                  if (item.secondary != null) ...[
-                    const SizedBox(width: 10),
-                    Expanded(
-                      child: Text(
-                        item.secondary!,
-                        overflow: TextOverflow.ellipsis,
-                        textAlign: TextAlign.right,
-                        style: typo.label.copyWith(color: colors.text3),
-                      ),
+                ),
+                if (item.secondary != null) ...[
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      item.secondary!,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.right,
+                      style: typo.label.copyWith(color: colors.text3),
                     ),
-                  ],
+                  ),
                 ],
-              ),
+              ],
             ),
           );
         },
@@ -827,30 +836,24 @@ class _Chip extends StatelessWidget {
     final colors = context.colors;
     return Opacity(
       opacity: enabled ? 1 : 0.5,
-      child: Material(
-        color: Colors.transparent,
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(5),
-          onTap: enabled ? onTap : null,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(icon, size: 14, color: iconColor ?? colors.text3),
-                const SizedBox(width: 6),
-                Text(
-                  label,
-                  style: context.typo.label.copyWith(
-                    fontSize: 12.5,
-                    color: colors.text2,
-                  ),
-                ),
-                Icon(Icons.keyboard_arrow_down, size: 13, color: colors.text4),
-              ],
+        onTap: enabled ? onTap : null,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 14, color: iconColor ?? colors.text3),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: context.typo.label.copyWith(
+                fontSize: 12.5,
+                color: colors.text2,
+              ),
             ),
-          ),
+            Icon(Icons.keyboard_arrow_down, size: 13, color: colors.text4),
+          ],
         ),
       ),
     );
@@ -988,13 +991,10 @@ class _TurnIndicatorState extends State<_TurnIndicator> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 11,
-            height: 11,
-            child: CircularProgressIndicator(
-              strokeWidth: 1.6,
-              color: colors.accent,
-            ),
+          CircularProgressIndicator(
+            size: 11,
+            strokeWidth: 1.6,
+            color: colors.accent,
           ),
           const SizedBox(width: 7),
           Text(
@@ -1028,7 +1028,8 @@ class _ContextGauge extends StatelessWidget {
         : (fraction >= 0.75 ? colors.warn : colors.accentText);
     final pct = percent.toStringAsFixed(percent < 10 ? 1 : 0);
     return Tooltip(
-      message: 'Context: $pct% of the window',
+      tooltip: (context) =>
+          TooltipContainer(child: Text('Context: $pct% of the window')),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 8),
         child: SizedBox(
@@ -1123,8 +1124,8 @@ class _BarIcon extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: tooltip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tooltip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
         onTap: onTap,
         child: SizedBox(
@@ -1168,22 +1169,22 @@ class _SendButton extends StatelessWidget {
       icon = Icons.arrow_upward;
     }
     return Tooltip(
-      message: streaming ? 'Stop' : 'Send',
-      child: Material(
+      tooltip: (context) =>
+          TooltipContainer(child: Text(streaming ? 'Stop' : 'Send')),
+      // borderRadius 15 num quadrado 30×30 = círculo (substitui o CircleBorder
+      // do Material; HoverTap só aceita BorderRadius).
+      child: HoverTap(
+        borderRadius: BorderRadius.circular(15),
         color: bg,
-        shape: CircleBorder(
-          side: ready || streaming
-              ? BorderSide.none
-              : BorderSide(color: colors.border2, width: 1.5),
-        ),
-        child: InkWell(
-          customBorder: const CircleBorder(),
-          onTap: onTap,
-          child: SizedBox(
-            width: 30,
-            height: 30,
-            child: Icon(icon, size: 15, color: fg),
-          ),
+        hoverColor: bg,
+        border: ready || streaming
+            ? null
+            : Border.all(color: colors.border2, width: 1.5),
+        onTap: onTap,
+        child: SizedBox(
+          width: 30,
+          height: 30,
+          child: Icon(icon, size: 15, color: fg),
         ),
       ),
     );
@@ -1218,8 +1219,8 @@ class _RelayButton extends StatelessWidget {
       ),
     };
     return Tooltip(
-      message: tooltip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tooltip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
         onTap: session.isAlive
             ? () => session.sendRelayControl('relay:toggle')

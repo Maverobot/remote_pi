@@ -2,84 +2,111 @@ import 'package:cockpit/domain/entities/app_settings.dart';
 import 'package:cockpit/ui/core/themes/app_colors.dart';
 import 'package:cockpit/ui/core/themes/app_typography.dart';
 import 'package:cockpit/ui/core/themes/syntax_colors.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
-/// Monta o `ThemeData` do Cockpit (light ou dark, por [brightness]) a partir das
-/// [settings] do usuário: paleta [AppColors], tipografia [AppTypography] (fontes
-/// + tamanhos) e paleta de syntax [SyntaxColors] — todas instaladas como
-/// extensions (consumidas via `context.colors`/`context.typo`/`context.syntax`).
-ThemeData buildTheme({
+/// Bundle dos tokens bespoke (cores/tipografia/syntax) calculado para uma
+/// `brightness` + `settings`. Instalado na árvore via `CockpitTheme` (a raiz o
+/// monta no `builder`, já com a brightness efetiva). Consumido por
+/// `context.colors`/`context.typo`/`context.syntax`.
+typedef CockpitTokens = ({
+  AppColors colors,
+  AppTypography typo,
+  SyntaxColors syntax,
+});
+
+/// Calcula os tokens bespoke para [brightness]/[settings].
+CockpitTokens buildTokens({
   required Brightness brightness,
   AppSettings settings = const AppSettings(),
 }) {
-  final isDark = brightness == Brightness.dark;
-  final colors = isDark ? AppColors.dark : AppColors.light;
+  final colors = brightness == Brightness.dark
+      ? AppColors.dark
+      : AppColors.light;
   final typo = AppTypography.build(
     uiFont: settings.interfaceFont,
     monoFont: settings.codeFont,
     codeSize: settings.codeSize,
   );
-  // Syntax segue o brilho do app (cada família tem variante light/dark).
   final syntax = SyntaxColors.forId(settings.syntaxTheme, brightness);
+  return (colors: colors, typo: typo, syntax: syntax);
+}
 
-  final base = isDark
-      ? ThemeData.dark(useMaterial3: true)
-      : ThemeData.light(useMaterial3: true);
-
-  return base.copyWith(
-    scaffoldBackgroundColor: colors.bg,
-    canvasColor: colors.panel,
-    colorScheme: base.colorScheme.copyWith(
-      brightness: brightness,
-      surface: colors.panel,
-      primary: colors.accent,
-      // Texto/ícone sobre o preenchimento accent (FilledButton etc.). O azul
-      // pede branco em ambos os temas.
-      onPrimary: Colors.white,
-      error: colors.error,
-      onError: Colors.white,
-    ),
-    textSelectionTheme: TextSelectionThemeData(
-      cursorColor: colors.accent,
-      selectionColor: colors.accentSoft,
-      selectionHandleColor: colors.accent,
-    ),
-    // Tooltips: exigem ~0,5s de hover antes de aparecer (default do Flutter é
-    // `Duration.zero` → instantâneo, que parecia "rápido demais"). Global aqui
-    // pra todos os Tooltip do app ficarem consistentes.
-    tooltipTheme: const TooltipThemeData(
-      waitDuration: Duration(milliseconds: 500),
-    ),
-    // Botões secundários ("Cancelar" etc.) — fosco/neutro, **não** com a cor
-    // primária (que faria parecer a ação principal). Pareiam com o FilledButton.
-    textButtonTheme: TextButtonThemeData(
-      style: TextButton.styleFrom(
-        foregroundColor: colors.text2,
-        backgroundColor: colors.panel3,
-        shape: const StadiumBorder(),
-        padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+/// Monta o `ThemeData` do shadcn (light ou dark por [brightness]). A paleta é
+/// derivada de [AppColors] — a **mesma** fonte das cores bespoke — então os
+/// componentes shadcn e os widgets custom ficam coerentes. As `settings` entram
+/// só onde o shadcn tem slot equivalente; o resto (fontes/syntax) viaja pelo
+/// `CockpitTheme`.
+ThemeData buildTheme({
+  required Brightness brightness,
+  AppSettings settings = const AppSettings(),
+}) {
+  final colors = brightness == Brightness.dark
+      ? AppColors.dark
+      : AppColors.light;
+  // Reaproveita a resolução de fontes do AppTypography (Hanken/JetBrains ou as
+  // custom das settings) e extrai só a FAMÍLIA para alimentar a Typography do
+  // shadcn — assim todo componente shadcn herda a tipografia do Cockpit (o
+  // ShadcnApp instala `typography.sans` no DefaultTextStyle raiz; os
+  // modificadores .h3/.base/etc. só ajustam tamanho/peso e herdam a família).
+  final appTypo = AppTypography.build(
+    uiFont: settings.interfaceFont,
+    monoFont: settings.codeFont,
+    codeSize: settings.codeSize,
+  );
+  return ThemeData(
+    colorScheme: _schemeFrom(colors, brightness),
+    // Raio coerente com o design (cantos suaves, não pílula).
+    radius: 0.5,
+    typography: Typography.geist(
+      sans: TextStyle(
+        fontFamily: appTypo.body.fontFamily,
+        fontFamilyFallback: appTypo.body.fontFamilyFallback,
+      ),
+      mono: TextStyle(
+        fontFamily: appTypo.mono.fontFamily,
+        fontFamilyFallback: appTypo.mono.fontFamilyFallback,
       ),
     ),
-    // Scrollbar fina. Cores via tokens → adaptam a light/dark. A visibilidade
-    // permanente é aplicada por widget (transcript/rail) com controller — forçar
-    // global quebra scrollviews sem controller (ex.: a tab strip horizontal).
-    scrollbarTheme: ScrollbarThemeData(
-      thickness: const WidgetStatePropertyAll(5),
-      radius: const Radius.circular(6),
-      crossAxisMargin: 2,
-      mainAxisMargin: 2,
-      interactive: true,
-      thumbColor: WidgetStateProperty.resolveWith(
-        (states) => states.contains(WidgetState.hovered)
-            ? colors.text4
-            : colors.border2,
-      ),
-      trackColor: const WidgetStatePropertyAll(Colors.transparent),
-      trackBorderColor: const WidgetStatePropertyAll(Colors.transparent),
-    ),
-    extensions: <ThemeExtension<dynamic>>[colors, typo, syntax],
   );
 }
 
-/// Atalho de compatibilidade: o tema dark com os defaults.
-ThemeData buildDarkTheme() => buildTheme(brightness: Brightness.dark);
+/// Mapeia os 19 tokens do Cockpit nos slots semânticos do `ColorScheme` do
+/// shadcn. Os tokens excedentes (panel2/panel3 extras, text3/text4, border2,
+/// online/edited/warn…) não têm slot aqui e seguem disponíveis via
+/// `context.colors`. `chart1..5` herdam da paleta base (zinc).
+ColorScheme _schemeFrom(AppColors c, Brightness brightness) {
+  final base = brightness == Brightness.dark
+      ? ColorSchemes.darkZinc
+      : ColorSchemes.lightZinc;
+  return ColorScheme(
+    brightness: brightness,
+    background: c.bg,
+    foreground: c.text,
+    card: c.panel,
+    cardForeground: c.text,
+    popover: c.panel,
+    popoverForeground: c.text,
+    // "primary" = a marca (azul Remote Pi). Texto sobre o azul: branco nos dois.
+    primary: c.accent,
+    primaryForeground: Colors.white,
+    // "secondary" = superfície neutra de botão secundário.
+    secondary: c.panel3,
+    secondaryForeground: c.text2,
+    muted: c.panel2,
+    mutedForeground: c.text2,
+    // No shadcn "accent" é a superfície de hover/seleção (neutra), NÃO a marca.
+    accent: c.panel3,
+    accentForeground: c.text,
+    destructive: c.error,
+    destructiveForeground: Colors.white,
+    border: c.border,
+    input: c.border,
+    // Anel de foco usa a marca.
+    ring: c.accent,
+    chart1: base.chart1,
+    chart2: base.chart2,
+    chart3: base.chart3,
+    chart4: base.chart4,
+    chart5: base.chart5,
+  );
+}

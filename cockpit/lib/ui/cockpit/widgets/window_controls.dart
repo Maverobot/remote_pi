@@ -1,7 +1,7 @@
 import 'dart:io';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
 Future<void> _toggleMaximize() async {
@@ -87,11 +87,7 @@ class _WindowControlsState extends State<WindowControls> {
         children: [
           _light(const Color(0xFFFF5F57), Icons.close, windowManager.close),
           const SizedBox(width: 8),
-          _light(
-            const Color(0xFFFEBC2E),
-            Icons.remove,
-            windowManager.minimize,
-          ),
+          _light(const Color(0xFFFEBC2E), Icons.remove, windowManager.minimize),
           const SizedBox(width: 8),
           _light(const Color(0xFF28C840), Icons.add, _toggleMaximize),
         ],
@@ -186,7 +182,7 @@ class _WinButtonState extends State<_WinButton> {
       onEnter: (_) => setState(() => _hover = true),
       onExit: (_) => setState(() => _hover = false),
       child: Tooltip(
-        message: widget.tooltip,
+        tooltip: (context) => TooltipContainer(child: Text(widget.tooltip)),
         child: GestureDetector(
           onTap: widget.onTap,
           child: Container(

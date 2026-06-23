@@ -1,11 +1,11 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:google_fonts/google_fonts.dart';
 
 /// Tipografia do Cockpit — espelha o design: Space Grotesk (display/títulos),
 /// Hanken Grotesk (UI/texto), JetBrains Mono (código). Servidas via
 /// `google_fonts` (runtime + cache), sem bundle de .ttf.
 @immutable
-class AppTypography extends ThemeExtension<AppTypography> {
+class AppTypography {
   const AppTypography({
     required this.display,
     required this.title,
@@ -72,7 +72,6 @@ class AppTypography extends ThemeExtension<AppTypography> {
     );
   }
 
-  @override
   AppTypography copyWith({
     TextStyle? display,
     TextStyle? title,
@@ -88,19 +87,6 @@ class AppTypography extends ThemeExtension<AppTypography> {
       label: label ?? this.label,
       tab: tab ?? this.tab,
       mono: mono ?? this.mono,
-    );
-  }
-
-  @override
-  AppTypography lerp(ThemeExtension<AppTypography>? other, double t) {
-    if (other is! AppTypography) return this;
-    return AppTypography(
-      display: TextStyle.lerp(display, other.display, t)!,
-      title: TextStyle.lerp(title, other.title, t)!,
-      body: TextStyle.lerp(body, other.body, t)!,
-      label: TextStyle.lerp(label, other.label, t)!,
-      tab: TextStyle.lerp(tab, other.tab, t)!,
-      mono: TextStyle.lerp(mono, other.mono, t)!,
     );
   }
 }

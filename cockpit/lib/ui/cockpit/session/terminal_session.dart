@@ -99,7 +99,9 @@ class TerminalSession extends PaneItem {
   Future<void> pasteFromClipboard() async {
     final image = await Pasteboard.image;
     if (image != null && image.isNotEmpty) {
-      _gateway.write(const [0x16]); // Ctrl+V: o harness lê a imagem do clipboard.
+      _gateway.write(const [
+        0x16,
+      ]); // Ctrl+V: o harness lê a imagem do clipboard.
       return;
     }
     final text = await Pasteboard.text;

@@ -11,8 +11,8 @@ import 'package:cockpit/ui/cockpit/widgets/widgets.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
 import 'package:cockpit/ui/settings/settings_controller.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
 
@@ -294,7 +294,7 @@ class _CockpitPageState extends State<CockpitPage> {
     if (!vm.ready) {
       return Scaffold(
         backgroundColor: colors.bg,
-        body: const Center(child: CircularProgressIndicator(strokeWidth: 2)),
+        child: const Center(child: CircularProgressIndicator(size: 20)),
       );
     }
 
@@ -307,7 +307,7 @@ class _CockpitPageState extends State<CockpitPage> {
         autofocus: true,
         child: Scaffold(
           backgroundColor: colors.bg,
-          body: Column(
+          child: Column(
             children: [
               CockpitTopbar(
                 projectName: vm.selectedDisplayTitle ?? 'Cockpit',

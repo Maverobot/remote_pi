@@ -28,11 +28,9 @@ class EnvironmentProbeImpl implements EnvironmentProbe {
     // teriam achado. `runInShell` deixa o Windows resolver shims `.cmd`/`.bat`
     // do npm via PATHEXT. Best-effort.
     try {
-      final result = await Process.run(
-        exe,
-        const ['--version'],
-        runInShell: true,
-      );
+      final result = await Process.run(exe, const [
+        '--version',
+      ], runInShell: true);
       return result.exitCode == 0;
     } catch (_) {
       return false;
@@ -83,11 +81,11 @@ class EnvironmentProbeImpl implements EnvironmentProbe {
         // fonte de verdade — sobrevive a reboot e ao uninstall do .vbs.
         // Query não precisa de elevação; só o /Create precisava.
         try {
-          final task = await Process.run(
-            'schtasks',
-            const ['/Query', '/TN', 'RemotePiSupervisor'],
-            runInShell: true,
-          );
+          final task = await Process.run('schtasks', const [
+            '/Query',
+            '/TN',
+            'RemotePiSupervisor',
+          ], runInShell: true);
           if (task.exitCode == 0) return true;
         } catch (_) {
           // schtasks indisponível → cai pro check de arquivo abaixo.

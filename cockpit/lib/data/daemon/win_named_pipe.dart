@@ -72,7 +72,13 @@ bool _writeAll(int handle, List<int> bytes) {
     buf.asTypedList(len).setAll(0, bytes);
     var off = 0;
     while (off < len) {
-      final ok = WriteFile(handle, (buf + off).cast(), len - off, written, nullptr);
+      final ok = WriteFile(
+        handle,
+        (buf + off).cast(),
+        len - off,
+        written,
+        nullptr,
+      );
       if (ok == 0 || written.value == 0) return false;
       off += written.value;
     }

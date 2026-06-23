@@ -1,5 +1,5 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Um item de [showAppMenu]: ícone (opcional) à esquerda + rótulo, com check à
 /// direita quando [selected] e cor de erro quando [danger] (ação destrutiva).
@@ -19,12 +19,26 @@ class AppMenuItem<T> {
   final bool danger;
 }
 
-/// Menu popup **compacto**. Por padrão ancora no widget que chamou (via
+/// Popover de menu atualmente aberto. O `showPopover` do shadcn **não** fecha
+/// sozinho quando outro abre (um clique-direito num segundo item dispara o
+/// `onSecondaryTapUp` antes do barrier dismissar o primeiro), então rastreamos o
+/// menu ativo e fechamos o anterior antes de abrir o novo — só um por vez.
+OverlayCompleter<dynamic>? _activeMenu;
+
+/// Registra [overlay] como o menu ativo, fechando o anterior se ainda estiver
+/// aberto. Usado por [showAppMenu] e por outros popovers de menu do app (ex.: o
+/// dropdown de "Open" da topbar) para garantir um único menu aberto por vez.
+void trackMenuOverlay(OverlayCompleter<dynamic> overlay) {
+  if (_activeMenu?.isCompleted == false) _activeMenu!.remove();
+  _activeMenu = overlay;
+}
+
+/// Menu popup **compacto** (shadcn). Por padrão ancora no widget que chamou (via
 /// [context]): abre logo **abaixo** do trigger — ideal pra botões. Passando
 /// [globalPosition] (ex.: `onSecondaryTapUp(d).globalPosition`), abre no **ponto
-/// do clique** — ideal pra menu de contexto (botão direito). Sobe/recua sozinho
-/// se não couber. Ícone à esquerda, check à direita do selecionado. Devolve o
-/// `value` escolhido (ou `null`).
+/// do clique** — ideal pra menu de contexto (botão direito). O popover do shadcn
+/// inverte sozinho se não couber. Ícone à esquerda, check à direita do
+/// selecionado. Devolve o `value` escolhido (ou `null`).
 ///
 /// Componente único do app — todos os menus passam por aqui.
 Future<T?> showAppMenu<T>(
@@ -33,104 +47,49 @@ Future<T?> showAppMenu<T>(
   double minWidth = 200,
   Offset? globalPosition,
 }) {
-  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox?;
-  if (overlay == null) return Future<T?>.value();
-
   final colors = context.colors;
-  final RelativeRect position;
-  if (globalPosition != null) {
-    // Menu de contexto: âncora no cursor (abre logo abaixo-direita do clique).
-    final local = overlay.globalToLocal(globalPosition);
-    position = RelativeRect.fromLTRB(
-      local.dx,
-      local.dy,
-      overlay.size.width - local.dx,
-      0,
-    );
-  } else {
-    final trigger = context.findRenderObject() as RenderBox?;
-    if (trigger == null) return Future<T?>.value();
-    final topLeft = trigger.localToGlobal(Offset.zero, ancestor: overlay);
-    final bottomLeft = trigger.localToGlobal(
-      trigger.size.bottomLeft(Offset.zero),
-      ancestor: overlay,
-    );
-    // Âncora na borda inferior-esquerda do trigger; o showMenu sobe sozinho se
-    // não couber abaixo (ex.: composer no rodapé).
-    position = RelativeRect.fromLTRB(
-      topLeft.dx,
-      bottomLeft.dy + 4,
-      overlay.size.width - topLeft.dx,
-      0,
-    );
-  }
+  final anchored = globalPosition == null;
 
-  return showMenu<T>(
+  final overlay = showPopover<T>(
     context: context,
-    position: position,
-    color: colors.panel2,
-    surfaceTintColor: Colors.transparent,
-    elevation: 8,
-    shadowColor: const Color(0x66000000),
-    constraints: BoxConstraints(minWidth: minWidth, maxWidth: 320),
-    menuPadding: const EdgeInsets.symmetric(vertical: 4),
-    shape: RoundedRectangleBorder(
-      borderRadius: BorderRadius.circular(10),
-      side: BorderSide(color: colors.border2),
+    // Ponto do clique (menu de contexto) ou âncora no trigger (dropdown).
+    position: globalPosition,
+    alignment: Alignment.topLeft,
+    anchorAlignment: anchored ? Alignment.bottomLeft : Alignment.topLeft,
+    offset: anchored ? const Offset(0, 4) : null,
+    builder: (context) => ConstrainedBox(
+      constraints: BoxConstraints(minWidth: minWidth, maxWidth: 320),
+      // DropdownMenu embrulha os MenuButton num MenuGroup (exigido) + MenuPopup.
+      child: DropdownMenu(
+        children: [
+          for (final item in items)
+            MenuButton(
+              leading: item.icon != null
+                  ? Icon(
+                      item.icon,
+                      size: 15,
+                      color: item.danger ? colors.error : colors.text3,
+                    )
+                  : null,
+              trailing: item.selected
+                  ? Icon(Icons.check, size: 14, color: colors.accentText)
+                  : null,
+              onPressed: (ctx) {
+                closeOverlay<T>(ctx, item.value);
+              },
+              child: Text(
+                item.label,
+                overflow: TextOverflow.ellipsis,
+                style: context.typo.body.copyWith(
+                  fontSize: 13,
+                  color: item.danger ? colors.error : colors.text,
+                ),
+              ),
+            ),
+        ],
+      ),
     ),
-    items: [
-      for (final item in items)
-        PopupMenuItem<T>(
-          value: item.value,
-          height: 30,
-          padding: const EdgeInsets.symmetric(horizontal: 12),
-          child: _AppMenuRow(
-            icon: item.icon,
-            label: item.label,
-            selected: item.selected,
-            danger: item.danger,
-          ),
-        ),
-    ],
   );
-}
-
-class _AppMenuRow extends StatelessWidget {
-  const _AppMenuRow({
-    required this.icon,
-    required this.label,
-    required this.selected,
-    required this.danger,
-  });
-
-  final IconData? icon;
-  final String label;
-  final bool selected;
-  final bool danger;
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = context.colors;
-    final fg = danger ? colors.error : colors.text;
-    final iconColor = danger ? colors.error : colors.text3;
-    return Row(
-      children: [
-        if (icon != null) ...[
-          Icon(icon, size: 15, color: iconColor),
-          const SizedBox(width: 11),
-        ],
-        Expanded(
-          child: Text(
-            label,
-            overflow: TextOverflow.ellipsis,
-            style: context.typo.body.copyWith(fontSize: 13, color: fg),
-          ),
-        ),
-        if (selected) ...[
-          const SizedBox(width: 12),
-          Icon(Icons.check, size: 14, color: colors.accentText),
-        ],
-      ],
-    );
-  }
+  trackMenuOverlay(overlay);
+  return overlay.future;
 }

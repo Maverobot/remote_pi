@@ -1,6 +1,6 @@
 import 'package:cockpit/ui/cockpit/states/pane_node.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 
 /// Handle de redimensionamento de pane. Preenche **toda** a área que recebe (o
 /// `Positioned` largo no `Stack` do split) para uma região de arraste generosa,
@@ -38,9 +38,8 @@ class _PaneDividerState extends State<PaneDivider> {
         onPanStart: (_) => setState(() => _hot = true),
         onPanEnd: (_) => setState(() => _hot = false),
         onPanCancel: () => setState(() => _hot = false),
-        onPanUpdate: (details) => widget.onDelta(
-          isVertical ? details.delta.dx : details.delta.dy,
-        ),
+        onPanUpdate: (details) =>
+            widget.onDelta(isVertical ? details.delta.dx : details.delta.dy),
         child: Center(
           child: Container(
             width: isVertical ? 1 : double.infinity,

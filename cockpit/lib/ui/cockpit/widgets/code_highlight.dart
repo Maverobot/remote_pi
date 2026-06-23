@@ -1,5 +1,5 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:highlight/highlight.dart' as hl;
 
 /// Extensões cujo nome **não** bate com o id do highlight.js e cuja gramática
@@ -53,7 +53,9 @@ TextSpan? buildCodeSpan(
 /// Converte um nó do highlight.js em [TextSpan]: folhas trazem `value`,
 /// containers trazem `children` e (talvez) um `className` que dá o estilo.
 TextSpan _spanOf(hl.Node node, SyntaxColors palette) {
-  final style = node.className == null ? null : palette.styleFor(node.className!);
+  final style = node.className == null
+      ? null
+      : palette.styleFor(node.className!);
   if (node.value != null) {
     return TextSpan(text: node.value, style: style);
   }

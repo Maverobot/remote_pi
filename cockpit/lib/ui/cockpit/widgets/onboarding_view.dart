@@ -2,8 +2,9 @@ import 'package:cockpit/domain/entities/install_result.dart';
 import 'package:cockpit/domain/entities/setup_check.dart';
 import 'package:cockpit/ui/cockpit/viewmodels/setup_viewmodel.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Tela inicial (sem workspace): passo-a-passo de preparação do ambiente. Só
 /// quando os 5 passos estão satisfeitos o botão "Criar Workspace" habilita.
@@ -56,6 +57,7 @@ class _OnboardingViewState extends State<OnboardingView>
     return showDialog<void>(
       context: context,
       barrierDismissible: false,
+      barrierColor: const Color(0x99000000),
       builder: (_) => _InstallDialog(title: title, runner: runner),
     );
   }
@@ -78,7 +80,10 @@ class _OnboardingViewState extends State<OnboardingView>
               children: [
                 Row(
                   children: [
-                    Icon(Icons.rocket_launch_outlined, color: colors.accentText),
+                    Icon(
+                      Icons.rocket_launch_outlined,
+                      color: colors.accentText,
+                    ),
                     const SizedBox(width: 10),
                     Text(
                       'Welcome to Cockpit',
@@ -239,8 +244,9 @@ class _StepCard extends StatelessWidget {
           ],
           if (status != CheckStatus.notApplicable)
             Tooltip(
-              message: 'Check again',
-              child: InkWell(
+              tooltip: (context) =>
+                  const TooltipContainer(child: Text('Check again')),
+              child: HoverTap(
                 borderRadius: BorderRadius.circular(6),
                 onTap: () => onRecheck(),
                 child: SizedBox(
@@ -269,10 +275,7 @@ class _StatusDot extends StatelessWidget {
         return const SizedBox(
           width: 18,
           height: 18,
-          child: Padding(
-            padding: EdgeInsets.all(2),
-            child: CircularProgressIndicator(strokeWidth: 2),
-          ),
+          child: Center(child: CircularProgressIndicator(size: 14)),
         );
       case CheckStatus.ok:
         return Icon(Icons.check_circle, size: 20, color: colors.online);
@@ -284,7 +287,8 @@ class _StatusDot extends StatelessWidget {
         );
       case CheckStatus.notApplicable:
         return Tooltip(
-          message: 'Not required in this setup',
+          tooltip: (context) =>
+              const TooltipContainer(child: Text('Not required in this setup')),
           child: Icon(
             Icons.remove_circle_outline,
             size: 20,
@@ -304,21 +308,16 @@ class _PillButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
+    return HoverTap(
       color: colors.panel3,
       borderRadius: BorderRadius.circular(20),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(20),
-        onTap: () => onTap(),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          child: Text(
-            label,
-            style: context.typo.label.copyWith(
-              color: colors.text2,
-              fontWeight: FontWeight.w600,
-            ),
-          ),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      onTap: () => onTap(),
+      child: Text(
+        label,
+        style: context.typo.label.copyWith(
+          color: colors.text2,
+          fontWeight: FontWeight.w600,
         ),
       ),
     );
@@ -332,19 +331,12 @@ class _CreateButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final colors = context.colors;
     return SizedBox(
       width: double.infinity,
-      child: FilledButton.icon(
-        style: FilledButton.styleFrom(
-          backgroundColor: colors.accent,
-          disabledBackgroundColor: colors.panel3,
-          disabledForegroundColor: colors.text4,
-          padding: const EdgeInsets.symmetric(vertical: 14),
-        ),
+      child: PrimaryButton(
         onPressed: enabled ? () => onTap() : null,
-        icon: const Icon(Icons.add, size: 16),
-        label: const Text('Create Workspace'),
+        leading: const Icon(Icons.add, size: 16),
+        child: const Text('Create Workspace'),
       ),
     );
   }
@@ -383,7 +375,6 @@ class _InstallDialogState extends State<_InstallDialog> {
     final result = _result;
 
     return AlertDialog(
-      backgroundColor: colors.panel2,
       title: Text(
         widget.title,
         style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -396,7 +387,7 @@ class _InstallDialogState extends State<_InstallDialog> {
                   const SizedBox(
                     width: 18,
                     height: 18,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: Center(child: CircularProgressIndicator(size: 14)),
                   ),
                   const SizedBox(width: 12),
                   Text(
@@ -419,9 +410,7 @@ class _InstallDialogState extends State<_InstallDialog> {
                   const SizedBox(width: 12),
                   Expanded(
                     child: Text(
-                      result.ok
-                          ? 'Installed successfully.'
-                          : result.detail,
+                      result.ok ? 'Installed successfully.' : result.detail,
                       style: context.typo.body.copyWith(
                         fontSize: 13.5,
                         color: colors.text2,
@@ -432,7 +421,7 @@ class _InstallDialogState extends State<_InstallDialog> {
               ),
       ),
       actions: [
-        TextButton(
+        GhostButton(
           onPressed: result == null ? null : () => Navigator.of(context).pop(),
           child: Text(
             'Close',

@@ -61,7 +61,9 @@ class RpcEventMapper {
         // Carrega o erro do turno quando o assistant falhou (provider fora do
         // ar, etc.). Os deltas não trazem isso — só a mensagem final.
         final error = _errorMessageOf(json['message']);
-        return error != null ? RpcStreamError(error) : const RpcUnknown('message_end');
+        return error != null
+            ? RpcStreamError(error)
+            : const RpcUnknown('message_end');
 
       case 'auto_retry_start':
         return RpcAutoRetry(
@@ -79,7 +81,9 @@ class RpcEventMapper {
   /// `message_start` com `role:"custom"` — despacha para o handler do tipo
   /// customizado. Outros roles (ou role ausente) viram [RpcUnknown].
   RpcEvent _fromCustomMessage(Object? message) {
-    if (message is! Map<String, dynamic>) return const RpcUnknown('message_start');
+    if (message is! Map<String, dynamic>) {
+      return const RpcUnknown('message_start');
+    }
     if (message['role'] != 'custom') return const RpcUnknown('message_start');
 
     final customType = message['customType'] as String?;
@@ -194,7 +198,9 @@ class RpcEventMapper {
   /// `prefill`. Cobre o `ui.input(title, {defaultValue})` do remote-pi.
   String? _defaultValue(Map<String, dynamic> json) {
     final p = json['placeholder'];
-    if (p is Map && p['defaultValue'] is String) return p['defaultValue'] as String;
+    if (p is Map && p['defaultValue'] is String) {
+      return p['defaultValue'] as String;
+    }
     return _str(json['defaultValue']) ?? _str(json['prefill']);
   }
 

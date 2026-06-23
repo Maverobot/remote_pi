@@ -55,7 +55,9 @@ class WorktreeNameValidator {
     required Set<String> existingBranches,
     required Set<String> existingWorktreeNames,
   }) {
-    if (name.isEmpty) return const WorktreeNameCheck.invalid(WorktreeNameError.empty);
+    if (name.isEmpty) {
+      return const WorktreeNameCheck.invalid(WorktreeNameError.empty);
+    }
 
     // 1. Whitespace (regra explícita do usuário — mensagem própria).
     for (final unit in name.codeUnits) {
@@ -101,7 +103,9 @@ class WorktreeNameValidator {
       return const WorktreeNameCheck.invalid(WorktreeNameError.duplicateBranch);
     }
     if (existingWorktreeNames.contains(name)) {
-      return const WorktreeNameCheck.invalid(WorktreeNameError.duplicateWorktree);
+      return const WorktreeNameCheck.invalid(
+        WorktreeNameError.duplicateWorktree,
+      );
     }
 
     return const WorktreeNameCheck.valid();

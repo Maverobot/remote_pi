@@ -19,8 +19,8 @@ class WorktreeNamespace {
   });
 
   const WorktreeNamespace.empty()
-      : branches = const <String>{},
-        worktreeNames = const <String>{};
+    : branches = const <String>{},
+      worktreeNames = const <String>{};
 
   /// Nomes de branch locais (`git branch`).
   final Set<String> branches;

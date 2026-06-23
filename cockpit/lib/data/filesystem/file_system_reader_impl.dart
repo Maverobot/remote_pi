@@ -25,7 +25,11 @@ class FileSystemReaderImpl implements FileSystemReader {
         final name = entity.path.split(Platform.pathSeparator).last;
         final isDir = entity is Directory;
         if (isDir && _hiddenDirs.contains(name)) continue;
-        final node = FileNode(name: name, path: entity.path, isDirectory: isDir);
+        final node = FileNode(
+          name: name,
+          path: entity.path,
+          isDirectory: isDir,
+        );
         (isDir ? dirs : files).add(node);
       }
     } on FileSystemException {

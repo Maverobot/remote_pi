@@ -4,8 +4,9 @@ import 'package:cockpit/domain/entities/file_node.dart';
 import 'package:cockpit/ui/cockpit/widgets/app_menu.dart';
 import 'package:cockpit/ui/core/file_icons/file_icons.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:flutter/services.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Painel direito (~300px): árvore **read-only** da pasta do **workspace**.
 /// Pastas começam **colapsadas** e expandem ao clicar (lazy-load). O botão do
@@ -79,8 +80,9 @@ class _FileTreePanelState extends State<FileTreePanel> {
                   ),
                 ),
                 Tooltip(
-                  message: 'Refresh',
-                  child: InkWell(
+                  tooltip: (context) =>
+                      const TooltipContainer(child: Text('Refresh')),
+                  child: HoverTap(
                     borderRadius: BorderRadius.circular(5),
                     onTap: () => setState(() => _refresh++),
                     child: SizedBox(
@@ -438,55 +440,52 @@ class _RowState extends State<_Row> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: widget.selected ? colors.panel2 : Colors.transparent,
-      borderRadius: BorderRadius.circular(5),
-      child: InkWell(
-        onTap: _handleTap,
-        onSecondaryTapUp: (d) => _showMenu(context, d.globalPosition),
+    return GestureDetector(
+      onSecondaryTapUp: (d) => _showMenu(context, d.globalPosition),
+      child: HoverTap(
+        color: widget.selected ? colors.panel2 : Colors.transparent,
         hoverColor: colors.panel,
         borderRadius: BorderRadius.circular(5),
-        child: Padding(
-          padding: EdgeInsets.only(left: 6 + widget.depth * 14.0, right: 6),
-          child: SizedBox(
-            height: 26,
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 14,
-                  child: widget.isFolder
-                      ? Icon(
-                          widget.expanded
-                              ? Icons.keyboard_arrow_down
-                              : Icons.chevron_right,
-                          size: 15,
-                          color: colors.text4,
-                        )
-                      : null,
-                ),
-                const SizedBox(width: 2),
-                // Ícone colorido por tipo (material-icon-theme). Pastas variam
-                // entre aberta/fechada; sem tint (a seleção vem do fundo/texto).
-                widget.isFolder
-                    ? FileTypeIcon.folder(
-                        widget.name,
-                        open: widget.expanded,
-                        size: 16,
+        onTap: _handleTap,
+        padding: EdgeInsets.only(left: 6 + widget.depth * 14.0, right: 6),
+        child: SizedBox(
+          height: 26,
+          child: Row(
+            children: [
+              SizedBox(
+                width: 14,
+                child: widget.isFolder
+                    ? Icon(
+                        widget.expanded
+                            ? Icons.keyboard_arrow_down
+                            : Icons.chevron_right,
+                        size: 15,
+                        color: colors.text4,
                       )
-                    : FileTypeIcon.file(widget.name, size: 16),
-                const SizedBox(width: 7),
-                Expanded(
-                  child: Text(
-                    widget.name,
-                    overflow: TextOverflow.ellipsis,
-                    style: context.typo.body.copyWith(
-                      fontSize: 13,
-                      color: widget.selected ? colors.text : colors.text2,
-                    ),
+                    : null,
+              ),
+              const SizedBox(width: 2),
+              // Ícone colorido por tipo (material-icon-theme). Pastas variam
+              // entre aberta/fechada; sem tint (a seleção vem do fundo/texto).
+              widget.isFolder
+                  ? FileTypeIcon.folder(
+                      widget.name,
+                      open: widget.expanded,
+                      size: 16,
+                    )
+                  : FileTypeIcon.file(widget.name, size: 16),
+              const SizedBox(width: 7),
+              Expanded(
+                child: Text(
+                  widget.name,
+                  overflow: TextOverflow.ellipsis,
+                  style: context.typo.body.copyWith(
+                    fontSize: 13,
+                    color: widget.selected ? colors.text : colors.text2,
                   ),
                 ),
-              ],
-            ),
+              ),
+            ],
           ),
         ),
       ),
@@ -502,40 +501,37 @@ class _FileChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-        decoration: BoxDecoration(
-          color: colors.panel2,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: colors.accent),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x55000000),
-              blurRadius: 12,
-              offset: Offset(0, 4),
-            ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.alternate_email, size: 13, color: colors.accentText),
-            const SizedBox(width: 7),
-            Flexible(
-              child: Text(
-                name,
-                overflow: TextOverflow.ellipsis,
-                style: context.typo.body.copyWith(
-                  fontSize: 12.5,
-                  color: colors.text,
-                ),
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+      decoration: BoxDecoration(
+        color: colors.panel2,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: colors.accent),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x55000000),
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.alternate_email, size: 13, color: colors.accentText),
+          const SizedBox(width: 7),
+          Flexible(
+            child: Text(
+              name,
+              overflow: TextOverflow.ellipsis,
+              style: context.typo.body.copyWith(
+                fontSize: 12.5,
+                color: colors.text,
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

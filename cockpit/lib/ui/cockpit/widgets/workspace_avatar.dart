@@ -1,8 +1,8 @@
 import 'dart:io';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Avatar de um workspace. Por padrão é o quadrado colorido com a inicial do
 /// nome; quando há [imagePath] (PNG/JPG/SVG escolhido em Workspace Settings),

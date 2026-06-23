@@ -1,10 +1,6 @@
 /// Uso da janela de contexto — de `get_session_stats` (`contextUsage`).
 class ContextUsage {
-  const ContextUsage({
-    this.tokens,
-    required this.contextWindow,
-    this.percent,
-  });
+  const ContextUsage({this.tokens, required this.contextWindow, this.percent});
 
   /// Tokens estimados no contexto atual. `null` logo após compaction.
   final int? tokens;

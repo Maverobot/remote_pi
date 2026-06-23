@@ -8,8 +8,5 @@ import 'package:cockpit/domain/result.dart';
 /// (manda `bye` pro aparelho). Sucesso é detectado pelo `notify` `Revoked: …`;
 /// warnings viram [RelayError]. Contrato no domínio; a impl (Process) em `data/`.
 abstract class RevokeGateway {
-  Future<Result<void, RelayError>> revoke(
-    String shortId, {
-    Duration timeout,
-  });
+  Future<Result<void, RelayError>> revoke(String shortId, {Duration timeout});
 }

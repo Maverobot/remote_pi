@@ -26,13 +26,10 @@ class RevokeController extends ChangeNotifier {
     _notify();
 
     final result = await _gateway.revoke(device.shortId);
-    result.fold(
-      (_) => stage = RevokeStage.done,
-      (e) {
-        error = e.message;
-        stage = RevokeStage.failed;
-      },
-    );
+    result.fold((_) => stage = RevokeStage.done, (e) {
+      error = e.message;
+      stage = RevokeStage.failed;
+    });
     _notify();
   }
 

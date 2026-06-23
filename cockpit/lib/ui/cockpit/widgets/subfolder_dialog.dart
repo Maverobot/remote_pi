@@ -1,5 +1,6 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Pergunta em qual pasta dentro do projeto o agente vai atuar. Permite
 /// **navegar** pela árvore (entrar nas subpastas e voltar), sempre a partir da
@@ -15,6 +16,7 @@ Future<String?> showSubfolderDialog(
 }) {
   return showDialog<String>(
     context: context,
+    barrierColor: const Color(0x99000000),
     builder: (context) => _SubfolderDialog(
       projectName: projectName,
       loadSubfolders: loadSubfolders,
@@ -64,68 +66,52 @@ class _SubfolderDialogState extends State<_SubfolderDialog> {
     });
   }
 
-  void _enter(String folder) =>
-      _load(_rel.isEmpty ? folder : '$_rel/$folder');
+  void _enter(String folder) => _load(_rel.isEmpty ? folder : '$_rel/$folder');
 
   /// Navega para o caminho com os primeiros [depth] segmentos (0 = raiz).
-  void _goToDepth(int depth) =>
-      _load(_segments.take(depth).join('/'));
+  void _goToDepth(int depth) => _load(_segments.take(depth).join('/'));
 
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final atRoot = _rel.isEmpty;
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: colors.border2),
+    return AlertDialog(
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Where to work?',
+            style: context.typo.title.copyWith(
+              fontSize: 15,
+              color: colors.text,
+            ),
+          ),
+          const SizedBox(height: 8),
+          _Breadcrumb(
+            projectName: widget.projectName,
+            segments: _segments,
+            onTapSegment: _goToDepth,
+          ),
+        ],
       ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 460, maxHeight: 520),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460, maxHeight: 380),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 18, 18, 4),
-              child: Text(
-                'Where to work?',
-                style: context.typo.title.copyWith(
-                  fontSize: 15,
-                  color: colors.text,
-                ),
-              ),
-            ),
-            // Breadcrumb navegável (raiz → … → pasta atual).
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 0, 18, 10),
-              child: _Breadcrumb(
-                projectName: widget.projectName,
-                segments: _segments,
-                onTapSegment: _goToDepth,
-              ),
-            ),
-            const Divider(height: 1),
+            Divider(height: 1, color: colors.border),
             Flexible(
               child: _loading
                   ? const Padding(
                       padding: EdgeInsets.symmetric(vertical: 40),
-                      child: Center(
-                        child: SizedBox(
-                          width: 20,
-                          height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
-                      ),
+                      child: Center(child: CircularProgressIndicator(size: 20)),
                     )
                   : ListView(
                       shrinkWrap: true,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 8,
-                      ),
+                      padding: const EdgeInsets.symmetric(vertical: 8),
                       children: [
                         // ".." volta um nível (some na raiz).
                         if (!atRoot)
@@ -149,46 +135,36 @@ class _SubfolderDialogState extends State<_SubfolderDialog> {
                             ),
                             child: Text(
                               'No subfolders here.',
-                              style: context.typo.label
-                                  .copyWith(color: colors.text4),
+                              style: context.typo.label.copyWith(
+                                color: colors.text4,
+                              ),
                             ),
                           ),
                       ],
                     ),
             ),
-            const Divider(height: 1),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 10, 12, 12),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      atRoot
-                          ? 'Use the root of ${widget.projectName}'
-                          : 'Use ${widget.projectName}/$_rel',
-                      overflow: TextOverflow.ellipsis,
-                      style: context.typo.label.copyWith(color: colors.text3),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 6),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                    ),
-                    onPressed: () => Navigator.of(context).pop(_rel),
-                    child: const Text('Use this folder'),
-                  ),
-                ],
-              ),
+            Divider(height: 1, color: colors.border),
+            const SizedBox(height: 10),
+            Text(
+              atRoot
+                  ? 'Use the root of ${widget.projectName}'
+                  : 'Use ${widget.projectName}/$_rel',
+              overflow: TextOverflow.ellipsis,
+              style: context.typo.label.copyWith(color: colors.text3),
             ),
           ],
         ),
       ),
+      actions: [
+        OutlineButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        PrimaryButton(
+          onPressed: () => Navigator.of(context).pop(_rel),
+          child: const Text('Use this folder'),
+        ),
+      ],
     );
   }
 }
@@ -213,8 +189,9 @@ class _Breadcrumb extends StatelessWidget {
     ];
     for (var i = 0; i < segments.length; i++) {
       crumbs.add(Icon(Icons.chevron_right, size: 14, color: colors.text4));
-      crumbs.add(_crumb(context, segments[i], i + 1,
-          isLast: i == segments.length - 1));
+      crumbs.add(
+        _crumb(context, segments[i], i + 1, isLast: i == segments.length - 1),
+      );
     }
     return SingleChildScrollView(
       scrollDirection: Axis.horizontal,
@@ -223,8 +200,12 @@ class _Breadcrumb extends StatelessWidget {
     );
   }
 
-  Widget _crumb(BuildContext context, String label, int depth,
-      {required bool isLast}) {
+  Widget _crumb(
+    BuildContext context,
+    String label,
+    int depth, {
+    required bool isLast,
+  }) {
     final colors = context.colors;
     final style = context.typo.label.copyWith(
       color: isLast ? colors.text : colors.text3,
@@ -236,13 +217,11 @@ class _Breadcrumb extends StatelessWidget {
         child: Text(label, style: style),
       );
     }
-    return InkWell(
-      borderRadius: BorderRadius.circular(5),
+    return HoverTap(
       onTap: () => onTapSegment(depth),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
-        child: Text(label, style: style),
-      ),
+      borderRadius: const BorderRadius.all(Radius.circular(5)),
+      padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 4),
+      child: Text(label, style: style),
     );
   }
 }
@@ -263,33 +242,25 @@ class _FolderRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: Colors.transparent,
-      borderRadius: BorderRadius.circular(7),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(7),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-          child: Row(
-            children: [
-              Icon(icon, size: 16, color: colors.text3),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Text(
-                  label,
-                  overflow: TextOverflow.ellipsis,
-                  style: context.typo.body.copyWith(
-                    fontSize: 13.5,
-                    color: colors.text,
-                  ),
-                ),
+    return HoverTap(
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      child: Row(
+        children: [
+          Icon(icon, size: 16, color: colors.text3),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              label,
+              overflow: TextOverflow.ellipsis,
+              style: context.typo.body.copyWith(
+                fontSize: 13.5,
+                color: colors.text,
               ),
-              if (trailing != null)
-                Icon(trailing, size: 16, color: colors.text4),
-            ],
+            ),
           ),
-        ),
+          if (trailing != null) Icon(trailing, size: 16, color: colors.text4),
+        ],
       ),
     );
   }

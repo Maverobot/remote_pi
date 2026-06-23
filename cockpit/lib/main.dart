@@ -7,8 +7,8 @@ import 'package:cockpit/domain/entities/app_settings.dart';
 import 'package:cockpit/routing/router.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
 import 'package:cockpit/ui/settings/settings_controller.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:go_router/go_router.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:provider/provider.dart';
@@ -100,7 +100,7 @@ class CockpitApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // O controller fica ACIMA do MaterialApp → trocar tema/fonte repinta tudo,
+    // O controller fica ACIMA do ShadcnApp → trocar tema/fonte repinta tudo,
     // e a tela de Configurações o consome via Provider.
     return ChangeNotifierProvider<SettingsController>.value(
       value: settings,
@@ -110,20 +110,37 @@ class CockpitApp extends StatelessWidget {
           // "Tamanho da interface" = **zoom do app inteiro** (texto, panes,
           // ícones, app bar, terminal). Baseline 14 = 1.0x. Ver [_AppZoom].
           final uiScale = s.interfaceSize / 14.0;
-          return MaterialApp.router(
+          return ShadcnApp.router(
             title: 'Cockpit',
             debugShowCheckedModeBanner: false,
             theme: buildTheme(brightness: Brightness.light, settings: s),
             darkTheme: buildTheme(brightness: Brightness.dark, settings: s),
             themeMode: _themeMode(s.themeMode),
             routerConfig: router,
-            builder: (context, child) => CallbackShortcuts(
-              // Atalhos globais (sempre na cadeia de foco): zoom (⌘=/⌘-/⌘0) e
-              // foco do input (⌘L). CallbackShortcuts é aditivo (não quebra
-              // copiar/colar) e funciona mesmo sem nada focado.
-              bindings: {..._zoomBindings(controller), ..._focusBindings()},
-              child: _AppZoom(scale: uiScale, child: child ?? const SizedBox()),
-            ),
+            builder: (context, child) {
+              // Brightness efetiva (já resolvida pelo ShadcnApp via themeMode):
+              // monta os tokens bespoke e os instala via CockpitTheme — é o que
+              // alimenta context.colors/typo/syntax em toda a árvore de rotas.
+              final tokens = buildTokens(
+                brightness: Theme.of(context).brightness,
+                settings: s,
+              );
+              return CallbackShortcuts(
+                // Atalhos globais (sempre na cadeia de foco): zoom (⌘=/⌘-/⌘0) e
+                // foco do input (⌘L). CallbackShortcuts é aditivo (não quebra
+                // copiar/colar) e funciona mesmo sem nada focado.
+                bindings: {..._zoomBindings(controller), ..._focusBindings()},
+                child: _AppZoom(
+                  scale: uiScale,
+                  child: CockpitTheme(
+                    colors: tokens.colors,
+                    typo: tokens.typo,
+                    syntax: tokens.syntax,
+                    child: child ?? const SizedBox(),
+                  ),
+                ),
+              );
+            },
           );
         },
       ),

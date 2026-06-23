@@ -56,7 +56,9 @@ class SessionHistoryImpl implements SessionHistory {
         if (obj is! Map || obj['type'] != 'message') continue;
         final msg = obj['message'];
         if (msg is! Map || msg['role'] != 'user') continue;
-        final text = _textOf(msg['content']).trim().replaceAll(RegExp(r'\s+'), ' ');
+        final text = _textOf(
+          msg['content'],
+        ).trim().replaceAll(RegExp(r'\s+'), ' ');
         if (text.isEmpty) continue;
         return text.length > 100 ? '${text.substring(0, 100)}…' : text;
       }
@@ -105,10 +107,7 @@ class SessionHistoryImpl implements SessionHistory {
   /// Sufixo uuid do nome do arquivo `<timestamp>_<uuid>.jsonl`. Aceita `/` e `\`
   /// como separador (Windows).
   String _idOf(String path) {
-    final name = path
-        .split(RegExp(r'[/\\]'))
-        .last
-        .replaceAll('.jsonl', '');
+    final name = path.split(RegExp(r'[/\\]')).last.replaceAll('.jsonl', '');
     final underscore = name.lastIndexOf('_');
     return underscore == -1 ? name : name.substring(underscore + 1);
   }

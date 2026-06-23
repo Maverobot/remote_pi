@@ -103,19 +103,28 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
       if (result.exitCode != 0) {
         final err = (result.stderr as String? ?? '').trim();
         final out = (result.stdout as String? ?? '').trim();
-        final msg = err.isNotEmpty ? err : (out.isNotEmpty ? out : 'Failed to create the daemon.');
+        final msg = err.isNotEmpty
+            ? err
+            : (out.isNotEmpty ? out : 'Failed to create the daemon.');
         return Failure(DaemonError(msg));
       }
       return const Success(null);
     } catch (error, stackTrace) {
       return Failure(
-        DaemonError('Failed to create the daemon: $error', cause: error, stackTrace: stackTrace),
+        DaemonError(
+          'Failed to create the daemon: $error',
+          cause: error,
+          stackTrace: stackTrace,
+        ),
       );
     }
   }
 
   @override
-  Future<Result<void, DaemonError>> setAgentName(String cwd, String name) async {
+  Future<Result<void, DaemonError>> setAgentName(
+    String cwd,
+    String name,
+  ) async {
     // O nome é a fonte da verdade no registry global `~/.pi/remote/daemons.json`
     // (`{cwd, name}`) — o supervisor o injeta no spawn via REMOTE_PI_DIRECT_CONFIG.
     // Não há config local por-pasta nem op/CLI de rename, então editamos o
@@ -127,9 +136,7 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
     try {
       final file = File('$home/.pi/remote/daemons.json');
       if (!await file.exists()) {
-        return const Failure(
-          DaemonError('Daemon registry not found.'),
-        );
+        return const Failure(DaemonError('Daemon registry not found.'));
       }
       final decoded = jsonDecode(await file.readAsString());
       if (decoded is! Map || decoded['daemons'] is! List) {
@@ -144,9 +151,7 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
         }
       }
       if (!found) {
-        return const Failure(
-          DaemonError('Daemon not found in the registry.'),
-        );
+        return const Failure(DaemonError('Daemon not found in the registry.'));
       }
       // Mesmo formato do saveRegistry do pi-extension (2 espaços + LF final).
       await file.writeAsString(
@@ -155,7 +160,11 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
       return const Success(null);
     } catch (error, stackTrace) {
       return Failure(
-        DaemonError('Failed to rename the agent: $error', cause: error, stackTrace: stackTrace),
+        DaemonError(
+          'Failed to rename the agent: $error',
+          cause: error,
+          stackTrace: stackTrace,
+        ),
       );
     }
   }
@@ -195,7 +204,11 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
       return const Success(null);
     } catch (error, stackTrace) {
       return Failure(
-        DaemonError('Failed to restart the supervisor: $error', cause: error, stackTrace: stackTrace),
+        DaemonError(
+          'Failed to restart the supervisor: $error',
+          cause: error,
+          stackTrace: stackTrace,
+        ),
       );
     }
   }
@@ -237,12 +250,14 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
       _voidCall(<String, dynamic>{'op': 'cron_remove', 'job_id': jobId});
 
   @override
-  Future<Result<void, DaemonError>> setCronEnabled(String jobId, bool enabled) =>
-      _voidCall(<String, dynamic>{
-        'op': 'cron_enable',
-        'job_id': jobId,
-        'enabled': enabled,
-      });
+  Future<Result<void, DaemonError>> setCronEnabled(
+    String jobId,
+    bool enabled,
+  ) => _voidCall(<String, dynamic>{
+    'op': 'cron_enable',
+    'job_id': jobId,
+    'enabled': enabled,
+  });
 
   @override
   Future<Result<String, DaemonError>> runCron(String jobId) async {
@@ -312,10 +327,7 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
 
   Future<Result<void, DaemonError>> _unit(String op, {String? id}) async {
     final result = await _call(<String, dynamic>{'op': op, 'id': ?id});
-    return result.fold(
-      (_) => const Success(null),
-      (error) => Failure(error),
-    );
+    return result.fold((_) => const Success(null), (error) => Failure(error));
   }
 
   /// Abre o UDS, manda uma linha JSON, lê uma linha de reply, fecha. Devolve o
@@ -326,13 +338,13 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
     try {
       final line = await _transact('${jsonEncode(request)}\n');
       if (line == null) {
-        return const Failure(
-          DaemonError('Could not reach the supervisor.'),
-        );
+        return const Failure(DaemonError('Could not reach the supervisor.'));
       }
       final decoded = jsonDecode(line);
       if (decoded is! Map) {
-        return const Failure(DaemonError('Invalid response from the supervisor.'));
+        return const Failure(
+          DaemonError('Invalid response from the supervisor.'),
+        );
       }
       if (decoded['ok'] == true) {
         final data = decoded['data'];
@@ -345,7 +357,11 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
       return const Failure(DaemonError('Timed out talking to the supervisor.'));
     } catch (error, stackTrace) {
       return Failure(
-        DaemonError('Supervisor failure: $error', cause: error, stackTrace: stackTrace),
+        DaemonError(
+          'Supervisor failure: $error',
+          cause: error,
+          stackTrace: stackTrace,
+        ),
       );
     }
   }
@@ -378,26 +394,29 @@ class SupervisorClientImpl implements DaemonSupervisor, CronGateway {
     final completer = Completer<String>();
     final buffer = StringBuffer();
     late StreamSubscription<String> sub;
-    sub = socket.cast<List<int>>().transform(utf8.decoder).listen(
-      (chunk) {
-        buffer.write(chunk);
-        final text = buffer.toString();
-        final nl = text.indexOf('\n');
-        if (nl >= 0 && !completer.isCompleted) {
-          completer.complete(text.substring(0, nl));
-          unawaited(sub.cancel());
-        }
-      },
-      onError: (Object e) {
-        if (!completer.isCompleted) completer.completeError(e);
-      },
-      onDone: () {
-        if (!completer.isCompleted) {
-          final text = buffer.toString();
-          completer.complete(text.isEmpty ? '' : text);
-        }
-      },
-    );
+    sub = socket
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .listen(
+          (chunk) {
+            buffer.write(chunk);
+            final text = buffer.toString();
+            final nl = text.indexOf('\n');
+            if (nl >= 0 && !completer.isCompleted) {
+              completer.complete(text.substring(0, nl));
+              unawaited(sub.cancel());
+            }
+          },
+          onError: (Object e) {
+            if (!completer.isCompleted) completer.completeError(e);
+          },
+          onDone: () {
+            if (!completer.isCompleted) {
+              final text = buffer.toString();
+              completer.complete(text.isEmpty ? '' : text);
+            }
+          },
+        );
     return completer.future;
   }
 

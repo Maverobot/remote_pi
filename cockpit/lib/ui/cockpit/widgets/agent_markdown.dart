@@ -1,9 +1,16 @@
 import 'dart:async';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
+// `gpt_markdown` é um pacote Material: estiliza headings/links/code via
+// `Theme.of(context)` Material + uma `GptMarkdownThemeData` (ThemeExtension do
+// Material). Sob `ShadcnApp` não há Theme Material → ele cai no ThemeData()
+// claro (títulos escuros). Por isso embrulhamos só o markdown num Theme Material
+// (prefixo `m.`) com as nossas cores. O resto do app segue shadcn.
+import 'package:flutter/material.dart' as m;
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:gpt_markdown/gpt_markdown.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Renderiza o Markdown (GFM + code) da resposta do agente, com a identidade
 /// visual do Cockpit. Tolerante a markdown parcial (serve pro streaming).
@@ -16,10 +23,39 @@ class AgentMarkdown extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final typo = context.typo;
-    // `SelectionArea` torna todo o texto renderizado (corpo, code inline e os
-    // blocos ```) selecionável com o mouse — vale pro agente e pro file viewer,
-    // que compartilham este widget.
-    return SelectionArea(
+    final brightness = Theme.of(context).brightness;
+    // Tema Material só pro gpt_markdown: headings/links/cores com a paleta do
+    // Cockpit (senão o pacote usa o ThemeData() claro → títulos escuros). A
+    // seleção de texto é provida pelos chamadores (transcript / file viewer),
+    // que envolvem o scrollable num `SelectionArea` — assim o auto-scroll segue
+    // o arraste da seleção.
+    final base = brightness == Brightness.dark
+        ? m.ThemeData.dark()
+        : m.ThemeData.light();
+    return m.Theme(
+      data: base.copyWith(
+        colorScheme: base.colorScheme.copyWith(
+          surface: colors.panel,
+          onSurface: colors.text,
+          onSurfaceVariant: colors.text2,
+          error: colors.error,
+        ),
+        extensions: [
+          GptMarkdownThemeData(
+            brightness: brightness,
+            h1: typo.display.copyWith(color: colors.text, fontSize: 22),
+            h2: typo.display.copyWith(color: colors.text, fontSize: 18),
+            h3: typo.title.copyWith(color: colors.text, fontSize: 16),
+            h4: typo.title.copyWith(color: colors.text, fontSize: 14.5),
+            h5: typo.title.copyWith(color: colors.text, fontSize: 13.5),
+            h6: typo.title.copyWith(color: colors.text2, fontSize: 12.5),
+            linkColor: colors.accentText,
+            linkHoverColor: colors.accent,
+            hrLineColor: colors.border2,
+            highlightColor: colors.panel3,
+          ),
+        ],
+      ),
       child: GptMarkdown(
         data,
         style: typo.body.copyWith(color: colors.text),
@@ -107,10 +143,7 @@ class _CodeBlockState extends State<_CodeBlock> {
               padding: const EdgeInsets.fromLTRB(12, 4, 12, 12),
               child: Text(
                 widget.code,
-                style: typo.mono.copyWith(
-                  color: colors.text,
-                  height: 1.5,
-                ),
+                style: typo.mono.copyWith(color: colors.text, height: 1.5),
               ),
             ),
           ),
@@ -151,15 +184,17 @@ class _CopyButtonState extends State<_CopyButton> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return IconButton(
-      padding: EdgeInsets.zero,
-      visualDensity: VisualDensity.compact,
-      iconSize: 14,
-      tooltip: 'Copy code',
-      onPressed: _copy,
-      icon: Icon(
-        _copied ? Icons.check : Icons.copy,
-        color: _copied ? colors.ok : colors.text3,
+    return Tooltip(
+      tooltip: (context) => const TooltipContainer(child: Text('Copy code')),
+      child: HoverTap(
+        onTap: _copy,
+        borderRadius: BorderRadius.circular(5),
+        padding: const EdgeInsets.all(4),
+        child: Icon(
+          _copied ? Icons.check : Icons.copy,
+          size: 14,
+          color: _copied ? colors.ok : colors.text3,
+        ),
       ),
     );
   }

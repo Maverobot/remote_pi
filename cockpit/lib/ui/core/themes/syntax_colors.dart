@@ -1,12 +1,12 @@
 import 'package:cockpit/domain/entities/app_settings.dart';
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 
 /// Paleta de **syntax highlight** do viewer de código. Mapeia os escopos do
 /// highlight.js (className dos nós) para um punhado de cores semânticas, lidas
 /// via `context.syntax`. É **independente do tema do app**: cada paleta traz seu
 /// próprio [background], então o viewer fica consistente mesmo no light/dark.
 @immutable
-class SyntaxColors extends ThemeExtension<SyntaxColors> {
+class SyntaxColors {
   const SyntaxColors({
     required this.background,
     required this.base,
@@ -211,7 +211,6 @@ class SyntaxColors extends ThemeExtension<SyntaxColors> {
     }
   }
 
-  @override
   SyntaxColors copyWith({
     Color? background,
     Color? base,
@@ -239,26 +238,6 @@ class SyntaxColors extends ThemeExtension<SyntaxColors> {
       variable: variable ?? this.variable,
       meta: meta ?? this.meta,
       deletion: deletion ?? this.deletion,
-    );
-  }
-
-  @override
-  SyntaxColors lerp(ThemeExtension<SyntaxColors>? other, double t) {
-    if (other is! SyntaxColors) return this;
-    Color l(Color a, Color b) => Color.lerp(a, b, t)!;
-    return SyntaxColors(
-      background: l(background, other.background),
-      base: l(base, other.base),
-      comment: l(comment, other.comment),
-      keyword: l(keyword, other.keyword),
-      string: l(string, other.string),
-      number: l(number, other.number),
-      klass: l(klass, other.klass),
-      builtin: l(builtin, other.builtin),
-      function: l(function, other.function),
-      variable: l(variable, other.variable),
-      meta: l(meta, other.meta),
-      deletion: l(deletion, other.deletion),
     );
   }
 }

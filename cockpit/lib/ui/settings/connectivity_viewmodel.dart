@@ -54,7 +54,8 @@ class ConnectivityViewModel extends ChangeNotifier {
   bool _disposed = false;
 
   /// Carrega relay + aparelhos em paralelo. Chamado quando a aba abre.
-  Future<void> load() => Future.wait(<Future<void>>[loadRelay(), loadDevices()]);
+  Future<void> load() =>
+      Future.wait(<Future<void>>[loadRelay(), loadDevices()]);
 
   Future<void> loadRelay() async {
     relayLoad = ConnLoad.loading;

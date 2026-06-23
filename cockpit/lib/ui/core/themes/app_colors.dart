@@ -1,9 +1,9 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 
 /// Tokens de cor do Cockpit — espelham `tokens.css` do design (dark pro-tool,
 /// accent azul Remote Pi). Lidos via `context.colors.<token>`.
 @immutable
-class AppColors extends ThemeExtension<AppColors> {
+class AppColors {
   const AppColors({
     required this.bg,
     required this.panel,
@@ -91,7 +91,6 @@ class AppColors extends ThemeExtension<AppColors> {
     editedBg: Color(0xFFFBF1DC),
   );
 
-  @override
   AppColors copyWith({
     Color? bg,
     Color? panel,
@@ -133,33 +132,6 @@ class AppColors extends ThemeExtension<AppColors> {
       warn: warn ?? this.warn,
       edited: edited ?? this.edited,
       editedBg: editedBg ?? this.editedBg,
-    );
-  }
-
-  @override
-  AppColors lerp(ThemeExtension<AppColors>? other, double t) {
-    if (other is! AppColors) return this;
-    Color l(Color a, Color b) => Color.lerp(a, b, t)!;
-    return AppColors(
-      bg: l(bg, other.bg),
-      panel: l(panel, other.panel),
-      panel2: l(panel2, other.panel2),
-      panel3: l(panel3, other.panel3),
-      border: l(border, other.border),
-      border2: l(border2, other.border2),
-      text: l(text, other.text),
-      text2: l(text2, other.text2),
-      text3: l(text3, other.text3),
-      text4: l(text4, other.text4),
-      accent: l(accent, other.accent),
-      accentSoft: l(accentSoft, other.accentSoft),
-      accentText: l(accentText, other.accentText),
-      online: l(online, other.online),
-      ok: l(ok, other.ok),
-      error: l(error, other.error),
-      warn: l(warn, other.warn),
-      edited: l(edited, other.edited),
-      editedBg: l(editedBg, other.editedBg),
     );
   }
 }

@@ -202,13 +202,12 @@ UpdateViewModel buildUpdateViewModel() {
 (String, String, String) _updateTarget() {
   if (Platform.isMacOS) return ('macos', 'dmg', 'universal');
   if (Platform.isWindows) return ('windows', 'exe', 'x64');
-  final arch =
-      Platform.version.toLowerCase().contains('arm') ? 'arm64' : 'x64';
+  final arch = Platform.version.toLowerCase().contains('arm') ? 'arm64' : 'x64';
   return ('linux', 'deb', arch);
 }
 
 /// Controller global de preferências (tema/fonte/syntax). Vive acima do
-/// `MaterialApp`; criado uma vez no boot.
+/// `ShadcnApp`; criado uma vez no boot.
 SettingsController buildSettingsController() {
   return SettingsController(_injector.get<SettingsStore>());
 }

@@ -35,6 +35,15 @@ dependencies:
   # Use with the CupertinoIcons class for iOS style icons.
   cupertino_icons: ^1.0.8
 
+  # Migração de UI: design system shadcn (componentes, overlays, tema). Substitui
+  # o Material como camada de UI na raiz (`ShadcnApp.router`). Pin exato — pacote
+  # pré-1.0 (API churna). Nota: o `ShadcnApp` já injeta
+  # `DefaultMaterialLocalizations` (en-US) por padrão, então os widgets de
+  # terceiros que embutem Material (xterm, media_kit_video, gpt_markdown)
+  # funcionam sem `flutter_localizations`; e `shadcn_flutter.dart` já re-exporta
+  # `Icons`, então mantemos os Material Icons sem import extra.
+  shadcn_flutter: 0.0.52
+
   # Plano 37 — mesma stack do app/: state management + DI + routing.
   provider: ^6.1.2
   auto_injector: ^2.0.5

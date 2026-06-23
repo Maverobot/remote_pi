@@ -1,7 +1,8 @@
 import 'package:cockpit/ui/cockpit/session/agent_session.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart'
+    show FilteringTextInputFormatter, TextInputFormatter;
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 typedef AgentEditResult = ({String agentName, bool autoStartRelay});
 
@@ -13,6 +14,7 @@ Future<AgentEditResult?> showAgentEditDialog(
 }) {
   return showDialog<AgentEditResult>(
     context: context,
+    barrierColor: const Color(0x99000000),
     builder: (context) => _AgentEditDialog(session: session),
   );
 }
@@ -45,9 +47,9 @@ class _AgentEditDialogState extends State<_AgentEditDialog> {
   void _save() {
     final name = _name.text.trim().replaceAll(' ', '-');
     if (name.isEmpty) return;
-    Navigator.of(context).pop(
-      (agentName: name, autoStartRelay: _autoStartRelay),
-    );
+    Navigator.of(
+      context,
+    ).pop((agentName: name, autoStartRelay: _autoStartRelay));
   }
 
   @override
@@ -56,29 +58,18 @@ class _AgentEditDialogState extends State<_AgentEditDialog> {
     final session = widget.session;
     final ctx = session.contextUsage;
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: colors.border2),
+    return AlertDialog(
+      title: Text(
+        'Edit agent',
+        style: context.typo.title.copyWith(fontSize: 16, color: colors.text),
       ),
-      child: ConstrainedBox(
+      content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 460),
         child: SingleChildScrollView(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                'Edit agent',
-                style: context.typo.title.copyWith(
-                  fontSize: 16,
-                  color: colors.text,
-                ),
-              ),
-              const SizedBox(height: 16),
-
               _Label('Agent name'),
               const SizedBox(height: 6),
               _Field(
@@ -105,7 +96,6 @@ class _AgentEditDialogState extends State<_AgentEditDialog> {
                   ),
                   Switch(
                     value: _autoStartRelay,
-                    activeThumbColor: colors.accent,
                     onChanged: (v) => setState(() => _autoStartRelay = v),
                   ),
                 ],
@@ -123,29 +113,17 @@ class _AgentEditDialogState extends State<_AgentEditDialog> {
                     ? '${ctx!.percent!.toStringAsFixed(ctx.percent! < 10 ? 1 : 0)}%  (${ctx.tokens ?? "?"}/${ctx.contextWindow})'
                     : '—',
               ),
-              const SizedBox(height: 16),
-
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                    ),
-                    onPressed: _save,
-                    child: const Text('Save'),
-                  ),
-                ],
-              ),
             ],
           ),
         ),
       ),
+      actions: [
+        OutlineButton(
+          onPressed: () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        PrimaryButton(onPressed: _save, child: const Text('Save')),
+      ],
     );
   }
 
@@ -204,30 +182,8 @@ class _Field extends StatelessWidget {
     return TextField(
       controller: controller,
       inputFormatters: inputFormatters,
+      placeholder: Text(hint),
       style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text),
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: hint,
-        hintStyle: context.typo.body.copyWith(
-          fontSize: 13.5,
-          color: colors.text3,
-        ),
-        filled: true,
-        fillColor: colors.panel2,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(7),
-          borderSide: BorderSide(color: colors.border),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(7),
-          borderSide: BorderSide(color: colors.border),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(7),
-          borderSide: BorderSide(color: colors.accent),
-        ),
-      ),
     );
   }
 }

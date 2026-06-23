@@ -86,8 +86,10 @@ Future<String?> unixWhich(String name) async {
 /// exitCode e ruído de stderr). `null` se não achar / timeout / erro.
 Future<String?> _runWhich(String shell, List<String> args) async {
   try {
-    final res = await Process.run(shell, args)
-        .timeout(const Duration(seconds: 4));
+    final res = await Process.run(
+      shell,
+      args,
+    ).timeout(const Duration(seconds: 4));
     for (final line in (res.stdout as String? ?? '').split('\n')) {
       final p = line.trim();
       if (p.startsWith('/') && await File(p).exists()) return p;
@@ -101,8 +103,9 @@ Future<String?> _runWhich(String shell, List<String> args) async {
 /// `where <name>` no Windows — resolve PATHEXT e devolve o 1º caminho existente.
 Future<String?> _windowsWhere(String name) async {
   try {
-    final res = await Process.run('where', [name], runInShell: true)
-        .timeout(const Duration(seconds: 4));
+    final res = await Process.run('where', [
+      name,
+    ], runInShell: true).timeout(const Duration(seconds: 4));
     if (res.exitCode != 0) return null;
     for (final line in (res.stdout as String? ?? '').split('\n')) {
       final p = line.trim();

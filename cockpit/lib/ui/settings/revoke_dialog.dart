@@ -1,7 +1,7 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
 import 'package:cockpit/ui/settings/revoke_controller.dart';
-import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Dialog de progresso do revoke: carregando enquanto sobe o `pi --mode rpc` e
 /// roda `/remote-pi revoke`, depois sucesso/erro com botão "Ok". Consome o
@@ -14,30 +14,33 @@ class RevokeDialog extends StatelessWidget {
     final ctrl = context.watch<RevokeController>();
     final colors = context.colors;
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      child: ConstrainedBox(
+    return AlertDialog(
+      content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 360),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 26, 24, 20),
-          child: switch (ctrl.stage) {
-            RevokeStage.running => _running(context, ctrl),
-            RevokeStage.done => _result(
-              context,
-              icon: Icons.check_circle_outline,
-              color: colors.online,
-              message: 'Device removed.',
-            ),
-            RevokeStage.failed => _result(
-              context,
-              icon: Icons.error_outline,
-              color: colors.error,
-              message: ctrl.error ?? 'Failed to revoke the device.',
-            ),
-          },
-        ),
+        child: switch (ctrl.stage) {
+          RevokeStage.running => _running(context, ctrl),
+          RevokeStage.done => _result(
+            context,
+            icon: Icons.check_circle_outline,
+            color: colors.online,
+            message: 'Device removed.',
+          ),
+          RevokeStage.failed => _result(
+            context,
+            icon: Icons.error_outline,
+            color: colors.error,
+            message: ctrl.error ?? 'Failed to revoke the device.',
+          ),
+        },
       ),
+      actions: ctrl.stage == RevokeStage.running
+          ? null
+          : [
+              PrimaryButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Ok'),
+              ),
+            ],
     );
   }
 
@@ -46,18 +49,17 @@ class RevokeDialog extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        SizedBox(
-          width: 34,
-          height: 34,
-          child: CircularProgressIndicator(strokeWidth: 2.5, color: colors.accent),
-        ),
+        const CircularProgressIndicator(size: 34),
         const SizedBox(height: 18),
         Text(
           ctrl.deviceName == null
               ? 'Revoking…'
               : 'Revoking ${ctrl.deviceName}…',
           textAlign: TextAlign.center,
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text2,
+          ),
         ),
         const SizedBox(height: 6),
         Text(
@@ -84,18 +86,9 @@ class RevokeDialog extends StatelessWidget {
         Text(
           message,
           textAlign: TextAlign.center,
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
-        ),
-        const SizedBox(height: 20),
-        SizedBox(
-          width: double.infinity,
-          child: FilledButton(
-            style: FilledButton.styleFrom(
-              backgroundColor: colors.accent,
-              padding: const EdgeInsets.symmetric(vertical: 12),
-            ),
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('Ok'),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text2,
           ),
         ),
       ],

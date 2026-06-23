@@ -48,7 +48,11 @@ class RevokeGatewayImpl implements RevokeGateway {
     } catch (error, stackTrace) {
       await rpc.dispose();
       return Failure(
-        RelayError('Failed to revoke: $error', cause: error, stackTrace: stackTrace),
+        RelayError(
+          'Failed to revoke: $error',
+          cause: error,
+          stackTrace: stackTrace,
+        ),
       );
     }
 
@@ -56,9 +60,7 @@ class RevokeGatewayImpl implements RevokeGateway {
       timeout,
       () => finish(
         const Failure(
-          RelayError(
-            'Timed out revoking. Check the connection to the relay.',
-          ),
+          RelayError('Timed out revoking. Check the connection to the relay.'),
         ),
       ),
     );

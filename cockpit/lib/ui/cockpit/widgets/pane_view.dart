@@ -17,10 +17,11 @@ import 'package:cockpit/ui/cockpit/widgets/terminal_pane.dart';
 import 'package:cockpit/ui/core/file_icons/file_icons.dart';
 import 'package:cockpit/ui/core/themes/terminal_theme.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:cockpit/ui/settings/settings_controller.dart';
-import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:xterm/xterm.dart';
 
 /// Folha do multiplexador: tab strip + corpo (agente: transcript+composer / empty;
@@ -364,8 +365,8 @@ class _StripButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: tooltip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tooltip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
         onTap: onTap,
         child: SizedBox(
@@ -561,14 +562,7 @@ class _TabState extends State<_Tab> {
                     fontSize: 12,
                     color: colors.text,
                   ),
-                  decoration: const InputDecoration(
-                    isDense: true,
-                    contentPadding: EdgeInsets.zero,
-                    border: InputBorder.none,
-                    enabledBorder: InputBorder.none,
-                    focusedBorder: InputBorder.none,
-                    filled: false,
-                  ),
+                  borderRadius: BorderRadius.circular(7),
                   inputFormatters: [
                     FilteringTextInputFormatter(
                       RegExp(r' '),
@@ -624,6 +618,7 @@ class _TabState extends State<_Tab> {
                   width: 10,
                   height: 10,
                   child: CircularProgressIndicator(
+                    size: 10,
                     strokeWidth: 1.5,
                     color: colors.accent,
                   ),
@@ -750,7 +745,7 @@ class _TabClose extends StatelessWidget {
   Widget build(BuildContext context) {
     return MouseRegion(
       cursor: SystemMouseCursors.click,
-      child: InkWell(
+      child: HoverTap(
         borderRadius: BorderRadius.circular(4),
         onTap: onTap,
         child: Padding(
@@ -772,7 +767,7 @@ class _TabAdd extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return Tooltip(
-      message: 'New tab',
+      tooltip: (context) => const TooltipContainer(child: Text('New tab')),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onTap: onTap,
@@ -809,9 +804,8 @@ class _PaneTools extends StatelessWidget {
     final iconColor = colors.text3;
     const spacing = 13.0;
     Widget btn(Widget icon, String tip, VoidCallback onTap) => Tooltip(
-      message: tip,
-      child: InkWell(
-        mouseCursor: SystemMouseCursors.click,
+      tooltip: (context) => TooltipContainer(child: Text(tip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
         onTap: onTap,
         child: SizedBox(width: spacing, height: spacing, child: icon),
@@ -1065,37 +1059,34 @@ class _DragFeedback extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 200),
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-        decoration: BoxDecoration(
-          color: colors.panel2,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: colors.accent),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x55000000),
-              blurRadius: 12,
-              offset: Offset(0, 4),
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 200),
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      decoration: BoxDecoration(
+        color: colors.panel2,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: colors.accent),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x55000000),
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 13, color: colors.accentText),
+          const SizedBox(width: 7),
+          Flexible(
+            child: Text(
+              title,
+              overflow: TextOverflow.ellipsis,
+              style: context.typo.tab.copyWith(color: colors.text),
             ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 13, color: colors.accentText),
-            const SizedBox(width: 7),
-            Flexible(
-              child: Text(
-                title,
-                overflow: TextOverflow.ellipsis,
-                style: context.typo.tab.copyWith(color: colors.text),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

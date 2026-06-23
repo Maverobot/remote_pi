@@ -1,9 +1,9 @@
 import 'dart:async';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Áudio ou vídeo — define se há superfície de vídeo.
 enum MediaKind { audio, video }
@@ -180,7 +180,7 @@ class _MediaViewState extends State<MediaView> {
     final colors = context.colors;
     final onDark = widget.kind == MediaKind.video;
     final fg = onDark ? Colors.white : colors.text;
-    final fg2 = onDark ? Colors.white70 : colors.text3;
+    final fg2 = onDark ? Colors.white.withValues(alpha: 0.7) : colors.text3;
 
     final totalMs = _duration.inMilliseconds;
     final posMs = _seekMs ?? _position.inMilliseconds.toDouble();
@@ -190,36 +190,31 @@ class _MediaViewState extends State<MediaView> {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       child: Row(
         children: [
-          IconButton(
-            iconSize: 22,
-            color: fg,
-            icon: Icon(_playing ? Icons.pause : Icons.play_arrow),
-            tooltip: _playing ? 'Pause' : 'Play',
-            onPressed: _player.playOrPause,
+          Tooltip(
+            tooltip: (context) =>
+                TooltipContainer(child: Text(_playing ? 'Pause' : 'Play')),
+            child: IconButton.ghost(
+              icon: Icon(
+                _playing ? Icons.pause : Icons.play_arrow,
+                size: 22,
+                color: fg,
+              ),
+              onPressed: _player.playOrPause,
+            ),
           ),
           Expanded(
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 3,
-                activeTrackColor: colors.accent,
-                inactiveTrackColor: fg2.withValues(alpha: 0.3),
-                thumbColor: colors.accent,
-                overlayShape: SliderComponentShape.noOverlay,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-              ),
-              child: Slider(
-                value: posMs.clamp(0, maxMs),
-                max: maxMs,
-                onChanged: totalMs <= 0
-                    ? null
-                    : (v) => setState(() => _seekMs = v),
-                onChangeEnd: totalMs <= 0
-                    ? null
-                    : (v) {
-                        _player.seek(Duration(milliseconds: v.round()));
-                        setState(() => _seekMs = null);
-                      },
-              ),
+            child: Slider(
+              value: SliderValue.single(posMs.clamp(0, maxMs)),
+              max: maxMs,
+              onChanged: totalMs <= 0
+                  ? null
+                  : (v) => setState(() => _seekMs = v.value),
+              onChangeEnd: totalMs <= 0
+                  ? null
+                  : (v) {
+                      _player.seek(Duration(milliseconds: v.value.round()));
+                      setState(() => _seekMs = null);
+                    },
             ),
           ),
           const SizedBox(width: 4),
@@ -228,29 +223,24 @@ class _MediaViewState extends State<MediaView> {
             style: context.typo.mono.copyWith(fontSize: 11.5, color: fg2),
           ),
           const SizedBox(width: 4),
-          IconButton(
-            iconSize: 19,
-            color: fg,
-            icon: Icon(_volume <= 0 ? Icons.volume_off : Icons.volume_up),
-            tooltip: _volume <= 0 ? 'Unmute' : 'Mute',
-            onPressed: _toggleMute,
+          Tooltip(
+            tooltip: (context) =>
+                TooltipContainer(child: Text(_volume <= 0 ? 'Unmute' : 'Mute')),
+            child: IconButton.ghost(
+              icon: Icon(
+                _volume <= 0 ? Icons.volume_off : Icons.volume_up,
+                size: 19,
+                color: fg,
+              ),
+              onPressed: _toggleMute,
+            ),
           ),
           SizedBox(
             width: 76,
-            child: SliderTheme(
-              data: SliderTheme.of(context).copyWith(
-                trackHeight: 3,
-                activeTrackColor: fg2,
-                inactiveTrackColor: fg2.withValues(alpha: 0.3),
-                thumbColor: fg,
-                overlayShape: SliderComponentShape.noOverlay,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5),
-              ),
-              child: Slider(
-                value: _volume.clamp(0, 100),
-                max: 100,
-                onChanged: (v) => _player.setVolume(v),
-              ),
+            child: Slider(
+              value: SliderValue.single(_volume.clamp(0, 100)),
+              max: 100,
+              onChanged: (v) => _player.setVolume(v.value),
             ),
           ),
         ],

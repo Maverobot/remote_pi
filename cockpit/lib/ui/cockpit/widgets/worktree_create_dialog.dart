@@ -1,7 +1,7 @@
 import 'package:cockpit/domain/contracts/worktree_manager.dart';
 import 'package:cockpit/domain/validators/worktree_name_validator.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Dialog de criar worktree. Valida o nome **ao vivo** (decisões 10, 11) contra
 /// o [namespace] (branches locais + worktrees existentes); Criar só acende com
@@ -16,6 +16,7 @@ Future<void> showWorktreeCreateDialog(
 }) {
   return showDialog<void>(
     context: context,
+    barrierColor: const Color(0x99000000),
     builder: (context) => _WorktreeCreateDialog(
       rootName: rootName,
       namespace: namespace,
@@ -57,19 +58,20 @@ class _WorktreeCreateDialogState extends State<_WorktreeCreateDialog> {
     existingWorktreeNames: widget.namespace.worktreeNames,
   );
 
-  bool get _canCreate => _name.text.isNotEmpty && _check.isValid && !_submitting;
+  bool get _canCreate =>
+      _name.text.isNotEmpty && _check.isValid && !_submitting;
 
   /// Mensagem por causa de validação (null quando válido ou campo intacto).
   String? _reason(WorktreeNameCheck check) => switch (check.error) {
     null || WorktreeNameError.empty => null,
     WorktreeNameError.whitespace => 'No spaces in the name.',
-    WorktreeNameError.invalidChar =>
-      'Invalid character for a branch name.',
+    WorktreeNameError.invalidChar => 'Invalid character for a branch name.',
     WorktreeNameError.invalidSequence =>
       'Invalid sequence (e.g. "..", "//", starting/ending with "/").',
     WorktreeNameError.reserved =>
       'Reserved position (do not start with "-"/"." or end with ".lock").',
-    WorktreeNameError.duplicateBranch => 'A branch with that name already exists.',
+    WorktreeNameError.duplicateBranch =>
+      'A branch with that name already exists.',
     WorktreeNameError.duplicateWorktree =>
       'A worktree with that name already exists.',
   };
@@ -99,115 +101,68 @@ class _WorktreeCreateDialogState extends State<_WorktreeCreateDialog> {
     final reason = _gitError ?? _reason(check);
     final showError = reason != null;
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: colors.border2),
+    return AlertDialog(
+      title: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Create worktree',
+            style: context.typo.title.copyWith(
+              fontSize: 15,
+              color: colors.text,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            'New feature in ${widget.rootName} — new branch from the '
+            'current HEAD.',
+            style: context.typo.label.copyWith(color: colors.text3),
+          ),
+        ],
       ),
-      child: ConstrainedBox(
+      content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            TextField(
+              controller: _name,
+              autofocus: true,
+              enabled: !_submitting,
+              onChanged: (_) => setState(() => _gitError = null),
+              onSubmitted: (_) => _submit(),
+              placeholder: const Text('feat/minha-feature'),
+              style: context.typo.mono.copyWith(
+                fontSize: 13,
+                color: colors.text,
+              ),
+              borderRadius: BorderRadius.circular(7),
+              border: showError ? Border.all(color: colors.error) : null,
+            ),
+            if (showError) ...[
+              const SizedBox(height: 8),
               Text(
-                'Create worktree',
-                style: context.typo.title.copyWith(
-                  fontSize: 15,
-                  color: colors.text,
-                ),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                'New feature in ${widget.rootName} — new branch from the '
-                'current HEAD.',
-                style: context.typo.label.copyWith(color: colors.text3),
-              ),
-              const SizedBox(height: 16),
-              TextField(
-                controller: _name,
-                autofocus: true,
-                enabled: !_submitting,
-                onChanged: (_) => setState(() => _gitError = null),
-                onSubmitted: (_) => _submit(),
-                style: context.typo.mono.copyWith(
-                  fontSize: 13,
-                  color: colors.text,
-                ),
-                decoration: InputDecoration(
-                  isDense: true,
-                  hintText: 'feat/minha-feature',
-                  hintStyle: context.typo.mono.copyWith(
-                    color: colors.text3,
-                    fontSize: 13,
-                  ),
-                  filled: true,
-                  fillColor: colors.panel2,
-                  contentPadding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 10,
-                  ),
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(color: colors.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(
-                      color: showError ? colors.error : colors.border,
-                    ),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(
-                      color: showError ? colors.error : colors.accent,
-                    ),
-                  ),
-                ),
-              ),
-              if (showError) ...[
-                const SizedBox(height: 8),
-                Text(
-                  reason,
-                  style: context.typo.label.copyWith(color: colors.error),
-                ),
-              ],
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: _submitting
-                        ? null
-                        : () => Navigator.of(context).pop(),
-                    child: const Text('Cancel'),
-                  ),
-                  const SizedBox(width: 8),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                    ),
-                    onPressed: _canCreate ? _submit : null,
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 15,
-                            height: 15,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Colors.white,
-                            ),
-                          )
-                        : const Text('Create'),
-                  ),
-                ],
+                reason,
+                style: context.typo.label.copyWith(color: colors.error),
               ),
             ],
-          ),
+          ],
         ),
       ),
+      actions: [
+        OutlineButton(
+          onPressed: _submitting ? null : () => Navigator.of(context).pop(),
+          child: const Text('Cancel'),
+        ),
+        PrimaryButton(
+          onPressed: _canCreate ? _submit : null,
+          child: _submitting
+              ? const CircularProgressIndicator(size: 16, color: Colors.white)
+              : const Text('Create'),
+        ),
+      ],
     );
   }
 }

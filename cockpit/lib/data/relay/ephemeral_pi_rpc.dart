@@ -57,17 +57,16 @@ class EphemeralPiRpc {
     );
     _process = process;
 
-    _stdoutSub = process.stdout.transform(const JsonlLineSplitter()).listen(
-      (line) {
-        try {
-          final decoded = jsonDecode(line);
-          if (decoded is Map<String, dynamic>) onLine(decoded);
-        } catch (_) {
-          // Linha não-JSON — ignora (não derruba o comando).
-        }
-      },
-      onError: (_) {},
-    );
+    _stdoutSub = process.stdout.transform(const JsonlLineSplitter()).listen((
+      line,
+    ) {
+      try {
+        final decoded = jsonDecode(line);
+        if (decoded is Map<String, dynamic>) onLine(decoded);
+      } catch (_) {
+        // Linha não-JSON — ignora (não derruba o comando).
+      }
+    }, onError: (_) {});
     _stderrSub = process.stderr
         .transform(utf8.decoder)
         .transform(const LineSplitter())
@@ -108,7 +107,8 @@ class EphemeralPiRpc {
   /// `--mode rpc --no-session` (sem persistir sessão), SEM `--no-extensions`
   /// (precisamos da extensão remote-pi pros slash commands).
   List<String> _args() => <String>[
-    '--mode', 'rpc',
+    '--mode',
+    'rpc',
     '--no-session',
     if (_config.provider != null && _config.provider!.isNotEmpty) ...[
       '--provider',

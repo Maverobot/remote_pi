@@ -50,7 +50,8 @@ class PiSpawnConfig {
   /// presente, o pi inicia já carregado naquela sessão — evita o ciclo extra de
   /// `switch_session` que causa re-avaliação dupla do módulo da extensão.
   List<String> spawnArgs({String? sessionId}) => <String>[
-    '--mode', 'rpc',
+    '--mode',
+    'rpc',
     if (sessionId != null) ...['--session', sessionId],
     if (noSession) '--no-session',
     if (noExtensions) '--no-extensions',

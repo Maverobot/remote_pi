@@ -1,5 +1,9 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
+
+/// Cor do barrier (escurece o fundo) — o `showDialog` do shadcn usa barrier
+/// transparente por padrão; aqui damos o leve dim que o modal pedia.
+const Color _barrier = Color(0x99000000);
 
 /// Dialog informativo genérico (tema do cockpit) — só botão "OK".
 Future<void> showInfoDialog(
@@ -10,52 +14,30 @@ Future<void> showInfoDialog(
 }) {
   return showDialog<void>(
     context: context,
+    barrierColor: _barrier,
     builder: (context) {
       final colors = context.colors;
-      return Dialog(
-        backgroundColor: colors.panel,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: BorderSide(color: colors.border2),
+      return AlertDialog(
+        title: Text(
+          title,
+          style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
         ),
-        child: ConstrainedBox(
+        content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 380),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: context.typo.title.copyWith(
-                    fontSize: 15,
-                    color: colors.text,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  message,
-                  style: context.typo.body.copyWith(
-                    fontSize: 13.5,
-                    color: colors.text2,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Align(
-                  alignment: Alignment.centerRight,
-                  child: FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                    ),
-                    onPressed: () => Navigator.of(context).pop(),
-                    child: Text(okLabel),
-                  ),
-                ),
-              ],
+          child: Text(
+            message,
+            style: context.typo.body.copyWith(
+              fontSize: 13.5,
+              color: colors.text2,
             ),
           ),
         ),
+        actions: [
+          PrimaryButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: Text(okLabel),
+          ),
+        ],
       );
     },
   );
@@ -72,59 +54,40 @@ Future<bool> showConfirmDialog(
 }) async {
   final result = await showDialog<bool>(
     context: context,
+    barrierColor: _barrier,
     builder: (context) {
       final colors = context.colors;
-      return Dialog(
-        backgroundColor: colors.panel,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(10),
-          side: BorderSide(color: colors.border2),
+      return AlertDialog(
+        title: Text(
+          title,
+          style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
         ),
-        child: ConstrainedBox(
+        content: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 380),
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: context.typo.title.copyWith(
-                    fontSize: 15,
-                    color: colors.text,
-                  ),
-                ),
-                const SizedBox(height: 8),
-                Text(
-                  message,
-                  style: context.typo.body.copyWith(
-                    fontSize: 13.5,
-                    color: colors.text2,
-                  ),
-                ),
-                const SizedBox(height: 20),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    TextButton(
-                      onPressed: () => Navigator.of(context).pop(false),
-                      child: Text(cancelLabel),
-                    ),
-                    const SizedBox(width: 8),
-                    FilledButton(
-                      style: FilledButton.styleFrom(
-                        backgroundColor: danger ? colors.error : colors.accent,
-                      ),
-                      onPressed: () => Navigator.of(context).pop(true),
-                      child: Text(confirmLabel),
-                    ),
-                  ],
-                ),
-              ],
+          child: Text(
+            message,
+            style: context.typo.body.copyWith(
+              fontSize: 13.5,
+              color: colors.text2,
             ),
           ),
         ),
+        actions: [
+          OutlineButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: Text(cancelLabel),
+          ),
+          if (danger)
+            DestructiveButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(confirmLabel),
+            )
+          else
+            PrimaryButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: Text(confirmLabel),
+            ),
+        ],
       );
     },
   );

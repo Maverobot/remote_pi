@@ -1,9 +1,11 @@
 import 'dart:io';
 
 import 'package:cockpit/domain/entities/launchable_app.dart';
+import 'package:cockpit/ui/cockpit/widgets/app_menu.dart';
 import 'package:cockpit/ui/cockpit/widgets/window_controls.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Top bar (~46px) customizada — substitui a barra nativa da janela. Semáforo
 /// macOS **funcional** (fecha/minimiza/maximiza) · toggle da rail · nome do
@@ -57,10 +59,7 @@ class CockpitTopbar extends StatelessWidget {
         const SizedBox(width: 8),
         Text(
           projectName,
-          style: context.typo.title.copyWith(
-            fontSize: 14,
-            color: colors.text,
-          ),
+          style: context.typo.title.copyWith(fontSize: 14, color: colors.text),
         ),
         const Spacer(),
         _OpenInIdeButton(
@@ -109,81 +108,92 @@ class _OpenInIdeButton extends StatelessWidget {
     return apps.first;
   }
 
+  void _showApps(BuildContext context, LaunchableApp? current) {
+    final colors = context.colors;
+    final overlay = showPopover<void>(
+      context: context,
+      alignment: Alignment.topRight,
+      anchorAlignment: Alignment.bottomRight,
+      offset: const Offset(0, 4),
+      builder: (context) => ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 180, maxWidth: 320),
+        // DropdownMenu embrulha os MenuButton num MenuGroup (exigido) + MenuPopup.
+        child: DropdownMenu(
+          children: [
+            for (final app in apps)
+              MenuButton(
+                leading: _AppIcon(app, size: 14, color: colors.text2),
+                trailing: app.id == current?.id
+                    ? Icon(Icons.check, size: 14, color: colors.accent)
+                    : null,
+                onPressed: (ctx) {
+                  closeOverlay(ctx);
+                  onOpen(app.id);
+                },
+                child: Text(
+                  app.name,
+                  style: context.typo.label.copyWith(
+                    color: colors.text,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+    trackMenuOverlay(overlay);
+  }
+
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
     final current = _current;
     final fg = enabled ? Colors.white : colors.text4;
     final bg = enabled ? colors.accent : colors.panel3;
+    final hover = Colors.white.withValues(alpha: 0.12);
 
-    return Material(
-      color: bg,
-      borderRadius: BorderRadius.circular(7),
+    return Container(
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(7),
+      ),
       clipBehavior: Clip.hardEdge,
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           // Segmento esquerdo — abre no app atual
-          InkWell(
+          HoverTap(
             onTap: enabled && current != null ? () => onOpen(current.id) : null,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  _AppIcon(current, size: 14, color: fg),
-                  const SizedBox(width: 7),
-                  Text(
-                    'Open',
-                    style: context.typo.label.copyWith(
-                      color: fg,
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
-                    ),
+            hoverColor: hover,
+            borderRadius: BorderRadius.zero,
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _AppIcon(current, size: 14, color: fg),
+                const SizedBox(width: 7),
+                Text(
+                  'Open',
+                  style: context.typo.label.copyWith(
+                    color: fg,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13,
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
           ),
           // Divisor vertical
-          Container(
-            width: 1,
-            height: 28,
-            color: fg.withValues(alpha: 0.25),
-          ),
+          Container(width: 1, height: 28, color: fg.withValues(alpha: 0.25)),
           // Segmento direito — dropdown de apps
-          PopupMenuButton<String>(
-            enabled: enabled && apps.isNotEmpty,
-            tooltip: '',
-            padding: EdgeInsets.zero,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(8),
-            ),
-            color: colors.panel2,
-            onSelected: onOpen,
-            itemBuilder: (_) => apps.map((app) {
-              return PopupMenuItem<String>(
-                value: app.id,
-                child: Row(
-                  children: [
-                    _AppIcon(app, size: 14, color: colors.text2),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        app.name,
-                        style: context.typo.label.copyWith(
-                          color: colors.text,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ),
-                    if (app.id == (current?.id))
-                      Icon(Icons.check, size: 14, color: colors.accent),
-                  ],
-                ),
-              );
-            }).toList(),
-            child: Padding(
+          Builder(
+            builder: (ctx) => HoverTap(
+              onTap: enabled && apps.isNotEmpty
+                  ? () => _showApps(ctx, current)
+                  : null,
+              hoverColor: hover,
+              borderRadius: BorderRadius.zero,
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 7),
               child: Icon(Icons.expand_more, size: 16, color: fg),
             ),
@@ -247,21 +257,19 @@ class _IconBtn extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return Tooltip(
-      message: tooltip,
-      child: Material(
-        color: active ? colors.accentSoft : Colors.transparent,
+      tooltip: (context) => TooltipContainer(child: Text(tooltip)),
+      child: HoverTap(
+        onTap: onTap,
+        color: active ? colors.accentSoft : null,
+        hoverColor: colors.panel3,
         borderRadius: BorderRadius.circular(5),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(5),
-          onTap: onTap,
-          child: SizedBox(
-            width: 28,
-            height: 28,
-            child: Icon(
-              icon,
-              size: 17,
-              color: active ? colors.accentText : colors.text3,
-            ),
+        child: SizedBox(
+          width: 28,
+          height: 28,
+          child: Icon(
+            icon,
+            size: 17,
+            color: active ? colors.accentText : colors.text3,
           ),
         ),
       ),

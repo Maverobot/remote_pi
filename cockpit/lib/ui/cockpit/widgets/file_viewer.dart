@@ -5,8 +5,10 @@ import 'package:cockpit/ui/cockpit/widgets/agent_markdown.dart';
 import 'package:cockpit/ui/cockpit/widgets/code_highlight.dart';
 import 'package:cockpit/ui/cockpit/widgets/media_view.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+// SelectionArea (Material) envolve o scroll do markdown → seleção + auto-scroll.
+import 'package:flutter/material.dart' show SelectionArea;
 import 'package:flutter_svg/flutter_svg.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Corpo do viewer read-only: markdown (gpt_markdown), texto, imagem ou A/V.
 class FileViewer extends StatelessWidget {
@@ -23,7 +25,9 @@ class FileViewer extends StatelessWidget {
     return ColoredBox(
       color: colors.panel,
       child: switch (view) {
-        FileViewMarkdown(:final text) => _Scroll(child: AgentMarkdown(text)),
+        FileViewMarkdown(:final text) => SelectionArea(
+          child: _Scroll(child: AgentMarkdown(text)),
+        ),
         FileViewText(:final text, :final language) => _TextView(
           text: text,
           language: language,

@@ -21,11 +21,8 @@ final class LeafPane extends PaneNode {
   final List<String> tabs;
   final String active;
 
-  LeafPane copyWith({List<String>? tabs, String? active}) => LeafPane(
-    id: id,
-    tabs: tabs ?? this.tabs,
-    active: active ?? this.active,
-  );
+  LeafPane copyWith({List<String>? tabs, String? active}) =>
+      LeafPane(id: id, tabs: tabs ?? this.tabs, active: active ?? this.active);
 }
 
 /// Split: divide [a] e [b] na proporção [frac] (0..1) na direção [dir].
@@ -116,12 +113,13 @@ LeafPane? findLeaf(PaneNode node, String id) {
 PaneNode setFrac(PaneNode node, String splitId, double frac) {
   return switch (node) {
     LeafPane() => node,
-    SplitPane() => node.id == splitId
-        ? node.copyWith(frac: frac)
-        : node.copyWith(
-            a: setFrac(node.a, splitId, frac),
-            b: setFrac(node.b, splitId, frac),
-          ),
+    SplitPane() =>
+      node.id == splitId
+          ? node.copyWith(frac: frac)
+          : node.copyWith(
+              a: setFrac(node.a, splitId, frac),
+              b: setFrac(node.b, splitId, frac),
+            ),
   };
 }
 
@@ -152,15 +150,16 @@ PaneNode splitLeaf(
   bool before = false,
 }) {
   return switch (node) {
-    LeafPane() => node.id == id
-        ? SplitPane(
-            id: splitId ?? 'sp_${id}_$dir',
-            dir: dir,
-            a: before ? newLeaf : node,
-            b: before ? node : newLeaf,
-            frac: 0.5,
-          )
-        : node,
+    LeafPane() =>
+      node.id == id
+          ? SplitPane(
+              id: splitId ?? 'sp_${id}_$dir',
+              dir: dir,
+              a: before ? newLeaf : node,
+              b: before ? node : newLeaf,
+              frac: 0.5,
+            )
+          : node,
     SplitPane() => node.copyWith(
       a: splitLeaf(node.a, id, dir, newLeaf, splitId: splitId, before: before),
       b: splitLeaf(node.b, id, dir, newLeaf, splitId: splitId, before: before),

@@ -1,6 +1,7 @@
 import 'package:cockpit/domain/entities/pi_model.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Seletor de modelo com busca (o catálogo tem centenas). Devolve o [PiModel]
 /// escolhido, ou `null` se cancelar.
@@ -11,6 +12,7 @@ Future<PiModel?> showModelPicker(
 }) {
   return showDialog<PiModel>(
     context: context,
+    barrierColor: const Color(0x99000000),
     builder: (context) => _ModelPicker(models: models, current: current),
   );
 }
@@ -41,104 +43,73 @@ class _ModelPickerState extends State<_ModelPicker> {
         )
         .toList();
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: colors.border2),
-      ),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 460, maxHeight: 520),
+    return AlertDialog(
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 460, maxHeight: 460),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-              child: TextField(
-                autofocus: true,
-                style: context.typo.body.copyWith(color: colors.text),
-                onChanged: (v) => setState(() => _query = v),
-                decoration: InputDecoration(
-                  isDense: true,
-                  prefixIcon: Icon(Icons.search, size: 18, color: colors.text3),
-                  hintText: 'Search model (${widget.models.length})',
-                  hintStyle: context.typo.body.copyWith(color: colors.text3),
-                  filled: true,
-                  fillColor: colors.panel2,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(color: colors.border),
-                  ),
-                  enabledBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(color: colors.border),
-                  ),
-                  focusedBorder: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(7),
-                    borderSide: BorderSide(color: colors.accent),
-                  ),
-                ),
-              ),
+            TextField(
+              autofocus: true,
+              style: context.typo.body.copyWith(color: colors.text),
+              onChanged: (v) => setState(() => _query = v),
+              placeholder: Text('Search model (${widget.models.length})'),
+              borderRadius: BorderRadius.circular(7),
+              features: const [InputFeature.leading(Icon(Icons.search))],
             ),
+            const SizedBox(height: 8),
             Flexible(
               child: ListView.builder(
                 shrinkWrap: true,
-                padding: const EdgeInsets.symmetric(horizontal: 8),
                 itemCount: filtered.length,
                 itemBuilder: (context, index) {
                   final model = filtered[index];
                   final selected = model == widget.current;
-                  return Material(
-                    color: Colors.transparent,
+                  return HoverTap(
+                    onTap: () => Navigator.of(context).pop(model),
                     borderRadius: BorderRadius.circular(6),
-                    child: InkWell(
-                      borderRadius: BorderRadius.circular(6),
-                      onTap: () => Navigator.of(context).pop(model),
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 9,
-                          vertical: 8,
-                        ),
-                        child: Row(
-                          children: [
-                            if (model.reasoning)
-                              Icon(
-                                Icons.psychology_outlined,
-                                size: 14,
-                                color: colors.accentText,
-                              )
-                            else
-                              const SizedBox(width: 14),
-                            const SizedBox(width: 9),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    model.name,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: context.typo.body.copyWith(
-                                      fontSize: 13,
-                                      color: selected
-                                          ? colors.accentText
-                                          : colors.text,
-                                    ),
-                                  ),
-                                  Text(
-                                    model.provider,
-                                    style: context.typo.mono.copyWith(
-                                      fontSize: 10.5,
-                                      color: colors.text3,
-                                    ),
-                                  ),
-                                ],
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 9,
+                      vertical: 8,
+                    ),
+                    child: Row(
+                      children: [
+                        if (model.reasoning)
+                          Icon(
+                            Icons.psychology_outlined,
+                            size: 14,
+                            color: colors.accentText,
+                          )
+                        else
+                          const SizedBox(width: 14),
+                        const SizedBox(width: 9),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                model.name,
+                                overflow: TextOverflow.ellipsis,
+                                style: context.typo.body.copyWith(
+                                  fontSize: 13,
+                                  color: selected
+                                      ? colors.accentText
+                                      : colors.text,
+                                ),
                               ),
-                            ),
-                            if (selected)
-                              Icon(Icons.check, size: 15, color: colors.accent),
-                          ],
+                              Text(
+                                model.provider,
+                                style: context.typo.mono.copyWith(
+                                  fontSize: 10.5,
+                                  color: colors.text3,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
+                        if (selected)
+                          Icon(Icons.check, size: 15, color: colors.accent),
+                      ],
                     ),
                   );
                 },

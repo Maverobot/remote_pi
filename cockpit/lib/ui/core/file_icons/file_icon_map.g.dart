@@ -5379,4 +5379,3 @@ const Map<String, String> kFolderOpenIcons = {
   "zeabur": "folder-zeabur-open",
   "zed": "folder-zed-open",
 };
-

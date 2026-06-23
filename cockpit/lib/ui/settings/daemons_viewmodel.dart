@@ -18,7 +18,8 @@ class DaemonsViewModel extends ChangeNotifier {
   bool online = false;
   List<DaemonInfo> daemons = const <DaemonInfo>[];
   String? error; // falha ao listar
-  String? actionError; // falha da última ação (start/stop/restart/remove/create)
+  String?
+  actionError; // falha da última ação (start/stop/restart/remove/create)
 
   final Set<String> _busy = <String>{}; // ids com ação em andamento
   bool busyAll = false; // ação global em andamento
@@ -66,7 +67,8 @@ class DaemonsViewModel extends ChangeNotifier {
   Future<void> start(String id) => _action(id, () => _supervisor.start(id));
   Future<void> stop(String id) => _action(id, () => _supervisor.stop(id));
   Future<void> restart(String id) => _action(id, () => _supervisor.restart(id));
-  Future<void> remove(String id) => _action(id, () => _supervisor.unregister(id));
+  Future<void> remove(String id) =>
+      _action(id, () => _supervisor.unregister(id));
 
   Future<void> startAll() => _globalAction(_supervisor.startAll);
   Future<void> stopAll() => _globalAction(_supervisor.stopAll);

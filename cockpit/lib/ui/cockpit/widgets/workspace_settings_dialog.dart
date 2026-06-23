@@ -2,8 +2,9 @@ import 'dart:io';
 
 import 'package:cockpit/ui/cockpit/widgets/workspace_avatar.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 // DEBUG temporário: marcadores síncronos pra localizar o segfault no Windows ARM.
 void _trace(String m) {
@@ -39,6 +40,7 @@ showWorkspaceSettingsDialog(
 }) {
   return showDialog<({String name, int colorValue, String? imagePath})>(
     context: context,
+    barrierColor: const Color(0x99000000),
     builder: (context) => _WorkspaceSettingsDialog(
       name: name,
       colorValue: colorValue,
@@ -125,164 +127,115 @@ class _WorkspaceSettingsDialogState extends State<_WorkspaceSettingsDialog> {
         ? '?'
         : _name.text.trim()[0].toUpperCase();
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
-        side: BorderSide(color: colors.border2),
+    return AlertDialog(
+      title: Text(
+        'Workspace settings',
+        style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
       ),
-      child: ConstrainedBox(
+      content: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 420),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 18, 20, 14),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                'Workspace settings',
-                style: context.typo.title.copyWith(
-                  fontSize: 15,
-                  color: colors.text,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                WorkspaceAvatar(
+                  imagePath: _imagePath,
+                  colorValue: _color,
+                  initial: initial,
+                  size: 40,
+                  radius: 9,
                 ),
-              ),
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  WorkspaceAvatar(
-                    imagePath: _imagePath,
-                    colorValue: _color,
-                    initial: initial,
-                    size: 40,
-                    radius: 9,
-                  ),
-                  const SizedBox(width: 14),
-                  Expanded(
-                    child: TextField(
-                      controller: _name,
-                      focusNode: _nameFocus,
-                      onChanged: (_) => setState(() {}),
-                      style: context.typo.body.copyWith(
-                        fontSize: 14,
-                        color: colors.text,
-                      ),
-                      decoration: InputDecoration(
-                        isDense: true,
-                        hintText: 'Workspace name',
-                        hintStyle: context.typo.body.copyWith(
-                          color: colors.text3,
-                        ),
-                        filled: true,
-                        fillColor: colors.panel2,
-                        contentPadding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(7),
-                          borderSide: BorderSide(color: colors.border),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(7),
-                          borderSide: BorderSide(color: colors.border),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(7),
-                          borderSide: BorderSide(color: colors.accent),
-                        ),
-                      ),
+                const SizedBox(width: 14),
+                Expanded(
+                  child: TextField(
+                    controller: _name,
+                    focusNode: _nameFocus,
+                    onChanged: (_) => setState(() {}),
+                    placeholder: const Text('Workspace name'),
+                    style: context.typo.body.copyWith(
+                      fontSize: 14,
+                      color: colors.text,
                     ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  _PhotoButton(
-                    icon: Icons.image_outlined,
-                    label: _imagePath == null ? 'Add photo' : 'Change photo',
-                    onTap: _pickImage,
-                  ),
-                  if (_imagePath != null) ...[
-                    const SizedBox(width: 8),
-                    _PhotoButton(
-                      icon: Icons.delete_outline,
-                      label: 'Remove',
-                      danger: true,
-                      onTap: () => setState(() => _imagePath = null),
-                    ),
-                  ],
-                ],
-              ),
-              const SizedBox(height: 18),
-              Text(
-                'Color',
-                style: context.typo.label.copyWith(color: colors.text2),
-              ),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 10,
-                runSpacing: 10,
-                children: [
-                  for (final swatch in kWorkspacePalette)
-                    _Swatch(
-                      color: swatch,
-                      selected: swatch == _color,
-                      onTap: () => setState(() => _color = swatch),
-                    ),
-                ],
-              ),
-              const SizedBox(height: 18),
-              Text(
-                'Folder',
-                style: context.typo.label.copyWith(color: colors.text2),
-              ),
-              const SizedBox(height: 6),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 9,
-                ),
-                decoration: BoxDecoration(
-                  color: colors.panel2,
-                  borderRadius: BorderRadius.circular(7),
-                  border: Border.all(color: colors.border),
-                ),
-                child: Text(
-                  widget.path,
-                  style: context.typo.mono.copyWith(
-                    fontSize: 12,
-                    color: colors.text2,
+                    borderRadius: BorderRadius.circular(7),
                   ),
                 ),
-              ),
-              const SizedBox(height: 20),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  TextButton(
-                    onPressed: () {
-                      _trace('cancel:before-pop');
-                      Navigator.of(context).pop();
-                      _trace('cancel:after-pop');
-                    },
-                    child: const Text('Cancel'),
-                  ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: [
+                _PhotoButton(
+                  icon: Icons.image_outlined,
+                  label: _imagePath == null ? 'Add photo' : 'Change photo',
+                  onTap: _pickImage,
+                ),
+                if (_imagePath != null) ...[
                   const SizedBox(width: 8),
-                  FilledButton(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: colors.accent,
-                    ),
-                    onPressed: _save,
-                    child: const Text('Save'),
+                  _PhotoButton(
+                    icon: Icons.delete_outline,
+                    label: 'Remove',
+                    danger: true,
+                    onTap: () => setState(() => _imagePath = null),
                   ),
                 ],
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Color',
+              style: context.typo.label.copyWith(color: colors.text2),
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                for (final swatch in kWorkspacePalette)
+                  _Swatch(
+                    color: swatch,
+                    selected: swatch == _color,
+                    onTap: () => setState(() => _color = swatch),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 18),
+            Text(
+              'Folder',
+              style: context.typo.label.copyWith(color: colors.text2),
+            ),
+            const SizedBox(height: 6),
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+              decoration: BoxDecoration(
+                color: colors.panel2,
+                borderRadius: BorderRadius.circular(7),
+                border: Border.all(color: colors.border),
               ),
-            ],
-          ),
+              child: Text(
+                widget.path,
+                style: context.typo.mono.copyWith(
+                  fontSize: 12,
+                  color: colors.text2,
+                ),
+              ),
+            ),
+          ],
         ),
       ),
+      actions: [
+        OutlineButton(
+          onPressed: () {
+            _trace('cancel:before-pop');
+            Navigator.of(context).pop();
+            _trace('cancel:after-pop');
+          },
+          child: const Text('Cancel'),
+        ),
+        PrimaryButton(onPressed: _save, child: const Text('Save')),
+      ],
     );
   }
 }
@@ -338,23 +291,18 @@ class _PhotoButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final fg = danger ? colors.error : colors.text2;
-    return Material(
+    return HoverTap(
+      onTap: onTap,
       color: colors.panel2,
-      borderRadius: BorderRadius.circular(7),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(7),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(icon, size: 15, color: fg),
-              const SizedBox(width: 7),
-              Text(label, style: context.typo.label.copyWith(color: fg)),
-            ],
-          ),
-        ),
+      hoverColor: colors.panel3,
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: fg),
+          const SizedBox(width: 7),
+          Text(label, style: context.typo.label.copyWith(color: fg)),
+        ],
       ),
     );
   }

@@ -13,15 +13,31 @@ class FileSearcherImpl implements FileSearcher {
 
   /// Pastas ruidosas/pesadas que não entram no índice (além de qualquer `.dir`).
   static const Set<String> _ignored = <String>{
-    'node_modules', 'build', '.dart_tool', '.next', 'dist', 'out',
-    'Pods', 'DerivedData', '.gradle', '.venv', 'venv', '__pycache__',
-    'target', 'vendor', 'coverage',
+    'node_modules',
+    'build',
+    '.dart_tool',
+    '.next',
+    'dist',
+    'out',
+    'Pods',
+    'DerivedData',
+    '.gradle',
+    '.venv',
+    'venv',
+    '__pycache__',
+    'target',
+    'vendor',
+    'coverage',
   };
 
   final Map<String, _Cache> _cache = <String, _Cache>{};
 
   @override
-  Future<List<String>> search(String root, String query, {int limit = 12}) async {
+  Future<List<String>> search(
+    String root,
+    String query, {
+    int limit = 12,
+  }) async {
     final files = await _files(root);
     final q = query.trim().toLowerCase();
     if (q.isEmpty) return files.take(limit).toList();

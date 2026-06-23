@@ -38,7 +38,7 @@ GoRouter buildRouter() {
         ),
       ),
       // Tela cheia de Configurações (push) com transição em **fade**. O
-      // SettingsController já está provido acima do MaterialApp, então a página
+      // SettingsController já está provido acima do ShadcnApp, então a página
       // o consome direto.
       GoRoute(
         path: RoutePaths.settings,

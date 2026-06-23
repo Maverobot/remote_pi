@@ -17,10 +17,11 @@ import 'package:cockpit/ui/settings/revoke_controller.dart';
 import 'package:cockpit/ui/settings/revoke_dialog.dart';
 import 'package:cockpit/ui/settings/settings_controller.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Tela cheia de Configurações (push). Categorias à esquerda (Aparência ·
 /// Conectividade) e o conteúdo à direita. Por ora só **Aparência** está
@@ -42,7 +43,7 @@ class _SettingsPageState extends State<SettingsPage> {
     final colors = context.colors;
     return Scaffold(
       backgroundColor: colors.bg,
-      body: Column(
+      child: Column(
         children: [
           const _SettingsHeader(),
           Expanded(
@@ -82,28 +83,21 @@ class _SettingsHeader extends StatelessWidget {
         const WindowControls(),
         const SizedBox(width: 14),
         Tooltip(
-          message: 'Back',
-          child: InkWell(
+          tooltip: (context) => const TooltipContainer(child: Text('Back')),
+          child: HoverTap(
             borderRadius: BorderRadius.circular(6),
             onTap: () => context.pop(),
             child: SizedBox(
               width: 30,
               height: 30,
-              child: Icon(
-                Icons.arrow_back,
-                size: 18,
-                color: colors.text2,
-              ),
+              child: Icon(Icons.arrow_back, size: 18, color: colors.text2),
             ),
           ),
         ),
         const SizedBox(width: 8),
         Text(
           'Settings',
-          style: context.typo.title.copyWith(
-            fontSize: 14,
-            color: colors.text,
-          ),
+          style: context.typo.title.copyWith(fontSize: 14, color: colors.text),
         ),
         const Spacer(),
         const WindowControlsTrailing(),
@@ -179,33 +173,28 @@ class _NavItem extends StatelessWidget {
     final colors = context.colors;
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
-      child: Material(
+      child: HoverTap(
         color: selected ? colors.panel2 : Colors.transparent,
         borderRadius: BorderRadius.circular(7),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(7),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
-            child: Row(
-              children: [
-                Icon(
-                  icon,
-                  size: 16,
-                  color: selected ? colors.accentText : colors.text3,
-                ),
-                const SizedBox(width: 10),
-                Text(
-                  label,
-                  style: context.typo.body.copyWith(
-                    fontSize: 13.5,
-                    color: selected ? colors.text : colors.text2,
-                    fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
-                  ),
-                ),
-              ],
+        onTap: onTap,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+        child: Row(
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: selected ? colors.accentText : colors.text3,
             ),
-          ),
+            const SizedBox(width: 10),
+            Text(
+              label,
+              style: context.typo.body.copyWith(
+                fontSize: 13.5,
+                color: selected ? colors.text : colors.text2,
+                fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
+              ),
+            ),
+          ],
         ),
       ),
     );
@@ -270,8 +259,7 @@ class _AppearancePanel extends StatelessWidget {
                     ),
                     _Row(
                       title: 'Code font',
-                      description:
-                          'Code and diffs. Empty = system default.',
+                      description: 'Code and diffs. Empty = system default.',
                       trailing: _FontField(
                         value: s.codeFont,
                         hint: 'JetBrains Mono',
@@ -332,9 +320,8 @@ class _AppearancePanel extends StatelessWidget {
                       description:
                           'The question stays fixed at the top while the answer '
                           'scrolls.',
-                      trailing: Switch.adaptive(
+                      trailing: Switch(
                         value: s.pinUserMessage,
-                        activeTrackColor: context.colors.accent,
                         onChanged: controller.setPinUserMessage,
                       ),
                     ),
@@ -384,9 +371,7 @@ class _SyntaxPreview extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: context.colors.border),
       ),
-      child: span == null
-          ? Text(_sample, style: base)
-          : Text.rich(span),
+      child: span == null ? Text(_sample, style: base) : Text.rich(span),
     );
   }
 }
@@ -457,11 +442,7 @@ class _Card extends StatelessWidget {
 }
 
 class _Row extends StatelessWidget {
-  const _Row({
-    required this.title,
-    required this.trailing,
-    this.description,
-  });
+  const _Row({required this.title, required this.trailing, this.description});
   final String title;
   final String? description;
   final Widget trailing;
@@ -513,33 +494,25 @@ class _DropdownChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
+    return HoverTap(
       color: colors.panel3,
       borderRadius: BorderRadius.circular(7),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(7),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (icon != null) ...[
-                Icon(icon, size: 14, color: colors.text2),
-                const SizedBox(width: 7),
-              ],
-              Text(
-                label,
-                style: context.typo.body.copyWith(
-                  fontSize: 13,
-                  color: colors.text,
-                ),
-              ),
-              const SizedBox(width: 6),
-              Icon(Icons.keyboard_arrow_down, size: 16, color: colors.text3),
-            ],
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 8),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (icon != null) ...[
+            Icon(icon, size: 14, color: colors.text2),
+            const SizedBox(width: 7),
+          ],
+          Text(
+            label,
+            style: context.typo.body.copyWith(fontSize: 13, color: colors.text),
           ),
-        ),
+          const SizedBox(width: 6),
+          Icon(Icons.keyboard_arrow_down, size: 16, color: colors.text3),
+        ],
       ),
     );
   }
@@ -551,7 +524,10 @@ class _ThemeDropdown extends StatelessWidget {
   final ValueChanged<AppThemeMode> onChanged;
 
   static const _meta = <AppThemeMode, ({String label, IconData icon})>{
-    AppThemeMode.system: (label: 'System', icon: Icons.desktop_windows_outlined),
+    AppThemeMode.system: (
+      label: 'System',
+      icon: Icons.desktop_windows_outlined,
+    ),
     AppThemeMode.light: (label: 'Light', icon: Icons.light_mode_outlined),
     AppThemeMode.dark: (label: 'Dark', icon: Icons.dark_mode_outlined),
   };
@@ -655,32 +631,8 @@ class _FontFieldState extends State<_FontField> {
         controller: _ctrl,
         onChanged: (v) => widget.onChanged(v.trim().isEmpty ? null : v.trim()),
         style: context.typo.body.copyWith(fontSize: 13, color: colors.text),
-        decoration: InputDecoration(
-          isDense: true,
-          hintText: widget.hint,
-          hintStyle: context.typo.body.copyWith(
-            fontSize: 13,
-            color: colors.text3,
-          ),
-          filled: true,
-          fillColor: colors.panel3,
-          contentPadding: const EdgeInsets.symmetric(
-            horizontal: 11,
-            vertical: 9,
-          ),
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(7),
-            borderSide: BorderSide(color: colors.border),
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(7),
-            borderSide: BorderSide(color: colors.border),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(7),
-            borderSide: BorderSide(color: colors.accent),
-          ),
-        ),
+        placeholder: Text(widget.hint),
+        borderRadius: BorderRadius.circular(7),
       ),
     );
   }
@@ -734,7 +686,7 @@ class _SizeStepper extends StatelessWidget {
   }
 
   Widget _btn(BuildContext context, IconData icon, VoidCallback onTap) {
-    return InkWell(
+    return HoverTap(
       borderRadius: BorderRadius.circular(7),
       onTap: onTap,
       child: SizedBox(
@@ -792,8 +744,8 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
 
     final confirmed = await showDialog<bool>(
       context: context,
+      barrierColor: const Color(0x99000000),
       builder: (ctx) => AlertDialog(
-        backgroundColor: colors.panel2,
         title: Text(
           'Revoke device?',
           style: ctx.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -805,14 +757,14 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
           style: ctx.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
         ),
         actions: [
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: Text(
               'Cancel',
               style: ctx.typo.body.copyWith(fontSize: 13, color: colors.text2),
             ),
           ),
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               'Revoke',
@@ -888,13 +840,10 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2,
-                color: colors.text3,
-              ),
+            CircularProgressIndicator(
+              size: 16,
+              strokeWidth: 2,
+              color: colors.text3,
             ),
             const SizedBox(width: 10),
             Text(
@@ -913,7 +862,10 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
       return _MessageCard(
         child: Text(
           vm.devicesError ?? 'Failed to list devices.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.error),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.error,
+          ),
         ),
       );
     }
@@ -922,7 +874,10 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
       return _MessageCard(
         child: Text(
           'No paired devices.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text3,
+          ),
         ),
       );
     }
@@ -930,10 +885,7 @@ class _ConnectivityPanelState extends State<_ConnectivityPanel> {
     return _Card(
       children: [
         for (final device in vm.devices)
-          _DeviceTile(
-            device: device,
-            onRevoke: () => _confirmRevoke(device),
-          ),
+          _DeviceTile(device: device, onRevoke: () => _confirmRevoke(device)),
       ],
     );
   }
@@ -991,11 +943,6 @@ class _RelayEditorState extends State<_RelayEditor> {
     final canSave =
         !vm.savingRelay && value.isNotEmpty && value != (vm.relayUrl ?? '');
 
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(7),
-      borderSide: BorderSide(color: c),
-    );
-
     return Padding(
       padding: const EdgeInsets.all(16),
       child: Column(
@@ -1003,7 +950,10 @@ class _RelayEditorState extends State<_RelayEditor> {
         children: [
           Text(
             'Relay address',
-            style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text),
+            style: context.typo.body.copyWith(
+              fontSize: 13.5,
+              color: colors.text,
+            ),
           ),
           const SizedBox(height: 3),
           Text(
@@ -1028,36 +978,12 @@ class _RelayEditorState extends State<_RelayEditor> {
                     fontSize: 12.5,
                     color: colors.text,
                   ),
-                  decoration: InputDecoration(
-                    isDense: true,
-                    hintText: 'https://relay.example.com',
-                    hintStyle: context.typo.mono.copyWith(
-                      fontSize: 12.5,
-                      color: colors.text3,
-                    ),
-                    filled: true,
-                    fillColor: colors.panel3,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 11,
-                      vertical: 11,
-                    ),
-                    border: border(colors.border),
-                    enabledBorder: border(colors.border),
-                    focusedBorder: border(colors.accent),
-                  ),
+                  placeholder: const Text('https://relay.example.com'),
+                  borderRadius: BorderRadius.circular(7),
                 ),
               ),
               const SizedBox(width: 8),
-              FilledButton(
-                style: FilledButton.styleFrom(
-                  backgroundColor: colors.accent,
-                  disabledBackgroundColor: colors.panel3,
-                  disabledForegroundColor: colors.text4,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 18,
-                    vertical: 14,
-                  ),
-                ),
+              PrimaryButton(
                 onPressed: canSave ? () => _save() : null,
                 child: Text(vm.savingRelay ? 'Saving…' : 'Save'),
               ),
@@ -1073,20 +999,12 @@ class _RelayEditorState extends State<_RelayEditor> {
           const SizedBox(height: 12),
           Row(
             children: [
-              OutlinedButton.icon(
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: colors.text2,
-                  side: BorderSide(color: colors.border2),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 14,
-                    vertical: 10,
-                  ),
-                ),
+              OutlineButton(
                 onPressed: vm.healthState == HealthState.checking
                     ? null
                     : () => vm.checkRelay(_ctrl.text),
-                icon: const Icon(Icons.wifi_tethering, size: 15),
-                label: const Text('Check'),
+                leading: const Icon(Icons.wifi_tethering, size: 15),
+                child: const Text('Check'),
               ),
               const SizedBox(width: 12),
               Expanded(child: _HealthIndicator(vm: vm)),
@@ -1110,10 +1028,10 @@ class _HealthIndicator extends StatelessWidget {
     if (vm.healthState == HealthState.checking) {
       return Row(
         children: [
-          SizedBox(
-            width: 13,
-            height: 13,
-            child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+          CircularProgressIndicator(
+            size: 13,
+            strokeWidth: 2,
+            color: colors.text3,
           ),
           const SizedBox(width: 8),
           Text(
@@ -1195,8 +1113,8 @@ class _DeviceTile extends StatelessWidget {
           ),
           const SizedBox(width: 12),
           Tooltip(
-            message: 'Revoke',
-            child: InkWell(
+            tooltip: (context) => const TooltipContainer(child: Text('Revoke')),
+            child: HoverTap(
               borderRadius: BorderRadius.circular(6),
               onTap: onRevoke,
               child: SizedBox(
@@ -1222,8 +1140,8 @@ class _ReloadButton extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return Tooltip(
-      message: 'Reload',
-      child: InkWell(
+      tooltip: (context) => const TooltipContainer(child: Text('Reload')),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(6),
         onTap: busy ? null : () => onTap(),
         child: SizedBox(
@@ -1233,6 +1151,7 @@ class _ReloadButton extends StatelessWidget {
               ? Padding(
                   padding: const EdgeInsets.all(4),
                   child: CircularProgressIndicator(
+                    size: 14,
                     strokeWidth: 2,
                     color: colors.text3,
                   ),
@@ -1275,30 +1194,25 @@ class _PairButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
+    return HoverTap(
       color: colors.accentSoft,
       borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(Icons.qr_code_2, size: 17, color: colors.accentText),
-              const SizedBox(width: 8),
-              Text(
-                'Pair new device',
-                style: context.typo.body.copyWith(
-                  fontSize: 13.5,
-                  color: colors.accentText,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-            ],
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.qr_code_2, size: 17, color: colors.accentText),
+          const SizedBox(width: 8),
+          Text(
+            'Pair new device',
+            style: context.typo.body.copyWith(
+              fontSize: 13.5,
+              color: colors.accentText,
+              fontWeight: FontWeight.w600,
+            ),
           ),
-        ),
+        ],
       ),
     );
   }
@@ -1368,8 +1282,8 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
     final colors = context.colors;
     final confirmed = await showDialog<bool>(
       context: context,
+      barrierColor: const Color(0x99000000),
       builder: (ctx) => AlertDialog(
-        backgroundColor: colors.panel2,
         title: Text(
           'Remove schedule?',
           style: ctx.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -1380,14 +1294,14 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
           style: ctx.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
         ),
         actions: [
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: Text(
               'Cancel',
               style: ctx.typo.body.copyWith(fontSize: 13, color: colors.text2),
             ),
           ),
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               'Remove',
@@ -1444,16 +1358,10 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
     final colors = context.colors;
     return Row(
       children: [
-        FilledButton.icon(
-          style: FilledButton.styleFrom(
-            backgroundColor: colors.accent,
-            disabledBackgroundColor: colors.panel3,
-            disabledForegroundColor: colors.text4,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          ),
+        PrimaryButton(
           onPressed: vm.hasDaemons ? () => _openEditor() : null,
-          icon: const Icon(Icons.add, size: 16),
-          label: const Text('Create schedule'),
+          leading: const Icon(Icons.add, size: 16),
+          child: const Text('Create schedule'),
         ),
         if (!vm.hasDaemons) ...[
           const SizedBox(width: 12),
@@ -1476,7 +1384,10 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
         child: Text(
           'Supervisor offline. Schedules need pi-supervisord running '
           '(`remote-pi install`).',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text3,
+          ),
         ),
       );
     }
@@ -1485,15 +1396,18 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+            CircularProgressIndicator(
+              size: 16,
+              strokeWidth: 2,
+              color: colors.text3,
             ),
             const SizedBox(width: 10),
             Text(
               'Loading…',
-              style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+              style: context.typo.body.copyWith(
+                fontSize: 13.5,
+                color: colors.text3,
+              ),
             ),
           ],
         ),
@@ -1503,7 +1417,10 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
       return _MessageCard(
         child: Text(
           vm.error ?? 'Failed to list schedules.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.error),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.error,
+          ),
         ),
       );
     }
@@ -1511,7 +1428,10 @@ class _AgendamentosPanelState extends State<_AgendamentosPanel> {
       return _MessageCard(
         child: Text(
           'No schedules. Create a recurring prompt for a daemon.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text3,
+          ),
         ),
       );
     }
@@ -1605,17 +1525,13 @@ class _CronTile extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           if (busy)
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+            CircularProgressIndicator(
+              size: 16,
+              strokeWidth: 2,
+              color: colors.text3,
             )
           else ...[
-            Switch.adaptive(
-              value: job.enabled,
-              activeTrackColor: colors.accent,
-              onChanged: onToggle,
-            ),
+            Switch(value: job.enabled, onChanged: onToggle),
             _cronAct(context, Icons.play_arrow, 'Run now', onRun),
             _cronAct(context, Icons.history, 'View log', onLog),
             _cronAct(context, Icons.delete_outline, 'Remove', onRemove),
@@ -1632,8 +1548,8 @@ class _CronTile extends StatelessWidget {
     Future<void> Function() onTap,
   ) {
     return Tooltip(
-      message: tip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(6),
         onTap: () => onTap(),
         child: SizedBox(
@@ -1657,29 +1573,37 @@ class _CronMeta extends StatelessWidget {
     final children = <Widget>[];
 
     if (!job.enabled) {
-      children.add(Text(
-        'disabled',
-        style: context.typo.label.copyWith(color: colors.text4),
-      ));
+      children.add(
+        Text(
+          'disabled',
+          style: context.typo.label.copyWith(color: colors.text4),
+        ),
+      );
     } else if (job.nextRun != null) {
-      children.add(Text(
-        'next ${_fmtIso(job.nextRun)}',
-        style: context.typo.label.copyWith(color: colors.text3),
-      ));
+      children.add(
+        Text(
+          'next ${_fmtIso(job.nextRun)}',
+          style: context.typo.label.copyWith(color: colors.text3),
+        ),
+      );
     }
 
     if (job.lastStatus != null) {
-      final (color, label) = _cronResultView(context, cronResultFromWire(job.lastStatus));
+      final (color, label) = _cronResultView(
+        context,
+        cronResultFromWire(job.lastStatus),
+      );
       if (children.isNotEmpty) {
-        children.add(Text(
-          '  ·  ',
-          style: context.typo.label.copyWith(color: colors.text4),
-        ));
+        children.add(
+          Text(
+            '  ·  ',
+            style: context.typo.label.copyWith(color: colors.text4),
+          ),
+        );
       }
-      children.add(Text(
-        'last: $label',
-        style: context.typo.label.copyWith(color: color),
-      ));
+      children.add(
+        Text('last: $label', style: context.typo.label.copyWith(color: color)),
+      );
     }
 
     if (children.isEmpty) return const SizedBox.shrink();
@@ -1777,7 +1701,6 @@ class _CronEditorDialogState extends State<_CronEditorDialog> {
     final vm = widget.vm;
 
     return AlertDialog(
-      backgroundColor: colors.panel2,
       title: Text(
         'New schedule',
         style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -1887,14 +1810,17 @@ class _CronEditorDialogState extends State<_CronEditorDialog> {
         ),
       ),
       actions: [
-        TextButton(
+        GhostButton(
           onPressed: _saving ? null : () => Navigator.of(context).pop(),
           child: Text(
             'Cancel',
-            style: context.typo.body.copyWith(fontSize: 13, color: colors.text2),
+            style: context.typo.body.copyWith(
+              fontSize: 13,
+              color: colors.text2,
+            ),
           ),
         ),
-        TextButton(
+        GhostButton(
           onPressed: _saving ? null : _submit,
           child: Text(
             _saving ? 'Creating…' : 'Create',
@@ -1925,25 +1851,12 @@ class _CronEditorDialogState extends State<_CronEditorDialog> {
     final style = mono
         ? context.typo.mono.copyWith(fontSize: 12.5, color: colors.text)
         : context.typo.body.copyWith(fontSize: 13.5, color: colors.text);
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(7),
-      borderSide: BorderSide(color: c),
-    );
     return TextField(
       controller: controller,
       maxLines: maxLines,
       style: style,
-      decoration: InputDecoration(
-        isDense: true,
-        hintText: hint,
-        hintStyle: style.copyWith(color: colors.text3),
-        filled: true,
-        fillColor: colors.panel3,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-        border: border(colors.border),
-        enabledBorder: border(colors.border),
-        focusedBorder: border(colors.accent),
-      ),
+      placeholder: Text(hint),
+      borderRadius: BorderRadius.circular(7),
     );
   }
 }
@@ -1961,19 +1874,14 @@ class _ExampleChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
+    return HoverTap(
       color: colors.panel3,
       borderRadius: BorderRadius.circular(6),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(6),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-          child: Text(
-            label,
-            style: context.typo.label.copyWith(color: colors.text2),
-          ),
-        ),
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      child: Text(
+        label,
+        style: context.typo.label.copyWith(color: colors.text2),
       ),
     );
   }
@@ -1999,14 +1907,13 @@ class _CronOptionSwitch extends StatelessWidget {
           Expanded(
             child: Text(
               label,
-              style: context.typo.body.copyWith(fontSize: 13, color: colors.text2),
+              style: context.typo.body.copyWith(
+                fontSize: 13,
+                color: colors.text2,
+              ),
             ),
           ),
-          Switch.adaptive(
-            value: value,
-            activeTrackColor: colors.accent,
-            onChanged: onChanged,
-          ),
+          Switch(value: value, onChanged: onChanged),
         ],
       ),
     );
@@ -2039,7 +1946,9 @@ class _CronLogDialogState extends State<_CronLogDialog> {
     if (!mounted) return;
     setState(() {
       _entries = entries;
-      _error = entries == null ? (widget.vm.actionError ?? 'Failed to read the log.') : null;
+      _error = entries == null
+          ? (widget.vm.actionError ?? 'Failed to read the log.')
+          : null;
       _loading = false;
     });
   }
@@ -2048,18 +1957,20 @@ class _CronLogDialogState extends State<_CronLogDialog> {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return AlertDialog(
-      backgroundColor: colors.panel2,
       title: Text(
         'History — ${widget.job.schedule}',
         style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
       ),
       content: SizedBox(width: 460, child: _content(context)),
       actions: [
-        TextButton(
+        GhostButton(
           onPressed: () => Navigator.of(context).pop(),
           child: Text(
             'Close',
-            style: context.typo.body.copyWith(fontSize: 13, color: colors.text2),
+            style: context.typo.body.copyWith(
+              fontSize: 13,
+              color: colors.text2,
+            ),
           ),
         ),
       ],
@@ -2072,10 +1983,10 @@ class _CronLogDialogState extends State<_CronLogDialog> {
       return Padding(
         padding: const EdgeInsets.symmetric(vertical: 24),
         child: Center(
-          child: SizedBox(
-            width: 22,
-            height: 22,
-            child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+          child: CircularProgressIndicator(
+            size: 22,
+            strokeWidth: 2,
+            color: colors.text3,
           ),
         ),
       );
@@ -2100,8 +2011,7 @@ class _CronLogDialogState extends State<_CronLogDialog> {
       child: ListView.separated(
         shrinkWrap: true,
         itemCount: ordered.length,
-        separatorBuilder: (_, _) =>
-            Divider(height: 1, color: colors.border),
+        separatorBuilder: (_, _) => Divider(height: 1, color: colors.border),
         itemBuilder: (context, i) {
           final e = ordered[i];
           final (color, label) = _cronResultView(context, e.result);
@@ -2114,7 +2024,10 @@ class _CronLogDialogState extends State<_CronLogDialog> {
                   width: 7,
                   height: 7,
                   margin: const EdgeInsets.only(top: 5),
-                  decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+                  decoration: BoxDecoration(
+                    color: color,
+                    shape: BoxShape.circle,
+                  ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
@@ -2145,7 +2058,9 @@ class _CronLogDialogState extends State<_CronLogDialog> {
                           e.promptPreview,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: context.typo.label.copyWith(color: colors.text3),
+                          style: context.typo.label.copyWith(
+                            color: colors.text3,
+                          ),
                         ),
                     ],
                   ),
@@ -2187,8 +2102,7 @@ String _fmtIso(String? iso) {
   return dt == null ? iso : _fmtDateTime(dt);
 }
 
-String _fmtTs(int ms) =>
-    _fmtDateTime(DateTime.fromMillisecondsSinceEpoch(ms));
+String _fmtTs(int ms) => _fmtDateTime(DateTime.fromMillisecondsSinceEpoch(ms));
 
 // ---------------------------------------------------------------------------
 // Daemon Agents
@@ -2251,8 +2165,8 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
     final colors = context.colors;
     final confirmed = await showDialog<bool>(
       context: context,
+      barrierColor: const Color(0x99000000),
       builder: (ctx) => AlertDialog(
-        backgroundColor: colors.panel2,
         title: Text(
           'Restart the supervisor?',
           style: ctx.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -2263,14 +2177,14 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
           style: ctx.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
         ),
         actions: [
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: Text(
               'Cancel',
               style: ctx.typo.body.copyWith(fontSize: 13, color: colors.text2),
             ),
           ),
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               'Restart',
@@ -2293,8 +2207,8 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
     final colors = context.colors;
     final confirmed = await showDialog<bool>(
       context: context,
+      barrierColor: const Color(0x99000000),
       builder: (ctx) => AlertDialog(
-        backgroundColor: colors.panel2,
         title: Text(
           'Remove daemon?',
           style: ctx.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -2305,14 +2219,14 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
           style: ctx.typo.body.copyWith(fontSize: 13.5, color: colors.text2),
         ),
         actions: [
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(false),
             child: Text(
               'Cancel',
               style: ctx.typo.body.copyWith(fontSize: 13, color: colors.text2),
             ),
           ),
-          TextButton(
+          GhostButton(
             onPressed: () => Navigator.of(ctx).pop(true),
             child: Text(
               'Remove',
@@ -2406,15 +2320,18 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+            CircularProgressIndicator(
+              size: 16,
+              strokeWidth: 2,
+              color: colors.text3,
             ),
             const SizedBox(width: 10),
             Text(
               'Loading…',
-              style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+              style: context.typo.body.copyWith(
+                fontSize: 13.5,
+                color: colors.text3,
+              ),
             ),
           ],
         ),
@@ -2425,7 +2342,10 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
       return _MessageCard(
         child: Text(
           vm.error ?? 'Failed to list daemons.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.error),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.error,
+          ),
         ),
       );
     }
@@ -2434,7 +2354,10 @@ class _DaemonsPanelState extends State<_DaemonsPanel> {
       return _MessageCard(
         child: Text(
           'No registered agents. Create one from a folder.',
-          style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text3),
+          style: context.typo.body.copyWith(
+            fontSize: 13.5,
+            color: colors.text3,
+          ),
         ),
       );
     }
@@ -2478,20 +2401,16 @@ class _DaemonActionsBar extends StatelessWidget {
       runSpacing: 8,
       crossAxisAlignment: WrapCrossAlignment.center,
       children: [
-        FilledButton.icon(
-          style: FilledButton.styleFrom(
-            backgroundColor: colors.accent,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-          ),
+        PrimaryButton(
           onPressed: () => onCreate(),
-          icon: const Icon(Icons.add, size: 16),
-          label: const Text('Create daemon'),
+          leading: const Icon(Icons.add, size: 16),
+          child: const Text('Create daemon'),
         ),
         if (vm.busyAll)
-          SizedBox(
-            width: 15,
-            height: 15,
-            child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+          CircularProgressIndicator(
+            size: 15,
+            strokeWidth: 2,
+            color: colors.text3,
           ),
         _FleetButton(
           label: 'Start all',
@@ -2536,18 +2455,12 @@ class _FleetButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    final fg = tint ?? colors.text2;
-    return OutlinedButton.icon(
-      style: OutlinedButton.styleFrom(
-        foregroundColor: fg,
-        disabledForegroundColor: colors.text4,
-        side: BorderSide(color: tint ?? colors.border2),
-        padding: const EdgeInsets.symmetric(horizontal: 11, vertical: 9),
-        visualDensity: VisualDensity.compact,
-      ),
+    final enabled = onTap != null;
+    final fg = enabled ? (tint ?? colors.text2) : colors.text4;
+    return OutlineButton(
       onPressed: onTap == null ? null : () => onTap!(),
-      icon: Icon(icon, size: 14),
-      label: Text(label, style: const TextStyle(fontSize: 12.5)),
+      leading: Icon(icon, size: 14, color: fg),
+      child: Text(label, style: TextStyle(fontSize: 12.5, color: fg)),
     );
   }
 }
@@ -2575,7 +2488,10 @@ class _DaemonTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     final running = daemon.state == DaemonState.running;
-    final (Color dotColor, String stateLabel) = _stateView(context, daemon.state);
+    final (Color dotColor, String stateLabel) = _stateView(
+      context,
+      daemon.state,
+    );
 
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 11),
@@ -2595,24 +2511,30 @@ class _DaemonTile extends StatelessWidget {
               children: [
                 Text(
                   daemon.name.isEmpty ? daemon.id : daemon.name,
-                  style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text),
+                  style: context.typo.body.copyWith(
+                    fontSize: 13.5,
+                    color: colors.text,
+                  ),
                 ),
                 const SizedBox(height: 2),
                 Text(
                   _subtitle(stateLabel),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: context.typo.mono.copyWith(fontSize: 11, color: colors.text3),
+                  style: context.typo.mono.copyWith(
+                    fontSize: 11,
+                    color: colors.text3,
+                  ),
                 ),
               ],
             ),
           ),
           const SizedBox(width: 12),
           if (busy)
-            SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(strokeWidth: 2, color: colors.text3),
+            CircularProgressIndicator(
+              size: 16,
+              strokeWidth: 2,
+              color: colors.text3,
             )
           else
             Row(
@@ -2625,7 +2547,8 @@ class _DaemonTile extends StatelessWidget {
                   running ? 'Stop' : 'Start',
                   running ? onStop : onStart,
                 ),
-                if (running) _act(context, Icons.restart_alt, 'Restart', onRestart),
+                if (running)
+                  _act(context, Icons.restart_alt, 'Restart', onRestart),
                 _act(context, Icons.edit_outlined, 'Edit', onEdit),
                 _act(context, Icons.delete_outline, 'Remove', onRemove),
               ],
@@ -2638,7 +2561,9 @@ class _DaemonTile extends StatelessWidget {
   String _subtitle(String stateLabel) {
     final parts = <String>[stateLabel];
     if (daemon.pid != null) parts.add('pid ${daemon.pid}');
-    if (daemon.uptimeSeconds != null) parts.add(_fmtUptime(daemon.uptimeSeconds!));
+    if (daemon.uptimeSeconds != null) {
+      parts.add(_fmtUptime(daemon.uptimeSeconds!));
+    }
     if ((daemon.restartCount ?? 0) > 0) parts.add('↻${daemon.restartCount}');
     parts.add(daemon.cwd);
     return parts.join('  ·  ');
@@ -2662,8 +2587,8 @@ class _DaemonTile extends StatelessWidget {
     Future<void> Function() onTap,
   ) {
     return Tooltip(
-      message: tip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(6),
         onTap: () => onTap(),
         child: SizedBox(
@@ -2813,13 +2738,8 @@ class _DaemonEditorDialogState extends State<_DaemonEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(7),
-      borderSide: BorderSide(color: c),
-    );
 
     return AlertDialog(
-      backgroundColor: colors.panel2,
       title: Text(
         _isEdit ? 'Edit daemon' : 'New daemon',
         style: context.typo.title.copyWith(fontSize: 15, color: colors.text),
@@ -2839,22 +2759,19 @@ class _DaemonEditorDialogState extends State<_DaemonEditorDialog> {
                 if (_nameError != null) setState(() => _nameError = null);
               },
               onSubmitted: (_) => _submit(),
-              style: context.typo.body.copyWith(fontSize: 13.5, color: colors.text),
-              decoration: InputDecoration(
-                isDense: true,
-                hintText: 'e.g. PC, Server, Home',
-                hintStyle: context.typo.body.copyWith(fontSize: 13, color: colors.text3),
-                filled: true,
-                fillColor: colors.panel3,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 11, vertical: 10),
-                border: border(colors.border),
-                enabledBorder: border(colors.border),
-                focusedBorder: border(colors.accent),
+              style: context.typo.body.copyWith(
+                fontSize: 13.5,
+                color: colors.text,
               ),
+              placeholder: const Text('e.g. PC, Server, Home'),
+              borderRadius: BorderRadius.circular(7),
             ),
             if (_nameError != null) ...[
               const SizedBox(height: 6),
-              Text(_nameError!, style: context.typo.label.copyWith(color: colors.error)),
+              Text(
+                _nameError!,
+                style: context.typo.label.copyWith(color: colors.error),
+              ),
             ],
             const SizedBox(height: 16),
             _label(context, 'Folder'),
@@ -2875,12 +2792,7 @@ class _DaemonEditorDialogState extends State<_DaemonEditorDialog> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      foregroundColor: colors.text2,
-                      side: BorderSide(color: colors.border2),
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
-                    ),
+                  OutlineButton(
                     onPressed: () => _pickFolder(),
                     child: Text(_cwd == null ? 'Choose' : 'Change'),
                   ),
@@ -2895,20 +2807,26 @@ class _DaemonEditorDialogState extends State<_DaemonEditorDialog> {
             ],
             if (_pathError != null) ...[
               const SizedBox(height: 6),
-              Text(_pathError!, style: context.typo.label.copyWith(color: colors.error)),
+              Text(
+                _pathError!,
+                style: context.typo.label.copyWith(color: colors.error),
+              ),
             ],
           ],
         ),
       ),
       actions: [
-        TextButton(
+        GhostButton(
           onPressed: () => Navigator.of(context).pop(),
           child: Text(
             'Cancel',
-            style: context.typo.body.copyWith(fontSize: 13, color: colors.text2),
+            style: context.typo.body.copyWith(
+              fontSize: 13,
+              color: colors.text2,
+            ),
           ),
         ),
-        TextButton(
+        GhostButton(
           onPressed: _submit,
           child: Text(
             _isEdit ? 'Save' : 'Create',

@@ -37,7 +37,11 @@ class RelayGatewayImpl implements RelayGateway {
       return Success(relay is String && relay.isNotEmpty ? relay : null);
     } catch (e, s) {
       return Failure(
-        RelayError('Failed to read the configured relay.', cause: e, stackTrace: s),
+        RelayError(
+          'Failed to read the configured relay.',
+          cause: e,
+          stackTrace: s,
+        ),
       );
     }
   }
@@ -80,11 +84,7 @@ class RelayGatewayImpl implements RelayGateway {
       return Success(devices);
     } catch (e, s) {
       return Failure(
-        RelayError(
-          'Failed to list paired devices.',
-          cause: e,
-          stackTrace: s,
-        ),
+        RelayError('Failed to list paired devices.', cause: e, stackTrace: s),
       );
     }
   }
@@ -110,7 +110,9 @@ class RelayGatewayImpl implements RelayGateway {
       final response = await request.close().timeout(timeout);
       await response.drain<void>();
       if (response.statusCode == 200) return const Success(null);
-      return Failure(RelayError('The relay responded HTTP ${response.statusCode}.'));
+      return Failure(
+        RelayError('The relay responded HTTP ${response.statusCode}.'),
+      );
     } on TimeoutException {
       return const Failure(RelayError('Timed out contacting the relay.'));
     } on SocketException {
@@ -134,10 +136,7 @@ class RelayGatewayImpl implements RelayGateway {
     String onError,
   ) async {
     final captured = await _capture(args, onError);
-    return captured.fold(
-      (_) => const Success(null),
-      (error) => Failure(error),
-    );
+    return captured.fold((_) => const Success(null), (error) => Failure(error));
   }
 
   /// Roda o comando e devolve o stdout (trim) em caso de sucesso. Falha de spawn

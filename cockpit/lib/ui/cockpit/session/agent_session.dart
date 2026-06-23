@@ -129,7 +129,8 @@ class AgentSession extends PaneItem {
 
   /// Pedidos interativos da extensão (`extension_ui_request`) ainda abertos,
   /// por `id` — pra marcar o card como resolvido ao responder.
-  final Map<String, UiRequestEntry> _openUiRequests = <String, UiRequestEntry>{};
+  final Map<String, UiRequestEntry> _openUiRequests =
+      <String, UiRequestEntry>{};
 
   // ---- getters (UI) ---------------------------------------------------------
   @override
@@ -276,13 +277,16 @@ class AgentSession extends PaneItem {
     final gateway = _gateway;
     if (gateway == null || isBusy || model == _model) return;
     final result = await gateway.setModel(model);
-    result.fold((applied) {
-      _model = applied;
-      preferredModelId = applied.id; // persiste a escolha do usuário
-      onPreferenceChanged?.call();
-    }, (error) {
-      _addInfo('failed to switch model: ${error.message}', isError: true);
-    });
+    result.fold(
+      (applied) {
+        _model = applied;
+        preferredModelId = applied.id; // persiste a escolha do usuário
+        onPreferenceChanged?.call();
+      },
+      (error) {
+        _addInfo('failed to switch model: ${error.message}', isError: true);
+      },
+    );
     notifyListeners();
     unawaited(_refreshStats());
   }
@@ -291,13 +295,16 @@ class AgentSession extends PaneItem {
     final gateway = _gateway;
     if (gateway == null || isBusy || level == _thinking) return;
     final result = await gateway.setThinkingLevel(level);
-    result.fold((_) {
-      _thinking = level;
-      preferredThinking = level; // persiste a escolha do usuário
-      onPreferenceChanged?.call();
-    }, (error) {
-      _addInfo('failed to change effort: ${error.message}', isError: true);
-    });
+    result.fold(
+      (_) {
+        _thinking = level;
+        preferredThinking = level; // persiste a escolha do usuário
+        onPreferenceChanged?.call();
+      },
+      (error) {
+        _addInfo('failed to change effort: ${error.message}', isError: true);
+      },
+    );
     notifyListeners();
   }
 
@@ -521,7 +528,12 @@ class AgentSession extends PaneItem {
         if (_status == AgentStatus.streaming) _status = AgentStatus.idle;
         _turnStartedAt = null;
         _addInfo('agent error: $message', isError: true, dedup: true);
-      case RpcAutoRetry(:final attempt, :final maxAttempts, :final delayMs, :final message):
+      case RpcAutoRetry(
+        :final attempt,
+        :final maxAttempts,
+        :final delayMs,
+        :final message,
+      ):
         _addInfo('retrying ($attempt/$maxAttempts in ${delayMs}ms) — $message');
       case RpcDiagnostic(:final text):
         _addInfo('stderr: $text');
@@ -596,7 +608,9 @@ class AgentSession extends PaneItem {
   }
 
   void _startTool(String id, String name, Map<String, dynamic> args) {
-    _openTools[id] = _add(ToolEntry(toolCallId: id, toolName: name, args: args));
+    _openTools[id] = _add(
+      ToolEntry(toolCallId: id, toolName: name, args: args),
+    );
   }
 
   void _finishTool(String id, bool isError, String resultText) {

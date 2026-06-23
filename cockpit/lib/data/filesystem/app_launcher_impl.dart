@@ -115,7 +115,9 @@ class AppLauncherImpl implements AppLauncherGateway {
     final finderIcon = await _extractIcon(
       '/System/Library/CoreServices/Finder.app',
     );
-    found.add(LaunchableApp(id: 'finder', name: 'Finder', iconPath: finderIcon));
+    found.add(
+      LaunchableApp(id: 'finder', name: 'Finder', iconPath: finderIcon),
+    );
     return found;
   }
 
@@ -143,10 +145,11 @@ class AppLauncherImpl implements AppLauncherGateway {
   Future<String?> _extractIcon(String bundlePath) async {
     try {
       // Lê o nome do arquivo de ícone do plist.
-      final plist = await Process.run(
-        'defaults',
-        ['read', '$bundlePath/Contents/Info', 'CFBundleIconFile'],
-      );
+      final plist = await Process.run('defaults', [
+        'read',
+        '$bundlePath/Contents/Info',
+        'CFBundleIconFile',
+      ]);
       if (plist.exitCode != 0) return null;
       var iconName = (plist.stdout as String).trim();
       if (iconName.isEmpty) return null;
@@ -161,10 +164,15 @@ class AppLauncherImpl implements AppLauncherGateway {
       if (File(outPath).existsSync()) return outPath;
 
       final sips = await Process.run('sips', [
-        '-s', 'format', 'png',
-        '-z', '32', '32',
+        '-s',
+        'format',
+        'png',
+        '-z',
+        '32',
+        '32',
         icnsPath,
-        '--out', outPath,
+        '--out',
+        outPath,
       ]);
       return sips.exitCode == 0 ? outPath : null;
     } catch (_) {

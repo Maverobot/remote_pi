@@ -35,7 +35,8 @@ class PiRpcProcess implements RpcProcessGateway {
   final PiSpawnConfig _config;
   final RpcEventMapper _mapper = const RpcEventMapper();
   final RpcDataMapper _dataMapper = const RpcDataMapper();
-  final StreamController<RpcEvent> _events = StreamController<RpcEvent>.broadcast();
+  final StreamController<RpcEvent> _events =
+      StreamController<RpcEvent>.broadcast();
 
   /// Requests pendentes aguardando a `response` com o `id` correspondente.
   final Map<String, Completer<Map<String, dynamic>>> _pending =
@@ -288,7 +289,9 @@ class PiRpcProcess implements RpcProcessGateway {
       const Duration(seconds: 15),
       onTimeout: () {
         _pending.remove(id);
-        throw RpcError('Timed out waiting for a response to ${command['type']}.');
+        throw RpcError(
+          'Timed out waiting for a response to ${command['type']}.',
+        );
       },
     );
     if (response['success'] != true) {
@@ -367,10 +370,7 @@ class PiRpcProcess implements RpcProcessGateway {
   @override
   Future<Result<void, RpcError>> switchSession(String sessionPath) =>
       _guard(() async {
-        await _request({
-          'type': 'switch_session',
-          'sessionPath': sessionPath,
-        });
+        await _request({'type': 'switch_session', 'sessionPath': sessionPath});
       });
 
   @override
@@ -389,10 +389,7 @@ class PiRpcProcess implements RpcProcessGateway {
     }
     try {
       await _writeLine(
-        '${jsonEncode(<String, dynamic>{
-          'type': 'prompt',
-          'message': '$_ctrlPrefix$verb',
-        })}\n',
+        '${jsonEncode(<String, dynamic>{'type': 'prompt', 'message': '$_ctrlPrefix$verb'})}\n',
       );
       return const Success(null);
     } catch (error, stackTrace) {

@@ -2,10 +2,10 @@ import 'dart:async';
 
 import 'package:cockpit/ui/core/themes/themes.dart';
 import 'package:cockpit/ui/settings/pairing_controller.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
 import 'package:provider/provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Dialog de pareamento: mostra os passos + QR Code do `/remote-pi pair`. Fecha
 /// sozinho (retornando `true`) quando um aparelho parear — quem abriu recarrega
@@ -56,49 +56,32 @@ class _PairingDialogState extends State<PairingDialog> {
     final ctrl = context.watch<PairingController>();
     final colors = context.colors;
 
-    return Dialog(
-      backgroundColor: colors.panel,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
-      child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 380),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(22, 18, 22, 20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      'Pair device',
-                      style: context.typo.title.copyWith(
-                        fontSize: 16,
-                        color: colors.text,
-                      ),
-                    ),
-                  ),
-                  InkWell(
-                    borderRadius: BorderRadius.circular(6),
-                    onTap: () => Navigator.of(context).pop(false),
-                    child: SizedBox(
-                      width: 28,
-                      height: 28,
-                      child: Icon(Icons.close, size: 17, color: colors.text3),
-                    ),
-                  ),
-                ],
+    return AlertDialog(
+      title: Row(
+        children: [
+          Expanded(
+            child: Text(
+              'Pair device',
+              style: context.typo.title.copyWith(
+                fontSize: 16,
+                color: colors.text,
               ),
-              const SizedBox(height: 16),
-              switch (ctrl.stage) {
-                PairStage.failed => _failed(context, ctrl),
-                PairStage.showingCode => _code(context, ctrl),
-                // paired é transitório (fecha sozinho) → mostra o "conectando".
-                PairStage.connecting || PairStage.paired => _connecting(context),
-              },
-            ],
+            ),
           ),
-        ),
+          IconButton.ghost(
+            icon: Icon(Icons.close, size: 17, color: colors.text3),
+            onPressed: () => Navigator.of(context).pop(false),
+          ),
+        ],
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 380),
+        child: switch (ctrl.stage) {
+          PairStage.failed => _failed(context, ctrl),
+          PairStage.showingCode => _code(context, ctrl),
+          // paired é transitório (fecha sozinho) → mostra o "conectando".
+          PairStage.connecting || PairStage.paired => _connecting(context),
+        },
       ),
     );
   }
@@ -108,15 +91,9 @@ class _PairingDialogState extends State<PairingDialog> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 28),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          SizedBox(
-            width: 34,
-            height: 34,
-            child: CircularProgressIndicator(
-              strokeWidth: 2.5,
-              color: colors.accent,
-            ),
-          ),
+          const CircularProgressIndicator(size: 34),
           const SizedBox(height: 18),
           Text(
             'Connecting to the relay…',
@@ -134,6 +111,7 @@ class _PairingDialogState extends State<PairingDialog> {
     final colors = context.colors;
     final uri = ctrl.code!.uri;
     return Column(
+      mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
         _step(context, 1, 'Open the Remote Pi app on your phone.'),
@@ -168,10 +146,7 @@ class _PairingDialogState extends State<PairingDialog> {
           ),
         ),
         const SizedBox(height: 14),
-        _CopyButton(
-          copied: _copied,
-          onTap: () => _copy(uri),
-        ),
+        _CopyButton(copied: _copied, onTap: () => _copy(uri)),
         const SizedBox(height: 12),
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -195,6 +170,7 @@ class _PairingDialogState extends State<PairingDialog> {
     return Padding(
       padding: const EdgeInsets.only(top: 4),
       child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
           Icon(Icons.error_outline, size: 30, color: colors.error),
           const SizedBox(height: 12),
@@ -210,23 +186,14 @@ class _PairingDialogState extends State<PairingDialog> {
           Row(
             children: [
               Expanded(
-                child: OutlinedButton(
-                  style: OutlinedButton.styleFrom(
-                    foregroundColor: colors.text2,
-                    side: BorderSide(color: colors.border2),
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
+                child: OutlineButton(
                   onPressed: () => Navigator.of(context).pop(false),
                   child: const Text('Close'),
                 ),
               ),
               const SizedBox(width: 10),
               Expanded(
-                child: FilledButton(
-                  style: FilledButton.styleFrom(
-                    backgroundColor: colors.accent,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                  ),
+                child: PrimaryButton(
                   onPressed: () => ctrl.retry(),
                   child: const Text('Try again'),
                 ),
@@ -285,32 +252,18 @@ class _CopyButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: colors.panel3,
-      borderRadius: BorderRadius.circular(8),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(8),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(
-                copied ? Icons.check : Icons.copy_outlined,
-                size: 14,
-                color: colors.accentText,
-              ),
-              const SizedBox(width: 8),
-              Text(
-                copied ? 'Copied!' : 'Copy data',
-                style: context.typo.body.copyWith(
-                  fontSize: 13,
-                  color: colors.accentText,
-                ),
-              ),
-            ],
-          ),
+    return SecondaryButton(
+      onPressed: onTap,
+      leading: Icon(
+        copied ? Icons.check : Icons.copy_outlined,
+        size: 14,
+        color: colors.accentText,
+      ),
+      child: Text(
+        copied ? 'Copied!' : 'Copy data',
+        style: context.typo.body.copyWith(
+          fontSize: 13,
+          color: colors.accentText,
         ),
       ),
     );

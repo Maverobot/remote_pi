@@ -5,10 +5,14 @@ import 'package:cockpit/ui/cockpit/session/agent_entry.dart';
 import 'package:cockpit/ui/cockpit/widgets/agent_markdown.dart';
 import 'package:cockpit/ui/core/file_icons/file_icons.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
 import 'package:cockpit/ui/settings/settings_controller.dart';
-import 'package:flutter/material.dart';
+// SelectionArea (widget Material) envolve o scrollable → seleção de texto com
+// auto-scroll ao arrastar até a borda. Funciona sob ShadcnApp.
+import 'package:flutter/material.dart' show SelectionArea;
 import 'package:flutter_sticky_header/flutter_sticky_header.dart';
 import 'package:provider/provider.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Teto de largura do conteúdo do chat — em panes largas a conversa não estica
 /// de ponta a ponta (folgado; alinhado à esquerda).
@@ -18,11 +22,8 @@ const double _kChatMaxWidth = 920;
 /// estilizado conforme o design (rp-p / rp-think / rp-tool / rp-usermsg).
 /// Responde a um pedido interativo da extensão (card no transcript):
 /// `(id, response, label)`. Ligado em `AgentSession.respondUi`.
-typedef UiResponder = void Function(
-  String id,
-  Map<String, dynamic> response,
-  String label,
-);
+typedef UiResponder =
+    void Function(String id, Map<String, dynamic> response, String label);
 
 class AgentTranscript extends StatelessWidget {
   const AgentTranscript({
@@ -73,7 +74,10 @@ class AgentTranscript extends StatelessWidget {
           for (final turn in _groupIntoTurns(entries)) {
             if (turn.header == null) {
               slivers.add(
-                SliverPadding(padding: hPadding, sliver: _bodySliver(turn.body)),
+                SliverPadding(
+                  padding: hPadding,
+                  sliver: _bodySliver(turn.body),
+                ),
               );
             } else {
               slivers.add(
@@ -100,15 +104,17 @@ class AgentTranscript extends StatelessWidget {
         }
         slivers.add(SliverToBoxAdapter(child: SizedBox(height: bottomPadding)));
 
-        return Scrollbar(
-          controller: controller,
-          thumbVisibility: true,
-          child: ScrollConfiguration(
-            // Evita a scrollbar automática duplicar a nossa (sempre visível).
-            behavior: ScrollConfiguration.of(
-              context,
-            ).copyWith(scrollbars: false),
-            child: CustomScrollView(controller: controller, slivers: slivers),
+        return SelectionArea(
+          child: Scrollbar(
+            controller: controller,
+            thumbVisibility: true,
+            child: ScrollConfiguration(
+              // Evita a scrollbar automática duplicar a nossa (sempre visível).
+              behavior: ScrollConfiguration.of(
+                context,
+              ).copyWith(scrollbars: false),
+              child: CustomScrollView(controller: controller, slivers: slivers),
+            ),
           ),
         );
       },
@@ -197,9 +203,7 @@ class _EntryView extends StatelessWidget {
         child: text.isEmpty
             ? Text(
                 '…',
-                style: context.typo.body.copyWith(
-                  color: context.colors.text3,
-                ),
+                style: context.typo.body.copyWith(color: context.colors.text3),
               )
             : _CachedMarkdown(text),
       ),
@@ -328,8 +332,9 @@ class _UserMessageState extends State<_UserMessage> {
                   for (var i = 0; i < widget.images.length; i++)
                     Padding(
                       padding: EdgeInsets.only(
-                        bottom:
-                            (i < widget.images.length - 1 || hasText) ? 8 : 0,
+                        bottom: (i < widget.images.length - 1 || hasText)
+                            ? 8
+                            : 0,
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(6),
@@ -408,33 +413,29 @@ class _UserMessageState extends State<_UserMessage> {
               overflow: TextOverflow.ellipsis,
             ),
             if (_hovered)
-            Positioned(
-              left: 0,
-              right: 0,
-              bottom: 0,
-              height: 22,
-              child: DecoratedBox(
-                decoration: BoxDecoration(
-                  gradient: LinearGradient(
-                    begin: Alignment.topCenter,
-                    end: Alignment.bottomCenter,
-                    colors: [
-                      colors.panel2.withValues(alpha: 0),
-                      colors.panel2,
-                    ],
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 22,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      colors: [
+                        colors.panel2.withValues(alpha: 0),
+                        colors.panel2,
+                      ],
+                    ),
                   ),
                 ),
               ),
-            ),
             if (_hovered)
               Positioned(
                 bottom: 2,
                 right: 0,
-                child: Icon(
-                  Icons.expand_more,
-                  size: 15,
-                  color: colors.text3,
-                ),
+                child: Icon(Icons.expand_more, size: 15, color: colors.text3),
               ),
           ],
         ),
@@ -503,7 +504,10 @@ class _FileBadge extends StatelessWidget {
           const SizedBox(width: 5),
           Text(
             name,
-            style: context.typo.label.copyWith(fontSize: 12, color: colors.text),
+            style: context.typo.label.copyWith(
+              fontSize: 12,
+              color: colors.text,
+            ),
           ),
         ],
       ),
@@ -549,28 +553,26 @@ class _ExpandableState extends State<_Expandable> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          InkWell(
+          HoverTap(
             onTap: canExpand
                 ? () => setState(() => _expanded = !_expanded)
                 : null,
             borderRadius: BorderRadius.circular(7),
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-              child: Row(
-                children: [
-                  Expanded(child: widget.header),
-                  if (canExpand)
-                    AnimatedRotation(
-                      turns: _expanded ? 0.25 : 0,
-                      duration: const Duration(milliseconds: 150),
-                      child: Icon(
-                        Icons.chevron_right,
-                        size: 16,
-                        color: colors.text3,
-                      ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+            child: Row(
+              children: [
+                Expanded(child: widget.header),
+                if (canExpand)
+                  AnimatedRotation(
+                    turns: _expanded ? 0.25 : 0,
+                    duration: const Duration(milliseconds: 150),
+                    child: Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: colors.text3,
                     ),
-                ],
-              ),
+                  ),
+              ],
             ),
           ),
           if (_expanded && canExpand)
@@ -668,13 +670,10 @@ class _ToolCard extends StatelessWidget {
                       size: 14,
                       color: accent,
                     )
-                  : SizedBox(
-                      width: 12,
-                      height: 12,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 1.6,
-                        color: colors.accent,
-                      ),
+                  : CircularProgressIndicator(
+                      size: 12,
+                      strokeWidth: 1.6,
+                      color: colors.accent,
                     ),
             ),
             const SizedBox(width: 10),
@@ -789,7 +788,11 @@ class _UiRequestCardState extends State<_UiRequestCard> {
           children: [
             Padding(
               padding: const EdgeInsets.only(top: 1),
-              child: Icon(Icons.check_circle_outline, size: 14, color: colors.text3),
+              child: Icon(
+                Icons.check_circle_outline,
+                size: 14,
+                color: colors.text3,
+              ),
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -837,16 +840,9 @@ class _UiRequestCardState extends State<_UiRequestCard> {
           const SizedBox(height: 4),
           Align(
             alignment: Alignment.centerLeft,
-            child: TextButton(
-              style: TextButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                minimumSize: Size.zero,
-                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-              ),
-              onPressed: () => _respond(
-                <String, dynamic>{'cancelled': true},
-                'cancelled',
-              ),
+            child: GhostButton(
+              onPressed: () =>
+                  _respond(<String, dynamic>{'cancelled': true}, 'cancelled'),
               child: Text(
                 'Cancel',
                 style: context.typo.label.copyWith(color: colors.text3),
@@ -867,19 +863,15 @@ class _UiRequestCardState extends State<_UiRequestCard> {
             _ChoiceButton(
               label: 'No',
               filled: false,
-              onTap: () => _respond(
-                <String, dynamic>{'confirmed': false},
-                'No',
-              ),
+              onTap: () =>
+                  _respond(<String, dynamic>{'confirmed': false}, 'No'),
             ),
             const SizedBox(width: 8),
             _ChoiceButton(
               label: 'Yes',
               filled: true,
-              onTap: () => _respond(
-                <String, dynamic>{'confirmed': true},
-                'Yes',
-              ),
+              onTap: () =>
+                  _respond(<String, dynamic>{'confirmed': true}, 'Yes'),
             ),
           ],
         );
@@ -904,7 +896,8 @@ class _UiRequestCardState extends State<_UiRequestCard> {
               _ChoiceButton(
                 label: option,
                 filled: false,
-                onTap: () => _respond(<String, dynamic>{'value': option}, option),
+                onTap: () =>
+                    _respond(<String, dynamic>{'value': option}, option),
               ),
           ],
         );
@@ -925,22 +918,19 @@ class _ChoiceButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
+    return HoverTap(
       color: filled ? colors.accent : colors.panel3,
+      // Filled (accent) não deve "apagar" pro panel3 no hover; mantém o accent.
+      hoverColor: filled ? colors.accent : colors.border2,
       borderRadius: BorderRadius.circular(7),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(7),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-          child: Text(
-            label,
-            style: context.typo.body.copyWith(
-              fontSize: 13,
-              color: filled ? colors.bg : colors.text,
-              fontWeight: filled ? FontWeight.w600 : FontWeight.w400,
-            ),
-          ),
+      onTap: onTap,
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+      child: Text(
+        label,
+        style: context.typo.body.copyWith(
+          fontSize: 13,
+          color: filled ? colors.bg : colors.text,
+          fontWeight: filled ? FontWeight.w600 : FontWeight.w400,
         ),
       ),
     );
@@ -960,10 +950,6 @@ class _InputRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    OutlineInputBorder border(Color c) => OutlineInputBorder(
-      borderRadius: BorderRadius.circular(7),
-      borderSide: BorderSide(color: c),
-    );
     return Row(
       children: [
         Expanded(
@@ -972,23 +958,8 @@ class _InputRow extends StatelessWidget {
             autofocus: true,
             onSubmitted: (_) => onSubmit(),
             style: context.typo.body.copyWith(fontSize: 13, color: colors.text),
-            decoration: InputDecoration(
-              isDense: true,
-              hintText: hint,
-              hintStyle: context.typo.body.copyWith(
-                fontSize: 13,
-                color: colors.text3,
-              ),
-              filled: true,
-              fillColor: colors.panel3,
-              contentPadding: const EdgeInsets.symmetric(
-                horizontal: 11,
-                vertical: 9,
-              ),
-              border: border(colors.border),
-              enabledBorder: border(colors.border),
-              focusedBorder: border(colors.accent),
-            ),
+            placeholder: Text(hint),
+            borderRadius: BorderRadius.circular(7),
           ),
         ),
         const SizedBox(width: 8),

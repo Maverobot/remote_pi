@@ -1,5 +1,5 @@
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Pane vazio ("Novo"): dois cards — "Novo agente" / "Novo terminal" — que
 /// abrem o seletor de subpasta. Visual de card (ícone + título + descrição),

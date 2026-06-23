@@ -2,7 +2,7 @@ import 'package:cockpit/domain/contracts/settings_store.dart';
 import 'package:cockpit/domain/entities/app_settings.dart';
 import 'package:flutter/foundation.dart';
 
-/// Estado global das preferências do app. Vive **acima do `MaterialApp`** pra
+/// Estado global das preferências do app. Vive **acima do `ShadcnApp`** pra
 /// trocar tema/fonte em runtime, e é lido pela tela de Configurações. Cada
 /// mudança aplica na hora (notify) e persiste (Hive).
 class SettingsController extends ChangeNotifier {
@@ -24,9 +24,7 @@ class SettingsController extends ChangeNotifier {
 
   void setInterfaceFont(String? font) {
     final empty = font == null || font.trim().isEmpty;
-    _apply(
-      _settings.copyWith(interfaceFont: font, clearInterfaceFont: empty),
-    );
+    _apply(_settings.copyWith(interfaceFont: font, clearInterfaceFont: empty));
   }
 
   void setInterfaceSize(double size) =>
@@ -37,8 +35,7 @@ class SettingsController extends ChangeNotifier {
     _apply(_settings.copyWith(codeFont: font, clearCodeFont: empty));
   }
 
-  void setCodeSize(double size) =>
-      _apply(_settings.copyWith(codeSize: size));
+  void setCodeSize(double size) => _apply(_settings.copyWith(codeSize: size));
 
   void setTerminalFont(String? font) {
     final empty = font == null || font.trim().isEmpty;

@@ -65,9 +65,13 @@ class WorktreeManagerImpl implements WorktreeManager {
           .map((l) => l.trim())
           .where((l) => l.isNotEmpty)
           .toSet();
-      final worktreeNames =
-          (await list(repoPath)).map((w) => _basename(w.path)).toSet();
-      return WorktreeNamespace(branches: branches, worktreeNames: worktreeNames);
+      final worktreeNames = (await list(
+        repoPath,
+      )).map((w) => _basename(w.path)).toSet();
+      return WorktreeNamespace(
+        branches: branches,
+        worktreeNames: worktreeNames,
+      );
     } catch (_) {
       return const WorktreeNamespace.empty();
     }
@@ -230,13 +234,17 @@ class WorktreeManagerImpl implements WorktreeManager {
       }
       // Primeira entrada (principal) e repos bare não viram fork.
       if (i == 0 || bare || path == null) continue;
-      result.add(Worktree(
-        path: path,
-        branch: detached
-            ? (head != null && head.length >= 7 ? head.substring(0, 7) : 'HEAD')
-            : (branch ?? 'HEAD'),
-        isDetached: detached,
-      ));
+      result.add(
+        Worktree(
+          path: path,
+          branch: detached
+              ? (head != null && head.length >= 7
+                    ? head.substring(0, 7)
+                    : 'HEAD')
+              : (branch ?? 'HEAD'),
+          isDetached: detached,
+        ),
+      );
     }
     return result;
   }

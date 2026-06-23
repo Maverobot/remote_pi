@@ -91,7 +91,8 @@ Future<Map<String, String>> envWithNodeOnPath() async {
 /// Como invocar o `remote-pi`: o executável + os args de prefixo. No POSIX é o
 /// binário `remote-pi` (prefixo vazio); no Windows é `node <index.js>`. Devolve
 /// `null` se o Windows não conseguir localizar o `index.js` da extensão.
-Future<({String exe, List<String> prefixArgs})?> resolveRemotePiCommand() async {
+Future<({String exe, List<String> prefixArgs})?>
+resolveRemotePiCommand() async {
   if (Platform.isWindows) {
     final indexJs = await resolveRemotePiIndexJs();
     if (indexJs == null) return null;
@@ -100,7 +101,10 @@ Future<({String exe, List<String> prefixArgs})?> resolveRemotePiCommand() async 
   }
   final exe = await resolveExecutable(
     'remote-pi',
-    unixCandidates: const ['/opt/homebrew/bin/remote-pi', '/usr/local/bin/remote-pi'],
+    unixCandidates: const [
+      '/opt/homebrew/bin/remote-pi',
+      '/usr/local/bin/remote-pi',
+    ],
     unixHomeRelative: const ['.local/bin/remote-pi'],
   );
   return (exe: exe, prefixArgs: const <String>[]);

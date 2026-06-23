@@ -6,8 +6,9 @@ import 'package:cockpit/ui/cockpit/widgets/app_menu.dart';
 import 'package:cockpit/ui/cockpit/widgets/update_card.dart';
 import 'package:cockpit/ui/cockpit/widgets/workspace_avatar.dart';
 import 'package:cockpit/ui/core/themes/themes.dart';
-import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
+import 'package:cockpit/ui/core/widgets/hover_tap.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Rail esquerda (~252px): cabeçalho "Sessions", lista de projetos (avatar +
 /// nome + git + contador de notificações), rodapé com a máquina.
@@ -242,81 +243,71 @@ class _ProjectItem extends StatelessWidget {
     final gitInfo = git;
     return Padding(
       padding: const EdgeInsets.only(bottom: 2),
-      child: Material(
+      child: HoverTap(
         color: selected ? colors.panel2 : Colors.transparent,
         borderRadius: BorderRadius.circular(7),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(7),
-          onTap: onTap,
-          child: Padding(
-            padding: const EdgeInsets.fromLTRB(9, 7, 5, 7),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.center,
-              children: [
-                WorkspaceAvatar(
-                  imagePath: project.imagePath,
-                  colorValue: project.colorValue,
-                  initial: project.initial,
-                  size: 30,
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        project.name,
-                        overflow: TextOverflow.ellipsis,
-                        style: context.typo.body.copyWith(
-                          fontSize: 13.5,
-                          color: colors.text,
-                          fontWeight: selected
-                              ? FontWeight.w500
-                              : FontWeight.w400,
-                        ),
-                      ),
-                      // Linha do git — só quando é repo git (senão, só o título).
-                      if (gitInfo != null) ...[
-                        const SizedBox(height: 4),
-                        _GitBadge(info: gitInfo),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 6),
-                if (notifications > 0) ...[
-                  Container(
-                    constraints: const BoxConstraints(minWidth: 18),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 6,
-                      vertical: 1,
-                    ),
-                    decoration: BoxDecoration(
-                      color: colors.accent,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Text(
-                      '$notifications',
-                      textAlign: TextAlign.center,
-                      style: context.typo.mono.copyWith(
-                        fontSize: 11,
-                        color: Colors.white,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 4),
-                ],
-                _MenuButton(
-                  canCreateWorktree: canCreateWorktree,
-                  onConfigure: onConfigure,
-                  onDelete: onDelete,
-                  onCreateWorktree: onCreateWorktree,
-                ),
-              ],
+        onTap: onTap,
+        padding: const EdgeInsets.fromLTRB(9, 7, 5, 7),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.center,
+          children: [
+            WorkspaceAvatar(
+              imagePath: project.imagePath,
+              colorValue: project.colorValue,
+              initial: project.initial,
+              size: 30,
             ),
-          ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    project.name,
+                    overflow: TextOverflow.ellipsis,
+                    style: context.typo.body.copyWith(
+                      fontSize: 13.5,
+                      color: colors.text,
+                      fontWeight: selected ? FontWeight.w500 : FontWeight.w400,
+                    ),
+                  ),
+                  // Linha do git — só quando é repo git (senão, só o título).
+                  if (gitInfo != null) ...[
+                    const SizedBox(height: 4),
+                    _GitBadge(info: gitInfo),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 6),
+            if (notifications > 0) ...[
+              Container(
+                constraints: const BoxConstraints(minWidth: 18),
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                decoration: BoxDecoration(
+                  color: colors.accent,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  '$notifications',
+                  textAlign: TextAlign.center,
+                  style: context.typo.mono.copyWith(
+                    fontSize: 11,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+            ],
+            _MenuButton(
+              canCreateWorktree: canCreateWorktree,
+              onConfigure: onConfigure,
+              onDelete: onDelete,
+              onCreateWorktree: onCreateWorktree,
+            ),
+          ],
         ),
       ),
     );
@@ -368,44 +359,36 @@ class _WorktreeItem extends StatelessWidget {
           Expanded(
             child: Padding(
               padding: const EdgeInsets.only(bottom: 2),
-              child: Material(
+              child: HoverTap(
                 color: selected ? colors.panel2 : Colors.transparent,
                 borderRadius: BorderRadius.circular(7),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(7),
-                  onTap: onTap,
-                  child: Padding(
-                    padding: const EdgeInsets.fromLTRB(0, 5, 7, 5),
-                    child: Row(
-                      children: [
-                        Icon(Icons.call_split, size: 12, color: colors.text3),
-                        const SizedBox(width: 7),
-                        Expanded(
-                          child: Text(
-                            worktree.name,
-                            overflow: TextOverflow.ellipsis,
-                            style: context.typo.mono.copyWith(
-                              fontSize: 12,
-                              color: selected ? colors.text : colors.text2,
-                              fontWeight: selected
-                                  ? FontWeight.w500
-                                  : FontWeight.w400,
-                            ),
-                          ),
+                onTap: onTap,
+                padding: const EdgeInsets.fromLTRB(0, 5, 7, 5),
+                child: Row(
+                  children: [
+                    Icon(Icons.call_split, size: 12, color: colors.text3),
+                    const SizedBox(width: 7),
+                    Expanded(
+                      child: Text(
+                        worktree.name,
+                        overflow: TextOverflow.ellipsis,
+                        style: context.typo.mono.copyWith(
+                          fontSize: 12,
+                          color: selected ? colors.text : colors.text2,
+                          fontWeight: selected
+                              ? FontWeight.w500
+                              : FontWeight.w400,
                         ),
-                        const SizedBox(width: 6),
-                        _WorktreeSignal(
-                          dirtyCount: git?.dirtyCount ?? 0,
-                          hasNotification: notifications > 0,
-                        ),
-                        const SizedBox(width: 2),
-                        _ForkMenuButton(
-                          branch: worktree.name,
-                          onRemove: onRemove,
-                        ),
-                      ],
+                      ),
                     ),
-                  ),
+                    const SizedBox(width: 6),
+                    _WorktreeSignal(
+                      dirtyCount: git?.dirtyCount ?? 0,
+                      hasNotification: notifications > 0,
+                    ),
+                    const SizedBox(width: 2),
+                    _ForkMenuButton(branch: worktree.name, onRemove: onRemove),
+                  ],
                 ),
               ),
             ),
@@ -449,7 +432,7 @@ class _ForkMenuButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: 'Options',
+      tooltip: (context) => const TooltipContainer(child: Text('Options')),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
@@ -663,7 +646,7 @@ class _MenuButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Tooltip(
-      message: 'Options',
+      tooltip: (context) => const TooltipContainer(child: Text('Options')),
       child: MouseRegion(
         cursor: SystemMouseCursors.click,
         child: GestureDetector(
@@ -714,10 +697,9 @@ class _SmallIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = context.colors;
     return Tooltip(
-      message: tooltip,
-      child: InkWell(
+      tooltip: (context) => TooltipContainer(child: Text(tooltip)),
+      child: HoverTap(
         borderRadius: BorderRadius.circular(5),
-        mouseCursor: SystemMouseCursors.click,
         onTap: onTap,
         child: SizedBox(
           width: 26,
@@ -843,43 +825,40 @@ class _WorkspaceDragChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = context.colors;
-    return Material(
-      color: Colors.transparent,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-        decoration: BoxDecoration(
-          color: colors.panel2,
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: colors.accent),
-          boxShadow: const [
-            BoxShadow(
-              color: Color(0x55000000),
-              blurRadius: 12,
-              offset: Offset(0, 4),
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 220),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
+      decoration: BoxDecoration(
+        color: colors.panel2,
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: colors.accent),
+        boxShadow: const [
+          BoxShadow(
+            color: Color(0x55000000),
+            blurRadius: 12,
+            offset: Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          WorkspaceAvatar(
+            imagePath: imagePath,
+            colorValue: colorValue,
+            initial: initial,
+            size: 22,
+            radius: 6,
+          ),
+          const SizedBox(width: 8),
+          Flexible(
+            child: Text(
+              title,
+              overflow: TextOverflow.ellipsis,
+              style: context.typo.label.copyWith(color: colors.text),
             ),
-          ],
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            WorkspaceAvatar(
-              imagePath: imagePath,
-              colorValue: colorValue,
-              initial: initial,
-              size: 22,
-              radius: 6,
-            ),
-            const SizedBox(width: 8),
-            Flexible(
-              child: Text(
-                title,
-                overflow: TextOverflow.ellipsis,
-                style: context.typo.label.copyWith(color: colors.text),
-              ),
-            ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

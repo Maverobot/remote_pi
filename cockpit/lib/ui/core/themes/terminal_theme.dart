@@ -1,4 +1,4 @@
-import 'package:flutter/material.dart';
+import 'package:flutter/widgets.dart';
 import 'package:xterm/xterm.dart';
 
 /// Tema **dark** do `TerminalView` (fundo `#18181B`, cursor accent, paleta ANSI

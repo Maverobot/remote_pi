@@ -83,7 +83,12 @@ class PiProcessRegistry {
       // Verifica o PPID de cada pi: só inclui os que são filhos diretos de mim.
       final orphans = <int>[];
       for (final piPid in piPids) {
-        final psResult = await Process.run('ps', ['-o', 'ppid=', '-p', '$piPid']);
+        final psResult = await Process.run('ps', [
+          '-o',
+          'ppid=',
+          '-p',
+          '$piPid',
+        ]);
         if (psResult.exitCode != 0) continue;
         final ppid = int.tryParse((psResult.stdout as String).trim());
         if (ppid == myCockpitPid) orphans.add(piPid);
