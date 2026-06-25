@@ -38,7 +38,7 @@ import type {
   ExtensionContext,
   ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { SettingsManager } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, compact as runPiCompaction } from "@earendil-works/pi-coding-agent";
 import { type Ed25519Keypair } from "./pairing/crypto.js";
 import { buildQRUri, qrSession, renderQRAscii, clampPairTtlMs, TOKEN_TTL_MS } from "./pairing/qr.js";
 import {
@@ -61,6 +61,7 @@ import type {
   WireImage,
   AskUserOption,
   AskUserResponsePayload as WireAskUserResponsePayload,
+  QueuedMessageItem,
 } from "./protocol/types.js";
 import { RelayClient, RoomAlreadyOpenError } from "./transport/relay_client.js";
 import { PlainPeerChannel } from "./transport/peer_channel.js";
@@ -270,6 +271,136 @@ function _publishWorking(working: boolean): void {
   }
 }
 
+function _beginCompaction(abort: () => void): void {
+  _compactionActive = true;
+  _compactionAbort = abort;
+  _publishWorking(true);
+}
+
+function _endCompaction({ drain = true }: { drain?: boolean } = {}): void {
+  const hadQueue = _compactionQueue.length > 0;
+  _compactionActive = false;
+  _compactionAbort = null;
+  _publishWorking(false);
+  if (drain && hadQueue) {
+    setTimeout(() => {
+      if (!_compactionActive) _drainCompactionQueue();
+    }, 0);
+  } else if (drain) {
+    setTimeout(() => {
+      if (!_compactionActive) _maybeDrainQueuedItem();
+    }, 0);
+  }
+}
+
+function _resetCompactionState(): void {
+  _compactionActive = false;
+  _compactionAbort = null;
+  _compactionQueue = [];
+}
+
+function _abortCurrentCompaction(): boolean {
+  if (!_compactionActive || !_compactionAbort) return false;
+  _compactionAbort();
+  return true;
+}
+
+function _contentFromUserMessage(
+  msg: ClientUserMessage,
+): Parameters<ExtensionAPI["sendUserMessage"]>[0] {
+  return msg.images && msg.images.length > 0
+    ? [
+        ...msg.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mime })),
+        { type: "text" as const, text: msg.text },
+      ]
+    : msg.text;
+}
+
+function _echoUserMessage(msg: ClientUserMessage, forceSteer = false): void {
+  _broadcastToActive({
+    type: "user_message",
+    id: msg.id,
+    text: msg.text,
+    ...(msg.images && msg.images.length > 0 ? { images: msg.images } : {}),
+    ...(forceSteer || msg.streaming_behavior === "steer"
+      ? { streaming_behavior: "steer" as const }
+      : {}),
+  });
+}
+
+function _queueCompactionMessage(sender: PlainPeerChannel, msg: ClientUserMessage): void {
+  _compactionQueue.push({ sender, msg });
+  // Confirm receipt immediately so Android does not time out the optimistic row
+  // while Pi is compacting; the actual SDK handoff happens after compaction_end.
+  _echoUserMessage(msg, true);
+}
+
+function _drainCompactionQueue(): void {
+  const queued = _compactionQueue;
+  _compactionQueue = [];
+  for (const { sender, msg } of queued) {
+    const previousTurnId = _currentTurnId;
+    const seededTurnId = _currentTurnId === null;
+    if (seededTurnId) _currentTurnId = msg.id;
+
+    const wake = _wakeAgent(
+      _contentFromUserMessage(msg),
+      msg.images && msg.images.length > 0
+        ? `queued app user_message id=${msg.id} (+${msg.images.length} image)`
+        : `queued app user_message id=${msg.id}`,
+      "steer",
+    );
+    if (!wake.ok) {
+      if (seededTurnId) _currentTurnId = previousTurnId;
+      sender.send({
+        type: "error",
+        code: "internal_error",
+        in_reply_to: msg.id,
+        message: `Agent rejected queued message: ${wake.detail}`,
+      });
+    }
+  }
+}
+
+async function _runCancellableCompaction(
+  event: { preparation: PiCompactionPreparation; customInstructions?: string; signal?: AbortSignal },
+  ctx: ExtensionContext,
+): Promise<{ cancel?: true; compaction?: PiCompactionResult }> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  event.signal?.addEventListener("abort", abort, { once: true });
+  _beginCompaction(abort);
+
+  try {
+    const model = ctx.model;
+    if (!model) throw new Error("No model selected");
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) throw new Error(auth.error);
+    const result = await runPiCompaction(
+      event.preparation,
+      model,
+      auth.apiKey,
+      auth.headers,
+      event.customInstructions,
+      controller.signal,
+      _currentThinking as PiCompactionThinking,
+      undefined,
+    );
+    return { compaction: result };
+  } catch (err) {
+    const aborted = controller.signal.aborted;
+    if (!aborted) {
+      const message = err instanceof Error ? err.message : String(err);
+      _broadcastToActive({ type: "error", code: "internal_error", message: `Compaction failed: ${message}` });
+      _lastCtx?.ui.notify(`[remote-pi] Compaction failed: ${message}`, "error");
+    }
+    _endCompaction();
+    return { cancel: true };
+  } finally {
+    event.signal?.removeEventListener("abort", abort);
+  }
+}
+
 // ── Cross-PC mesh wiring (plan/25 Wave B/C) ───────────────────────────────────
 
 /**
@@ -335,6 +466,95 @@ type BufferMsg = {
   tokensBefore?: number;
 };
 let _messageBuffer: BufferMsg[] = [];
+
+type ClientUserMessage = Extract<ClientMessage, { type: "user_message" }>;
+type PiCompactionPreparation = Parameters<typeof runPiCompaction>[0];
+type PiCompactionResult = Awaited<ReturnType<typeof runPiCompaction>>;
+type PiCompactionThinking = Parameters<typeof runPiCompaction>[6];
+
+type DeferredCompactionMessage = {
+  sender: PlainPeerChannel;
+  msg: ClientUserMessage;
+};
+
+let _compactionActive = false;
+let _compactionAbort: (() => void) | null = null;
+let _compactionQueue: DeferredCompactionMessage[] = [];
+
+type AndroidQueuedItem = QueuedMessageItem & { editable: true };
+let _queuedItems: AndroidQueuedItem[] = [];
+
+function _queuedStateMessage(): ServerMessage {
+  const first = _queuedItems[0];
+  return {
+    type: "queued_message_state",
+    ...(first ? { id: first.id, text: first.text } : {}),
+    items: _queuedItems.map((item) => ({ ...item })),
+  };
+}
+
+function _sendQueuedState(sender: PlainPeerChannel): void {
+  sender.send(_queuedStateMessage());
+}
+
+function _broadcastQueuedState(): void {
+  _broadcastToActive(_queuedStateMessage());
+}
+
+function _resetQueuedItems({ broadcast = false }: { broadcast?: boolean } = {}): void {
+  _queuedItems = [];
+  if (broadcast) _broadcastQueuedState();
+}
+
+function _upsertQueuedItem(item: AndroidQueuedItem): void {
+  const index = _queuedItems.findIndex((existing) => existing.id === item.id);
+  if (index === -1) {
+    _queuedItems = [..._queuedItems, item];
+  } else {
+    _queuedItems = [
+      ..._queuedItems.slice(0, index),
+      item,
+      ..._queuedItems.slice(index + 1),
+    ];
+  }
+  _broadcastQueuedState();
+}
+
+function _clearQueuedItems(targetId?: string): void {
+  _queuedItems = targetId
+    ? _queuedItems.filter((item) => item.id !== targetId)
+    : [];
+  _broadcastQueuedState();
+}
+
+function _isBusyForQueueDrain(): boolean {
+  return _compactionActive || _currentTurnId !== null || _myRoomMeta?.working === true;
+}
+
+function _maybeDrainQueuedItem(): void {
+  if (_isBusyForQueueDrain()) return;
+  const item = _queuedItems.shift();
+  if (!item) return;
+  _broadcastQueuedState();
+
+  const previousTurnId = _currentTurnId;
+  _currentTurnId = item.id;
+  const msg: ClientUserMessage = { type: "user_message", id: item.id, text: item.text };
+  const wake = _wakeAgent(item.text, `queued app user_message id=${item.id}`);
+  if (!wake.ok) {
+    _currentTurnId = previousTurnId;
+    _queuedItems = [item, ..._queuedItems];
+    _broadcastQueuedState();
+    _broadcastToActive({
+      type: "error",
+      code: "internal_error",
+      in_reply_to: item.id,
+      message: `Agent rejected queued message: ${wake.detail}`,
+    });
+    return;
+  }
+  _echoUserMessage(msg, false);
+}
 
 /** Test-only override of the message buffer. */
 /**
@@ -676,6 +896,8 @@ function _goIdle(byeReason?: import("./protocol/types.js").ByeReason): void {
   _stopAutoListener?.();
   _stopAutoListener = null;
 
+  if (_queuedItems.length > 0) _resetQueuedItems({ broadcast: true });
+
   // Tear down every per-owner channel and clear the map.
   for (const ch of _activePeers.values()) {
     try { ch.detach(); } catch { /* best-effort */ }
@@ -684,6 +906,8 @@ function _goIdle(byeReason?: import("./protocol/types.js").ByeReason): void {
   _askUserCapablePeers.clear();
   _peerShort = "";
   _currentTurnId = null;
+  _resetCompactionState();
+  _resetQueuedItems();
 
   _relay?.close();
   _relay = null;
@@ -731,10 +955,13 @@ function _onRelayClose(): void {
   for (const ch of _activePeers.values()) {
     try { ch.detach(); } catch { /* best-effort */ }
   }
+  if (_queuedItems.length > 0) _resetQueuedItems({ broadcast: true });
   _activePeers.clear();
   _askUserCapablePeers.clear();
   _peerShort = "";
   _currentTurnId = null;
+  _resetCompactionState();
+  _resetQueuedItems();
 
   _relay = null;  // _relayUrl preserved for retry
 
@@ -1415,9 +1642,11 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   pi.on("agent_end", () => {
     // Buffer is fed by `message_end`; here we only finalize the outbound
     // turn signal to every connected owner. No buffer mutation.
-    if (!_anyPeerActive() || !_currentTurnId) return;
-    _broadcastToActive({ type: "agent_done", in_reply_to: _currentTurnId });
-    _currentTurnId = null;
+    if (_anyPeerActive() && _currentTurnId) {
+      _broadcastToActive({ type: "agent_done", in_reply_to: _currentTurnId });
+      _currentTurnId = null;
+    }
+    _maybeDrainQueuedItem();
   });
 
   // plan/34: the broker no longer gates delivery on busy state, so we no
@@ -1448,13 +1677,18 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     if (_relay && _myRoomId) {
       _relay.sendControl({ type: "room_meta_update", room_id: _myRoomId, meta: { working: false } });
     }
+    _maybeDrainQueuedItem();
   });
 
   // Plan/32: compaction feedback. compact() doesn't run a turn, so bracket it
-  // with working=true/false here. Returning void = no veto → default
-  // compaction proceeds.
-  pi.on("session_before_compact", () => {
-    _publishWorking(true);
+  // with working=true/false here. If no app is attached, keep Pi's default
+  // compaction path; the custom path only exists so Android can cancel/queue.
+  pi.on("session_before_compact", (event, ctx) => {
+    if (!ctx || !_anyPeerActive()) {
+      _publishWorking(true);
+      return;
+    }
+    return _runCancellableCompaction(event, ctx);
   });
   pi.on("session_compact", (event) => {
     const entry = event?.compactionEntry as { summary?: unknown; tokensBefore?: unknown } | undefined;
@@ -1467,8 +1701,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     _messageBuffer.push({ role: "compaction", content: summary, timestamp: ts, tokensBefore });
     // (1) Live result to every connected owner.
     _broadcastToActive({ type: "compaction", summary, tokens_before: tokensBefore, ts });
-    // (3) Working ends.
-    _publishWorking(false);
+    // (3) Working ends; queued Android messages now enter the compacted session.
+    _endCompaction();
   });
 
   // Re-capture the freshest base ctx on every session replacement so compact
@@ -3435,7 +3669,7 @@ export function _routeClientMessageFrom(
   }
   if (msg.type === "cancel") {
     try {
-      const aborted = _abortCurrentTurn(ctx);
+      const aborted = _abortCurrentCompaction() || _abortCurrentTurn(ctx);
       if (!aborted) {
         sender.send({
           type: "error",
@@ -3458,7 +3692,24 @@ export function _routeClientMessageFrom(
   }
   if (!_pi) return;
   switch (msg.type) {
+    case "queued_message_set": {
+      const text = msg.text.trim();
+      if (!text) {
+        _clearQueuedItems(msg.id);
+        break;
+      }
+      _upsertQueuedItem({ id: msg.id, text, editable: true, created_at: Date.now() });
+      _maybeDrainQueuedItem();
+      break;
+    }
+    case "queued_message_clear":
+      _clearQueuedItems(msg.target_id);
+      break;
     case "user_message": {
+      if (_compactionActive) {
+        _queueCompactionMessage(sender, msg);
+        break;
+      }
       // Source-of-truth rebroadcast (plan/24 W2D fix). Echo the message
       // back to every attached owner (sender included) after the SDK accepts
       // the handoff, so optimistic app bubbles only confirm on real delivery.
@@ -3487,13 +3738,7 @@ export function _routeClientMessageFrom(
       if (seededTurnId) {
         _currentTurnId = msg.id;
       }
-      const content: Parameters<ExtensionAPI["sendUserMessage"]>[0] =
-        msg.images && msg.images.length > 0
-          ? [
-              ...msg.images.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mime })),
-              { type: "text" as const, text: msg.text },
-            ]
-          : msg.text;
+      const content = _contentFromUserMessage(msg);
       // Always include a streaming delivery mode for app-originated messages.
       // The SDK ignores `deliverAs` when idle, but requires it when a turn is
       // already running. This avoids a race where Remote Pi's mirror has not
@@ -3515,14 +3760,7 @@ export function _routeClientMessageFrom(
         });
         break;
       }
-      const echo: ServerMessage = {
-        type: "user_message",
-        id: msg.id,
-        text: msg.text,
-        ...(msg.images && msg.images.length > 0 ? { images: msg.images } : {}),
-        ...(shouldSteer ? { streaming_behavior: "steer" as const } : {}),
-      };
-      _broadcastToActive(echo);
+      _echoUserMessage(msg, shouldSteer);
       break;
     }
     case "approve_tool":
@@ -3631,6 +3869,7 @@ function _handleSessionSync(
   sender: PlainPeerChannel,
   msg: Extract<ClientMessage, { type: "session_sync" }>,
 ): void {
+  _sendQueuedState(sender);
   if (_sessionStartedAt === null) {
     sender.send({
       type: "session_history",
@@ -3688,6 +3927,7 @@ function _handleSessionSync(
  */
 function _resetSessionForNew(inReplyTo: string): void {
   _messageBuffer = [];
+  _resetQueuedItems({ broadcast: true });
   _pendingAskUserPrompts.clear();
   _mirroredAskUserToolIds.clear();
   _sessionStartedAt = Date.now();

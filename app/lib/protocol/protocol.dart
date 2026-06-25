@@ -497,10 +497,15 @@ class QueuedMessageSet extends ClientMessage {
 
 class QueuedMessageClear extends ClientMessage {
   final String id;
-  QueuedMessageClear({required this.id});
+  final String? targetId;
+  QueuedMessageClear({required this.id, this.targetId});
 
   @override
-  Map<String, dynamic> toJson() => {'type': 'queued_message_clear', 'id': id};
+  Map<String, dynamic> toJson() => {
+    'type': 'queued_message_clear',
+    'id': id,
+    if (targetId != null) 'target_id': targetId,
+  };
 }
 
 class ApproveTool extends ClientMessage {
@@ -1163,13 +1168,64 @@ WireImage? _firstImage(dynamic raw) {
   return WireImage.fromJson(first.cast<String, dynamic>());
 }
 
-class QueuedMessageState extends ServerMessage {
-  final String? id;
-  final String? text;
-  QueuedMessageState({this.id, this.text});
+class QueuedMessageItem {
+  final String id;
+  final String text;
+  final bool editable;
+  final DateTime createdAt;
 
-  factory QueuedMessageState.fromJson(Map<String, dynamic> j) =>
-      QueuedMessageState(id: j['id'] as String?, text: j['text'] as String?);
+  const QueuedMessageItem({
+    required this.id,
+    required this.text,
+    required this.editable,
+    required this.createdAt,
+  });
+
+  factory QueuedMessageItem.fromJson(Map<String, dynamic> j) =>
+      QueuedMessageItem(
+        id: j['id'] as String,
+        text: (j['text'] as String?) ?? '',
+        editable: (j['editable'] as bool?) ?? true,
+        createdAt: DateTime.fromMillisecondsSinceEpoch(
+          (j['created_at'] as num?)?.toInt() ?? 0,
+        ),
+      );
+}
+
+class QueuedMessageState extends ServerMessage {
+  final List<QueuedMessageItem> items;
+  QueuedMessageState({this.items = const []});
+
+  String? get id => items.isEmpty ? null : items.first.id;
+  String? get text => items.isEmpty ? null : items.first.text;
+
+  factory QueuedMessageState.fromJson(Map<String, dynamic> j) {
+    final rawItems = j['items'];
+    if (rawItems is List) {
+      return QueuedMessageState(
+        items: rawItems
+            .whereType<Map>()
+            .map((m) => QueuedMessageItem.fromJson(m.cast<String, dynamic>()))
+            .where((item) => item.text.isNotEmpty)
+            .toList(growable: false),
+      );
+    }
+    final id = j['id'] as String?;
+    final text = j['text'] as String?;
+    if (id == null || text == null || text.isEmpty) {
+      return QueuedMessageState();
+    }
+    return QueuedMessageState(
+      items: [
+        QueuedMessageItem(
+          id: id,
+          text: text,
+          editable: true,
+          createdAt: DateTime.fromMillisecondsSinceEpoch(0),
+        ),
+      ],
+    );
+  }
 }
 
 class UserInput extends ServerMessage {

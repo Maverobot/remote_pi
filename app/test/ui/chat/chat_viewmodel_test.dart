@@ -378,6 +378,69 @@ void main() {
     },
   );
 
+  test('queued state and commands roundtrip through ChatViewModel', () async {
+    final ch = _FakeChannel();
+    final storage = _FakeStorage();
+    final conn = ConnectionManager(
+      factory: (_, _) async => ch,
+      storage: storage,
+    );
+    final boxes = LocalBoxes();
+    final sync = SyncService(conn, boxes);
+    final read = SessionReadRepository(boxes);
+    final prefs = Preferences(_FakeSecureStorage());
+    await prefs.setSelectedPeerEpk(_peer.remoteEpk);
+    await prefs.setSelectedRoom(epk: _peer.remoteEpk, roomId: 'main');
+
+    conn.adopt(ch, _peer);
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    final vm = ChatViewModel(read, sync, conn, prefs, storage);
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    ch.push(
+      QueuedMessageState(
+        items: [
+          QueuedMessageItem(
+            id: 'q1',
+            text: 'queued from pi',
+            editable: true,
+            createdAt: DateTime.fromMillisecondsSinceEpoch(123),
+          ),
+        ],
+      ),
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    final state = vm.state as ChatReady;
+    expect(state.queuedMessages, hasLength(1));
+    expect(state.queuedMessages.single.id, 'q1');
+    expect(state.queuedMessages.single.text, 'queued from pi');
+    expect(state.queuedText, 'queued from pi');
+
+    vm.queueMessage(' next queued ');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final set = ch.sent.whereType<QueuedMessageSet>().last;
+    expect(set.text, 'next queued');
+    expect((vm.state as ChatReady).queuedMessages.map((q) => q.text), contains('next queued'));
+
+    vm.clearQueuedMessage('q1');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final clear = ch.sent.whereType<QueuedMessageClear>().last;
+    expect(clear.targetId, 'q1');
+    expect(
+      (vm.state as ChatReady).queuedMessages.map((q) => q.id),
+      isNot(contains('q1')),
+    );
+
+    ch.push(QueuedMessageState());
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+    expect((vm.state as ChatReady).queuedMessages, isEmpty);
+
+    vm.dispose();
+    sync.dispose();
+    conn.dispose();
+  });
+
   test('ask_user_resolved marks prompt row resolved across owners', () async {
     final ch = _FakeChannel();
     final storage = _FakeStorage();
@@ -512,6 +575,23 @@ void main() {
       isTrue,
       reason: 'state carries isWorking so the flip rebuilds the UI',
     );
+    expect(
+      vm.cancelTargetId,
+      'working',
+      reason: 'compaction/room-meta working has no turn id but still cancels',
+    );
+
+    await vm.sendMessage('meta-only steer');
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final sentSteer = ch.sent.whereType<UserMessage>().lastWhere(
+      (m) => m.text == 'meta-only steer',
+    );
+    expect(sentSteer.streamingBehavior, UserMessageStreamingBehavior.steer);
+
+    await vm.cancel(vm.cancelTargetId!);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    final sentCancel = ch.sent.whereType<Cancel>().last;
+    expect(sentCancel.targetId, 'working');
 
     // If the app sees agent_done but the relay's meta.working=false
     // broadcast is delayed/missed, the active chat must not stay stuck on

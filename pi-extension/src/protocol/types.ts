@@ -6,6 +6,13 @@ export type PairErrorCode =
 
 export type StreamingBehavior = "steer";
 
+export type QueuedMessageItem = {
+  id: string;
+  text: string;
+  editable: boolean;
+  created_at: number;
+};
+
 export type AskUserOption = { title: string; description?: string };
 
 export type AskUserResponsePayload =
@@ -32,7 +39,7 @@ export type ClientMessage =
       streaming_behavior?: StreamingBehavior;
     }
   | { type: "queued_message_set"; id: string; text: string }
-  | { type: "queued_message_clear"; id: string }
+  | { type: "queued_message_clear"; id: string; target_id?: string }
   | { type: "approve_tool"; id: string; tool_call_id: string; decision: "allow" | "deny" }
   | { type: "cancel"; id: string; target_id: string }
   | { type: "ping"; id: string }
@@ -189,7 +196,7 @@ export type ServerMessage =
       cancelled: boolean;
       room_id?: string;
     }
-  | { type: "queued_message_state"; id?: string; text?: string }
+  | { type: "queued_message_state"; id?: string; text?: string; items?: QueuedMessageItem[] }
   | { type: "agent_chunk"; in_reply_to: string; delta: string }
   | { type: "agent_done"; in_reply_to: string; usage?: Usage }
   | { type: "agent_message"; in_reply_to: string; text: string; usage?: Usage }

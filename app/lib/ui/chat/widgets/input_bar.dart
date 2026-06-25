@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:app/data/images/image_picker_service.dart';
+import 'package:app/domain/session_state.dart';
 import 'package:app/ui/chat/attachment/states/attachment_state.dart';
 import 'package:app/ui/chat/attachment/viewmodels/attachment_viewmodel.dart';
 import 'package:app/ui/chat/voice/states/voice_input_state.dart';
@@ -41,10 +42,10 @@ class InputBar extends StatefulWidget {
   final VoidCallback? onOpenQuickActions;
   final VoidCallback? onStartAudio;
 
-  /// Pi-side queued text. Null means no queued message.
-  final String? queuedText;
+  /// Pi-side queued follow-ups. Empty means no queued messages.
+  final List<QueuedMsg> queuedMessages;
   final void Function(String text)? onSetQueued;
-  final VoidCallback? onClearQueued;
+  final void Function(String id)? onClearQueued;
 
   /// Plan/29 — voice-input ViewModel. When null the mic falls back to the
   /// legacy [onStartAudio] tap (and existing tests pump InputBar without it).
@@ -68,7 +69,7 @@ class InputBar extends StatefulWidget {
     this.onCancel,
     this.onOpenQuickActions,
     this.onStartAudio,
-    this.queuedText,
+    this.queuedMessages = const [],
     this.onSetQueued,
     this.onClearQueued,
     this.voice,
@@ -95,10 +96,6 @@ class _InputBarState extends State<InputBar> {
   late final FocusNode _focusNode = FocusNode(onKeyEvent: _onComposerKey);
   bool _empty = true;
   bool _cancelArmed = false;
-  // Message committed (via Enter/send) while a turn was working. Held here —
-  // not auto-derived from the field — so draft text the user is still editing
-  // is never sent without an explicit Enter. Flushed when the turn ends.
-  String? _queued;
   // True while the hold-to-talk gesture is active. Lets `_beginVoice` tell
   // whether the user is still holding once `startRecording` resolves — if not
   // (the permission prompt ended the hold), the recording is discarded.
@@ -108,7 +105,6 @@ class _InputBarState extends State<InputBar> {
   @override
   void initState() {
     super.initState();
-    _queued = widget.queuedText;
     _controller.addListener(_onTextChange);
     _subscribeTranscripts();
   }
@@ -119,9 +115,6 @@ class _InputBarState extends State<InputBar> {
     if (!identical(old.voice, widget.voice)) {
       _transcriptSub?.cancel();
       _subscribeTranscripts();
-    }
-    if (old.queuedText != widget.queuedText) {
-      _queued = widget.queuedText;
     }
   }
 
@@ -163,19 +156,18 @@ class _InputBarState extends State<InputBar> {
     widget.onSend(text);
   }
 
-  void _clearQueued() {
-    if (_queued == null) return;
-    setState(() => _queued = null);
-    widget.onClearQueued?.call();
+  void _queueCurrentText() {
+    final text = _controller.text.trim();
+    if (text.isEmpty) return;
+    _controller.clear();
+    widget.onSetQueued?.call(text);
   }
 
-  void _editQueued() {
-    final text = _queued;
-    if (text == null) return;
-    setState(() => _queued = null);
-    widget.onClearQueued?.call();
-    _controller.text = text;
-    _controller.selection = TextSelection.collapsed(offset: text.length);
+  void _editQueued(QueuedMsg item) {
+    if (!item.editable) return;
+    widget.onClearQueued?.call(item.id);
+    _controller.text = item.text;
+    _controller.selection = TextSelection.collapsed(offset: item.text.length);
     _focusNode.requestFocus();
   }
 
@@ -343,6 +335,14 @@ class _InputBarState extends State<InputBar> {
         !showStrip &&
         widget.onCancel != null;
 
+    final showQueueAction =
+        widget.streaming &&
+        hasContent &&
+        !hasImage &&
+        canInteract &&
+        !showStrip &&
+        widget.onSetQueued != null;
+
     return Container(
       padding: const EdgeInsets.fromLTRB(14, 10, 14, 22),
       decoration: BoxDecoration(
@@ -360,11 +360,14 @@ class _InputBarState extends State<InputBar> {
                   image: attachState.image,
                   onRemove: widget.attachment!.removeImage,
                 ),
-              if (_queued != null && _queued!.isNotEmpty)
+              for (final item in widget.queuedMessages)
                 _QueuedMessagePreview(
-                  text: _queued!,
-                  onTap: _editQueued,
-                  onClear: _clearQueued,
+                  text: item.text,
+                  editable: item.editable,
+                  onTap: item.editable ? () => _editQueued(item) : null,
+                  onClear: item.editable
+                      ? () => widget.onClearQueued?.call(item.id)
+                      : null,
                 ),
               Row(
                 children: [
@@ -445,6 +448,10 @@ class _InputBarState extends State<InputBar> {
                     ),
                   ),
                   const SizedBox(width: 10),
+                  if (showQueueAction) ...[
+                    _QueueButton(onTap: _queueCurrentText),
+                    const SizedBox(width: 8),
+                  ],
                   _ComposerActionButton(
                     streaming: widget.streaming,
                     hasContent: hasContent,
@@ -503,13 +510,15 @@ class _InputBarState extends State<InputBar> {
 class _QueuedMessagePreview extends StatelessWidget {
   const _QueuedMessagePreview({
     required this.text,
-    required this.onTap,
-    required this.onClear,
+    required this.editable,
+    this.onTap,
+    this.onClear,
   });
 
   final String text;
-  final VoidCallback onTap;
-  final VoidCallback onClear;
+  final bool editable;
+  final VoidCallback? onTap;
+  final VoidCallback? onClear;
 
   @override
   Widget build(BuildContext context) {
@@ -548,7 +557,7 @@ class _QueuedMessagePreview extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        'Queued. Tap to edit.',
+                        editable ? 'Queued. Tap to edit.' : 'Queued follow-up.',
                         style: TextStyle(
                           color: colors.accent,
                           fontFamily: kMonoFamily,
@@ -571,24 +580,51 @@ class _QueuedMessagePreview extends StatelessWidget {
                     ],
                   ),
                 ),
-                const SizedBox(width: 6),
-                SizedBox(
-                  width: 28,
-                  height: 28,
-                  child: IconButton(
-                    key: const Key('input-bar-clear-queued'),
-                    tooltip: 'Clear queued message',
-                    padding: EdgeInsets.zero,
-                    iconSize: 16,
-                    splashRadius: 16,
-                    onPressed: onClear,
-                    icon: Icon(LucideIcons.x, color: colors.muted2),
+                if (onClear != null) ...[
+                  const SizedBox(width: 6),
+                  SizedBox(
+                    width: 28,
+                    height: 28,
+                    child: IconButton(
+                      key: const Key('input-bar-clear-queued'),
+                      tooltip: 'Clear queued message',
+                      padding: EdgeInsets.zero,
+                      iconSize: 16,
+                      splashRadius: 16,
+                      onPressed: onClear,
+                      icon: Icon(LucideIcons.x, color: colors.muted2),
+                    ),
                   ),
-                ),
+                ],
               ],
             ),
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _QueueButton extends StatelessWidget {
+  const _QueueButton({required this.onTap});
+
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return GestureDetector(
+      key: const Key('input-bar-queue'),
+      onTap: onTap,
+      child: Container(
+        width: 38,
+        height: 38,
+        decoration: BoxDecoration(
+          color: colors.accent.withValues(alpha: 0.14),
+          borderRadius: BorderRadius.circular(19),
+          border: Border.all(color: colors.accent.withValues(alpha: 0.55)),
+        ),
+        child: Icon(LucideIcons.messageCircle, color: colors.accent, size: 18),
       ),
     );
   }
@@ -796,10 +832,7 @@ class _QuickActionsButtonState extends State<_QuickActionsButton>
     return SizeTransition(
       sizeFactor: _sizeFactor,
       axis: Axis.horizontal,
-      // Pin: Flutter 3.41.7 (CI FLUTTER_VERSION) — SizeTransition has no
-      // `alignment`; `axisAlignment` is only deprecated (not removed) on newer
-      // channels. Don't "fix the deprecation" without bumping the Flutter pin.
-      axisAlignment: -1.0,
+      alignment: Alignment.centerLeft,
       child: FadeTransition(
         opacity: _fade,
         child: Row(

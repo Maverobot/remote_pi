@@ -14,6 +14,8 @@ import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-a
 
 // ── Mock RelayClient ──────────────────────────────────────────────────────────
 
+const _compactMock = vi.hoisted(() => vi.fn());
+
 const relayRef: { current: MockRelay | null } = { current: null };
 const relayInstances: MockRelay[] = [];
 // Tests can swap this to inject failing connects across all future instances.
@@ -138,6 +140,11 @@ vi.mock("./pairing/qr.js", async (importOriginal) => {
       generateToken: vi.fn().mockReturnValue("test-token"),
     },
   };
+});
+
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...orig, compact: _compactMock };
 });
 
 // Import AFTER mocks
@@ -818,7 +825,7 @@ void _getActivePeerCountForTest;
 // ── user_input mirroring (local terminal / RPC) ───────────────────────────────
 
 type AnyEvent = { type: string; [k: string]: unknown };
-type EventHandler = (event: AnyEvent) => unknown;
+type EventHandler = (event: AnyEvent, ctx?: unknown) => unknown;
 
 function captureEventHandler(eventName: string): EventHandler {
   let captured: EventHandler | undefined;
@@ -1090,6 +1097,165 @@ describe("multi-channel broadcast (W2D)", () => {
     // Both owners received the echo (sender included).
     const recipients = new Set(echoes.map((d) => d.peer));
     expect(recipients).toEqual(new Set(["ownerA__1234567890", "ownerB__abcdefghij"]));
+  });
+
+  test("queued_message_set while working broadcasts editable queue and targeted clear", async () => {
+    await _pairForTest("ownerA__1234567890");
+    await _pairAdditionalForTest("ownerB__abcdefghij", "Android");
+    const harness = captureEventHarness();
+    const onInput = harness.handler("input");
+    onInput({ type: "input", text: "primary", source: "interactive" });
+    await new Promise<void>((r) => setImmediate(r));
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendUserMessage, sendMessage: () => undefined });
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "queued_message_set", id: "q1", text: " next ",
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    let sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
+      .map((c) => c[0] as string).map(decodeSentCt);
+    const states = sent.filter((d) => d.inner.type === "queued_message_state");
+    expect(states).toHaveLength(2);
+    expect(new Set(states.map((d) => d.peer))).toEqual(new Set(["ownerA__1234567890", "ownerB__abcdefghij"]));
+    for (const state of states) {
+      expect(state.inner).toMatchObject({
+        type: "queued_message_state",
+        id: "q1",
+        text: "next",
+        items: [expect.objectContaining({ id: "q1", text: "next", editable: true })],
+      });
+    }
+
+    const syncBefore = relayRef.current!.send.mock.calls.length;
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({ type: "session_sync", id: "sync-q", limit: 50 })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+    sent = relayRef.current!.send.mock.calls.slice(syncBefore)
+      .map((c) => c[0] as string).map(decodeSentCt);
+    expect(sent[0]?.inner.type).toBe("queued_message_state");
+    expect(sent[1]?.inner.type).toBe("session_history");
+
+    const clearBefore = relayRef.current!.send.mock.calls.length;
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "queued_message_clear", id: "clear-q", target_id: "q1",
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+    sent = relayRef.current!.send.mock.calls.slice(clearBefore)
+      .map((c) => c[0] as string).map(decodeSentCt);
+    expect(sent.filter((d) => d.inner.type === "queued_message_state").every((d) => (
+      Array.isArray(d.inner.items) && d.inner.items.length === 0
+    ))).toBe(true);
+  });
+
+  test("queued_message_set while idle drains immediately as a normal user turn", async () => {
+    await _pairForTest("ownerA__1234567890");
+    await _pairAdditionalForTest("ownerB__abcdefghij", "Android");
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendUserMessage, sendMessage: () => undefined });
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "queued_message_set", id: "q-idle", text: "after this",
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(sendUserMessage).toHaveBeenCalledWith("after this", undefined);
+    expect(_getCurrentTurnIdForTest()).toBe("q-idle");
+    const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
+      .map((c) => c[0] as string).map(decodeSentCt);
+    const lastState = sent.filter((d) => d.inner.type === "queued_message_state").at(-1);
+    expect(lastState?.inner.items).toEqual([]);
+    const echoes = sent.filter((d) => d.inner.type === "user_message");
+    expect(echoes).toHaveLength(2);
+    for (const echo of echoes) {
+      expect(echo.inner).toMatchObject({ type: "user_message", id: "q-idle", text: "after this" });
+      expect(echo.inner).not.toHaveProperty("streaming_behavior");
+    }
+  });
+
+  test("queued drain waits for both agent_end and turn_end regardless of ordering", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const harness = captureEventHarness();
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendUserMessage, sendMessage: () => undefined });
+
+    harness.handler("input")({ type: "input", text: "primary", source: "interactive" });
+    harness.handler("turn_start")({ type: "turn_start", turnIndex: 0, timestamp: 0 });
+    await new Promise<void>((r) => setImmediate(r));
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({ type: "queued_message_set", id: "q-order-a", text: "after A" })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+    expect(sendUserMessage).not.toHaveBeenCalledWith("after A", undefined);
+
+    harness.handler("agent_end")({ type: "agent_end" });
+    expect(sendUserMessage).not.toHaveBeenCalledWith("after A", undefined);
+    harness.handler("turn_end")({ type: "turn_end", turnIndex: 0, timestamp: 0 });
+    expect(sendUserMessage).toHaveBeenCalledWith("after A", undefined);
+
+    sendUserMessage.mockClear();
+    harness.handler("input")({ type: "input", text: "primary 2", source: "interactive" });
+    harness.handler("turn_start")({ type: "turn_start", turnIndex: 1, timestamp: 1 });
+    await new Promise<void>((r) => setImmediate(r));
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({ type: "queued_message_set", id: "q-order-b", text: "after B" })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+    harness.handler("turn_end")({ type: "turn_end", turnIndex: 1, timestamp: 1 });
+    expect(sendUserMessage).not.toHaveBeenCalledWith("after B", undefined);
+    harness.handler("agent_end")({ type: "agent_end" });
+    expect(sendUserMessage).toHaveBeenCalledWith("after B", undefined);
+  });
+
+  test("queued drain restores item on synchronous sendUserMessage rejection", async () => {
+    await _pairForTest("ownerA__1234567890");
+    _setPiForTest({
+      sendUserMessage: vi.fn(() => { throw new Error("queue rejected"); }),
+      sendMessage: () => undefined,
+    });
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "queued_message_set", id: "q-fail", text: "after fail",
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
+      .map((c) => c[0] as string).map(decodeSentCt);
+    expect(sent.some((d) => d.inner.type === "user_message" && d.inner.id === "q-fail")).toBe(false);
+    expect(sent.find((d) => d.inner.type === "error")?.inner).toMatchObject({
+      type: "error",
+      code: "internal_error",
+      in_reply_to: "q-fail",
+    });
+    const lastState = sent.filter((d) => d.inner.type === "queued_message_state").at(-1);
+    expect(lastState?.inner).toMatchObject({
+      type: "queued_message_state",
+      id: "q-fail",
+      text: "after fail",
+      items: [expect.objectContaining({ id: "q-fail", text: "after fail" })],
+    });
   });
 
   test("plan/30: user_message with an image → sendUserMessage gets ImageContent+TextContent; echo carries images", async () => {
@@ -1366,6 +1532,127 @@ describe("multi-channel broadcast (W2D)", () => {
     expect(buf.some((m) =>
       m.role === "compaction" && m.content === "compacted 10 turns" && m.tokensBefore === 12345,
     )).toBe(true);
+  });
+
+  test("compaction cancel aborts the active compaction and publishes idle", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const harness = captureEventHarness();
+    const onBeforeCompact = harness.handler("session_before_compact");
+    let signal: AbortSignal | undefined;
+    _compactMock.mockImplementationOnce((
+      _preparation: unknown,
+      _model: unknown,
+      _apiKey: unknown,
+      _headers: unknown,
+      _customInstructions: unknown,
+      compactSignal?: AbortSignal,
+    ) => {
+      signal = compactSignal;
+      return new Promise((_resolve, reject) => {
+        compactSignal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    });
+
+    const result = onBeforeCompact(
+      { type: "session_before_compact", preparation: {}, customInstructions: "English" },
+      {
+        model: { id: "m", name: "Model", provider: "p", reasoning: false, contextWindow: 1, maxTokens: 1024 },
+        modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "k" }) },
+      },
+    ) as Promise<unknown>;
+    await vi.waitFor(() => expect(signal).toBeTruthy());
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({ type: "cancel", id: "cancel-compact", target_id: "working" })).toString("base64"),
+    }));
+
+    await expect(result).resolves.toMatchObject({ cancel: true });
+    expect(signal!.aborted).toBe(true);
+
+    const sent = relayRef.current!.send.mock.calls
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    expect(sent.some((d) => d.inner.type === "cancelled" && d.inner.target_id === "working")).toBe(true);
+    const ctrls = relayRef.current!.sendControl.mock.calls
+      .map((c) => c[0] as { type: string; meta?: { working?: boolean } })
+      .filter((f) => f.type === "room_meta_update");
+    expect(ctrls.some((f) => f.meta?.working === true)).toBe(true);
+    expect(ctrls.some((f) => f.meta?.working === false)).toBe(true);
+  });
+
+  test("user_message during compaction echoes immediately and drains after session_compact", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const harness = captureEventHarness();
+    const onBeforeCompact = harness.handler("session_before_compact");
+    const onCompact = harness.handler("session_compact");
+    const sendUserMessage = vi.fn();
+    _setPiForTest({ sendUserMessage, sendMessage: vi.fn() });
+
+    let finish!: (value: unknown) => void;
+    _compactMock.mockImplementationOnce((
+      _preparation: unknown,
+      _model: unknown,
+      _apiKey: unknown,
+      _headers: unknown,
+      _customInstructions: unknown,
+      compactSignal?: AbortSignal,
+    ) => new Promise((resolve, reject) => {
+      finish = resolve;
+      compactSignal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+    }));
+
+    const result = onBeforeCompact(
+      { type: "session_before_compact", preparation: {}, customInstructions: "English" },
+      {
+        model: { id: "m", name: "Model", provider: "p", reasoning: false, contextWindow: 1, maxTokens: 1024 },
+        modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "k" }) },
+      },
+    ) as Promise<unknown>;
+    await vi.waitFor(() => expect(_compactMock).toHaveBeenCalled());
+
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "user_message",
+        id: "msg-during-compact",
+        text: "keep this",
+        images: [{ data: "iVBORw0=", mime: "image/png" }],
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const echoed = relayRef.current!.send.mock.calls.slice(sendsBefore)
+      .map((c) => c[0] as string)
+      .map(decodeSentCt)
+      .find((d) => d.inner.type === "user_message" && d.inner.id === "msg-during-compact");
+    expect(echoed?.inner).toMatchObject({
+      type: "user_message",
+      id: "msg-during-compact",
+      text: "keep this",
+      streaming_behavior: "steer",
+    });
+
+    finish({ summary: "done", firstKeptEntryId: "e1", tokensBefore: 99 });
+    await expect(result).resolves.toMatchObject({ compaction: { summary: "done" } });
+    onCompact({
+      type: "session_compact",
+      compactionEntry: { type: "compaction", summary: "done", tokensBefore: 99, timestamp: "2026-01-01T00:00:00Z" },
+    });
+
+    await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(1));
+    const [content, options] = sendUserMessage.mock.calls[0]!;
+    expect(content).toEqual([
+      { type: "image", data: "iVBORw0=", mimeType: "image/png" },
+      { type: "text", text: "keep this" },
+    ]);
+    expect(options).toEqual({ deliverAs: "steer" });
   });
 
   test("provider error (assistant stopReason:error) → forwards `error` to owners (was silent)", async () => {

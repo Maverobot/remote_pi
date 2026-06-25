@@ -43,6 +43,33 @@ class MessageImage {
   int get hashCode => Object.hash(data, mime);
 }
 
+/// Android-owned queued follow-up shown above the composer. Protocol-free
+/// domain value; SyncService maps wire items into this shape.
+class QueuedMsg {
+  final String id;
+  final String text;
+  final bool editable;
+  final DateTime createdAt;
+
+  const QueuedMsg({
+    required this.id,
+    required this.text,
+    required this.editable,
+    required this.createdAt,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is QueuedMsg &&
+      other.id == id &&
+      other.text == text &&
+      other.editable == editable &&
+      other.createdAt == createdAt;
+
+  @override
+  int get hashCode => Object.hash(id, text, editable, createdAt);
+}
+
 class UserMsg extends ChatMessage {
   final String text;
   final UserMsgStatus status;
