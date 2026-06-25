@@ -195,12 +195,19 @@ class CockpitViewModel extends ChangeNotifier {
   GitFileStatus? gitStatusForPath(String absolutePath) {
     final pid = _selectedProjectId;
     if (pid == null) return null;
-    final tree = _gitTree[pid];
-    if (tree == null || tree.isEmpty) return null;
     final root = _projectById(pid)?.path;
     if (root == null) return null;
     final rel = _subOf(absolutePath, root);
-    return rel.isEmpty ? null : tree[rel];
+    if (rel.isEmpty) return null;
+    // Mudança real (mapa agregado) vence; senão herda da raiz colapsada que
+    // cobre este caminho — pasta untracked nova vs. ignorado.
+    final dirty = _gitTree[pid]?[rel];
+    if (dirty != null) return dirty;
+    final info = _gitInfo[pid];
+    if (info == null) return null;
+    if (info.isUntracked(rel)) return GitFileStatus.untracked;
+    if (info.isIgnored(rel)) return GitFileStatus.ignored;
+    return null;
   }
 
   /// Aba que o usuário está olhando.

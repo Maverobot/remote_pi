@@ -57,17 +57,24 @@ class GitStatusReaderImpl implements GitStatusReader {
       }
 
       // Status por arquivo (`-z` = entradas separadas por NUL, paths crus sem
-      // aspas/escape). Mapa path→status; renames consomem o path antigo.
+      // aspas/escape). `--ignored` adiciona entradas `!!` (pastas ignoradas
+      // colapsadas — não recursa dentro, então é barato). Mapa path→status +
+      // set de raízes ignoradas; renames consomem o path antigo.
       final statusRes = await Process.run(git, [
         '-C',
         path,
         'status',
         '--porcelain=v1',
         '-z',
+        '--ignored',
       ]);
-      final files = statusRes.exitCode == 0
+      final (files, ignored, untrackedDirs) = statusRes.exitCode == 0
           ? _parsePorcelainZ(statusRes.stdout as String)
-          : const <String, GitFileStatus>{};
+          : (
+              const <String, GitFileStatus>{},
+              const <String>{},
+              const <String>{},
+            );
 
       // Ahead/behind vs upstream (sem fetch — reflete o último estado conhecido).
       // `--count A...B` com `@{upstream}...HEAD` devolve "<behind>\t<ahead>";
@@ -95,6 +102,8 @@ class GitStatusReaderImpl implements GitStatusReader {
         ahead: ahead,
         behind: behind,
         files: files,
+        ignored: ignored,
+        untrackedDirs: untrackedDirs,
       );
     } catch (_) {
       return null; // git ausente / pasta inacessível
@@ -103,22 +112,40 @@ class GitStatusReaderImpl implements GitStatusReader {
 
   /// Parseia o output de `git status --porcelain=v1 -z`. Cada entrada é
   /// `XY <path>` terminada por NUL; renames/copies (`R`/`C` no index) têm o
-  /// path de origem como uma entrada NUL extra, que ignoramos.
-  static Map<String, GitFileStatus> _parsePorcelainZ(String raw) {
+  /// path de origem como uma entrada NUL extra, que ignoramos. Devolve:
+  /// (mapa path→status, raízes ignoradas, raízes de pasta untracked colapsada).
+  ///
+  /// `git` colapsa pastas totalmente novas/ignoradas numa única entrada com
+  /// barra final (`?? dir/`, `!! dir/`); guardamos a raiz pra colorir todos os
+  /// descendentes (que não são enumerados).
+  static (Map<String, GitFileStatus>, Set<String>, Set<String>)
+  _parsePorcelainZ(String raw) {
     final out = <String, GitFileStatus>{};
+    final ignored = <String>{};
+    final untrackedDirs = <String>{};
     final tokens = raw.split('\u0000');
     for (var i = 0; i < tokens.length; i++) {
       final entry = tokens[i];
       if (entry.length < 4) continue; // "XY p" mínimo; '' final do split
       final x = entry[0];
       final y = entry[1];
-      final pathPart = entry.substring(3); // pula "XY "
+      var pathPart = entry.substring(3); // pula "XY "
       // Rename/copy no index → o próximo token (NUL) é o path de origem; pula.
       if (x == 'R' || x == 'C') i++;
+      final isDir = pathPart.endsWith('/'); // pasta colapsada (?? ou !!)
+      if (isDir) pathPart = pathPart.substring(0, pathPart.length - 1);
+      if (pathPart.isEmpty) continue;
+      if (x == '!' && y == '!') {
+        ignored.add(pathPart); // raiz ignorada (cobre descendentes)
+        continue;
+      }
+      if (x == '?' && y == '?' && isDir) {
+        untrackedDirs.add(pathPart); // pasta nova colapsada → cobre descendentes
+      }
       final status = _classify(x, y);
       if (status != null) out[pathPart] = status;
     }
-    return out;
+    return (out, ignored, untrackedDirs);
   }
 
   /// Mapeia os dois chars de status do porcelain pro nosso enum. A mudança no

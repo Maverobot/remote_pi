@@ -8,6 +8,8 @@ class GitInfo {
     this.ahead = 0,
     this.behind = 0,
     this.files = const <String, GitFileStatus>{},
+    this.ignored = const <String>{},
+    this.untrackedDirs = const <String>{},
   });
 
   /// Branch atual (ou short SHA se detached HEAD).
@@ -24,6 +26,31 @@ class GitInfo {
   /// sempre com separador `/`. Vazio = árvore limpa.
   final Map<String, GitFileStatus> files;
 
+  /// Raízes ignoradas pelo `.gitignore` (caminhos relativos, sem barra final;
+  /// `git` colapsa pastas ignoradas → um caminho cobre tudo abaixo dele). Não
+  /// contam como sujo; só pintam a árvore de cinza.
+  final Set<String> ignored;
+
+  /// Diretórios **untracked colapsados** pelo `git` (uma pasta totalmente nova
+  /// vira uma única entrada `?? dir/`; os filhos não são enumerados). Guardamos
+  /// a raiz (sem barra) pra colorir todos os descendentes como untracked.
+  final Set<String> untrackedDirs;
+
+  /// `true` se [rel] (caminho relativo, separador `/`) está sob algo ignorado.
+  bool isIgnored(String rel) => _under(ignored, rel);
+
+  /// `true` se [rel] está sob um diretório untracked colapsado.
+  bool isUntracked(String rel) => _under(untrackedDirs, rel);
+
+  static bool _under(Set<String> roots, String rel) {
+    if (roots.isEmpty) return false;
+    if (roots.contains(rel)) return true;
+    for (final root in roots) {
+      if (rel.startsWith('$root/')) return true;
+    }
+    return false;
+  }
+
   /// Nº de arquivos com mudança. 0 = árvore limpa.
   int get dirtyCount => files.length;
 
@@ -39,11 +66,22 @@ class GitInfo {
         other.branch == branch &&
         other.ahead == ahead &&
         other.behind == behind &&
-        _sameFiles(other.files, files);
+        _sameFiles(other.files, files) &&
+        other.ignored.length == ignored.length &&
+        other.ignored.containsAll(ignored) &&
+        other.untrackedDirs.length == untrackedDirs.length &&
+        other.untrackedDirs.containsAll(untrackedDirs);
   }
 
   @override
-  int get hashCode => Object.hash(branch, ahead, behind, files.length);
+  int get hashCode => Object.hash(
+    branch,
+    ahead,
+    behind,
+    files.length,
+    ignored.length,
+    untrackedDirs.length,
+  );
 
   static bool _sameFiles(
     Map<String, GitFileStatus> a,

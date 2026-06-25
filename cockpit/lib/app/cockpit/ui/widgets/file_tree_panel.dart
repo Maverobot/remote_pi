@@ -521,6 +521,8 @@ Color? _gitColor(AppColors colors, GitFileStatus? status) {
   switch (status) {
     case null:
       return null;
+    case GitFileStatus.ignored:
+      return colors.text4; // atenuado (faint), estilo VS Code
     case GitFileStatus.modified:
       return colors.warn;
     case GitFileStatus.staged:

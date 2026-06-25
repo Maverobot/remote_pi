@@ -5,6 +5,10 @@
 /// ([strongest]). Ex.: uma pasta com um untracked e um modified mostra
 /// `modified`; com um conflito, mostra `conflict`.
 enum GitFileStatus {
+  /// Ignorado pelo `.gitignore` (`!!`). O mais fraco — qualquer mudança real
+  /// vence na agregação de pasta.
+  ignored,
+
   /// Arquivo novo, ainda não rastreado (`??`).
   untracked,
 

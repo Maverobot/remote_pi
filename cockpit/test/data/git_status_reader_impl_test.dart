@@ -96,6 +96,52 @@ void main() {
     expect(info!.files['a file.txt'], GitFileStatus.untracked);
   });
 
+  test('pasta nova (untracked) colapsada → cobre descendentes', () async {
+    if (!await gitAvailable()) {
+      markTestSkipped('git não disponível');
+      return;
+    }
+    // Diretório totalmente novo → git colapsa em "?? novo/".
+    await Directory('${repo.path}/novo/sub').create(recursive: true);
+    await write('novo/a.txt', '1');
+    await write('novo/sub/b.txt', '2');
+
+    final info = await reader.read(repo.path);
+    expect(info, isNotNull);
+    expect(info!.untrackedDirs, contains('novo'));
+    // A própria pasta colapsada entra como untracked (colore a linha + ancestrais).
+    expect(info.files['novo'], GitFileStatus.untracked);
+    // Descendentes não enumerados, mas cobertos por isUntracked.
+    expect(info.isUntracked('novo/a.txt'), isTrue);
+    expect(info.isUntracked('novo/sub/b.txt'), isTrue);
+    expect(info.isUntracked('lib/app.dart'), isFalse);
+  });
+
+  test('coleta raízes ignoradas (.gitignore) sem contar como sujo', () async {
+    if (!await gitAvailable()) {
+      markTestSkipped('git não disponível');
+      return;
+    }
+    await write('.gitignore', 'build/\n*.log\n');
+    await git(['add', '.gitignore']);
+    await git(['commit', '-m', 'gitignore']);
+    await Directory('${repo.path}/build').create();
+    await write('build/out.bin', 'x');
+    await write('debug.log', 'noise');
+
+    final info = await reader.read(repo.path);
+    expect(info, isNotNull);
+    // Pasta colapsada → 'build' (sem barra); arquivo solto → 'debug.log'.
+    expect(info!.ignored, containsAll(<String>{'build', 'debug.log'}));
+    // Ignorados não entram em files nem contam como sujo.
+    expect(info.files.containsKey('build/out.bin'), isFalse);
+    expect(info.isDirty, isFalse);
+    // Cobertura sob a raiz colapsada.
+    expect(info.isIgnored('build/out.bin'), isTrue);
+    expect(info.isIgnored('debug.log'), isTrue);
+    expect(info.isIgnored('lib/app.dart'), isFalse);
+  });
+
   test('ahead/behind vs upstream local', () async {
     if (!await gitAvailable()) {
       markTestSkipped('git não disponível');
