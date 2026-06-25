@@ -71,6 +71,59 @@ void main() {
     });
   });
 
+  group('Queued messages', () {
+    test('parses steer consumed clear signal', () {
+      final msg = ServerMessage.fromJson({
+        'type': 'steer_consumed',
+        'id': 's1',
+      }) as SteerConsumed;
+
+      expect(msg.id, 's1');
+    });
+
+    test('parses plural items and legacy fallback', () {
+      final plural = ServerMessage.fromJson({
+        'type': 'queued_message_state',
+        'items': [
+          {
+            'id': 'q1',
+            'text': 'next',
+            'editable': true,
+            'created_at': 123,
+          },
+        ],
+      }) as QueuedMessageState;
+
+      expect(plural.items, hasLength(1));
+      expect(plural.items.single.id, 'q1');
+      expect(plural.items.single.text, 'next');
+      expect(plural.items.single.editable, isTrue);
+      expect(plural.text, 'next');
+
+      final legacy = ServerMessage.fromJson({
+        'type': 'queued_message_state',
+        'id': 'old',
+        'text': 'legacy',
+      }) as QueuedMessageState;
+
+      expect(legacy.items, hasLength(1));
+      expect(legacy.items.single.id, 'old');
+      expect(legacy.items.single.text, 'legacy');
+      expect(legacy.items.single.editable, isTrue);
+    });
+
+    test('encodes targeted clear', () {
+      expect(
+        QueuedMessageClear(id: 'req1', targetId: 'q1').toJson(),
+        {'type': 'queued_message_clear', 'id': 'req1', 'target_id': 'q1'},
+      );
+      expect(
+        QueuedMessageClear(id: 'req2').toJson(),
+        {'type': 'queued_message_clear', 'id': 'req2'},
+      );
+    });
+  });
+
   group('ToolRequest', () {
     test('parses tool_call_id, tool, args', () {
       final msg = ServerMessage.fromJson({

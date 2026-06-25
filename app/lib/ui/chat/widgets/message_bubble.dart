@@ -21,6 +21,7 @@ class UserBubble extends StatelessWidget {
     // a red exclamation badge so the user knows to retry.
     final isPending = message.status == UserMsgStatus.pending;
     final isFailed = message.status == UserMsgStatus.failed;
+    final isSteering = message.steering;
     // Plan/30 — when an image is attached the bubble becomes an ImageBubble
     // (thumbnail + caption); otherwise the existing text card.
     final image = message.image;
@@ -61,13 +62,13 @@ class UserBubble extends StatelessWidget {
                       ),
                     ),
             ),
-            if (isPending || isFailed)
+            if (isPending || isSteering || isFailed)
               Padding(
                 padding: const EdgeInsets.only(top: 4, right: 4),
                 child: Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    if (isPending) ...[
+                    if (isPending || isSteering) ...[
                       SizedBox(
                         width: 10,
                         height: 10,
@@ -78,7 +79,7 @@ class UserBubble extends StatelessWidget {
                       ),
                       const SizedBox(width: 6),
                       Text(
-                        'sending…',
+                        isSteering ? 'steering…' : 'sending…',
                         style: typo.sansBody.copyWith(
                           color: colors.muted,
                           fontSize: 11,

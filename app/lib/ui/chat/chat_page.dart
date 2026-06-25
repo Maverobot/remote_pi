@@ -426,8 +426,8 @@ class ChatPage extends StatelessWidget {
       onOpenQuickActions: actionsEnabled
           ? () => showQuickActionsSheet(context)
           : null,
-      queuedText: isReady ? state.queuedText : null,
-      onSetQueued: vm.setQueuedMessage,
+      queuedMessages: isReady ? state.queuedMessages : const [],
+      onSetQueued: vm.queueMessage,
       onClearQueued: vm.clearQueuedMessage,
       // Plan/29 — hold-to-talk voice input. The VM is route-scoped (bound in
       // app_router alongside ChatViewModel); InputBar listens to it directly,

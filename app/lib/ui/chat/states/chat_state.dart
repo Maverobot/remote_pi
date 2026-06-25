@@ -43,7 +43,10 @@ class ChatReady extends ChatState {
   /// per-room, like Home) actually triggers a rebuild even when nothing
   /// else changed. See [ChatViewModel.isWorking].
   final bool isWorking;
-  final String? queuedText;
+  final List<QueuedMsg> queuedMessages;
+
+  String? get queuedText =>
+      queuedMessages.isEmpty ? null : queuedMessages.first.text;
 
   const ChatReady({
     required this.messages,
@@ -53,7 +56,7 @@ class ChatReady extends ChatState {
     this.peerOfflineReason,
     this.peerPresence = const PresenceUnknown(),
     this.isWorking = false,
-    this.queuedText,
+    this.queuedMessages = const [],
   });
 
   ChatReady copyWith({
@@ -64,10 +67,10 @@ class ChatReady extends ChatState {
     String? peerOfflineReason,
     PresenceState? peerPresence,
     bool? isWorking,
-    String? queuedText,
+    List<QueuedMsg>? queuedMessages,
     bool clearStreaming = false,
     bool clearPeerOffline = false,
-    bool clearQueuedText = false,
+    bool clearQueuedMessages = false,
   }) =>
       ChatReady(
         messages: messages ?? this.messages,
@@ -79,7 +82,9 @@ class ChatReady extends ChatState {
             : (peerOfflineReason ?? this.peerOfflineReason),
         peerPresence: peerPresence ?? this.peerPresence,
         isWorking: isWorking ?? this.isWorking,
-        queuedText: clearQueuedText ? null : (queuedText ?? this.queuedText),
+        queuedMessages: clearQueuedMessages
+            ? const []
+            : (queuedMessages ?? this.queuedMessages),
       );
 
   @override
@@ -92,7 +97,7 @@ class ChatReady extends ChatState {
       other.peerOfflineReason == peerOfflineReason &&
       other.peerPresence.runtimeType == peerPresence.runtimeType &&
       other.isWorking == isWorking &&
-      other.queuedText == queuedText;
+      other.queuedMessages == queuedMessages;
 
   @override
   int get hashCode => Object.hash(
@@ -103,7 +108,7 @@ class ChatReady extends ChatState {
         peerOfflineReason,
         peerPresence.runtimeType,
         isWorking,
-        queuedText,
+        queuedMessages,
       );
 }
 

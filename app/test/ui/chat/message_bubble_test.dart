@@ -62,4 +62,56 @@ void main() {
     expect(find.byType(SelectableText), findsOneWidget);
     expect(find.text('my message'), findsOneWidget);
   });
+
+  testWidgets('pending steer bubble shows steering label', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: UserBubble(
+            UserMsg(
+              id: 'u1',
+              text: 'busy follow-up',
+              status: UserMsgStatus.pending,
+              steering: true,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('steering…'), findsOneWidget);
+    expect(find.text('sending…'), findsNothing);
+  });
+
+  testWidgets('confirmed steer bubble keeps steering label', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: UserBubble(
+            UserMsg(id: 'u1', text: 'accepted follow-up', steering: true),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('steering…'), findsOneWidget);
+  });
+
+  testWidgets('pending normal bubble keeps sending label', (tester) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(
+          body: UserBubble(
+            UserMsg(
+              id: 'u1',
+              text: 'normal send',
+              status: UserMsgStatus.pending,
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('sending…'), findsOneWidget);
+  });
 }

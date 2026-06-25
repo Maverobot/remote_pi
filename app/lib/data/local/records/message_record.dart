@@ -27,6 +27,9 @@ class MessageRecord {
   /// Optimistic: sent locally, not yet echoed by the Pi.
   final bool pending;
 
+  /// Local-only hint: this pending user row was sent while the Pi was busy.
+  final bool steering;
+
   /// Plan/32 — tokens reclaimed by a compaction (compaction rows only).
   final int? tokensBefore;
 
@@ -40,6 +43,7 @@ class MessageRecord {
     this.askUser,
     required this.ts,
     this.pending = false,
+    this.steering = false,
     this.tokensBefore,
   });
 
@@ -50,6 +54,7 @@ class MessageRecord {
     ToolEventData? tool,
     AskUserPromptData? askUser,
     bool? pending,
+    bool? steering,
   }) => MessageRecord(
     id: id,
     seq: seq ?? this.seq,
@@ -60,6 +65,7 @@ class MessageRecord {
     askUser: askUser ?? this.askUser,
     ts: ts,
     pending: pending ?? this.pending,
+    steering: steering ?? this.steering,
     tokensBefore: tokensBefore,
   );
 
@@ -73,6 +79,7 @@ class MessageRecord {
     if (askUser != null) 'ask_user': askUser!.toJson(),
     'ts': ts.millisecondsSinceEpoch,
     'pending': pending,
+    if (steering) 'steering': true,
     if (tokensBefore != null) 'tokens_before': tokensBefore,
   };
 
@@ -102,6 +109,7 @@ class MessageRecord {
           : null,
       ts: DateTime.fromMillisecondsSinceEpoch((j['ts'] as num).toInt()),
       pending: (j['pending'] as bool?) ?? false,
+      steering: (j['steering'] as bool?) ?? false,
       tokensBefore: (j['tokens_before'] as num?)?.toInt(),
     );
   }
@@ -114,6 +122,7 @@ class MessageRecord {
           id: id,
           text: text,
           status: pending ? UserMsgStatus.pending : UserMsgStatus.confirmed,
+          steering: steering,
           image: image,
         );
       case MsgRole.assistant:

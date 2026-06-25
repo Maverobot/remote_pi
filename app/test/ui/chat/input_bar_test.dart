@@ -1,6 +1,7 @@
 // Plan/28 Wave C — settings/quick-actions icon visibility in the
 // chat input bar.
 
+import 'package:app/domain/session_state.dart';
 import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
@@ -140,6 +141,108 @@ void main() {
     expect(find.byIcon(LucideIcons.square600), findsOneWidget); // stop
     expect(find.byIcon(LucideIcons.send600), findsNothing);
     expect(find.byIcon(LucideIcons.mic600), findsNothing);
+  });
+
+  testWidgets('streaming + text uses existing send button for steer', (
+    tester,
+  ) async {
+    String? queued;
+    String? sent;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            disabled: false,
+            streaming: true,
+            onSend: (text) => sent = text,
+            onCancel: () {},
+            onSetQueued: (text) => queued = text,
+          ),
+        ),
+      ),
+    );
+
+    await tester.enterText(find.byType(TextField), 'steer me');
+    await tester.pump();
+    expect(find.byKey(const Key('input-bar-queue')), findsNothing);
+    await tester.tap(find.byKey(const Key('input-bar-action')));
+    await tester.pump();
+
+    expect(sent, 'steer me');
+    expect(queued, isNull);
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      '',
+    );
+  });
+
+  testWidgets('queued preview edits and clears by id', (tester) async {
+    String? cleared;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            disabled: false,
+            streaming: true,
+            queuedMessages: [
+              QueuedMsg(
+                id: 'q1',
+                text: 'queued text',
+                editable: true,
+                createdAt: DateTime.fromMillisecondsSinceEpoch(1),
+              ),
+            ],
+            onSend: (_) {},
+            onCancel: () {},
+            onClearQueued: (id) => cleared = id,
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('queued text'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('input-bar-queued-preview')));
+    await tester.pump();
+
+    expect(cleared, 'q1');
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      'queued text',
+    );
+  });
+
+  testWidgets('read-only queued preview has no clear affordance', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InputBar(
+            disabled: false,
+            streaming: true,
+            queuedMessages: [
+              QueuedMsg(
+                id: 'q1',
+                text: 'queued text',
+                editable: false,
+                createdAt: DateTime.fromMillisecondsSinceEpoch(1),
+              ),
+            ],
+            onSend: (_) {},
+            onCancel: () {},
+            onClearQueued: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    expect(find.byKey(const Key('input-bar-clear-queued')), findsNothing);
+    await tester.tap(find.byKey(const Key('input-bar-queued-preview')));
+    await tester.pump();
+    expect(
+      tester.widget<TextField>(find.byType(TextField)).controller?.text,
+      '',
+    );
   });
 
   testWidgets('streaming + text turns send into steering', (tester) async {

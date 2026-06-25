@@ -43,9 +43,37 @@ class MessageImage {
   int get hashCode => Object.hash(data, mime);
 }
 
+/// Android-owned queued follow-up shown above the composer. Protocol-free
+/// domain value; SyncService maps wire items into this shape.
+class QueuedMsg {
+  final String id;
+  final String text;
+  final bool editable;
+  final DateTime createdAt;
+
+  const QueuedMsg({
+    required this.id,
+    required this.text,
+    required this.editable,
+    required this.createdAt,
+  });
+
+  @override
+  bool operator ==(Object other) =>
+      other is QueuedMsg &&
+      other.id == id &&
+      other.text == text &&
+      other.editable == editable &&
+      other.createdAt == createdAt;
+
+  @override
+  int get hashCode => Object.hash(id, text, editable, createdAt);
+}
+
 class UserMsg extends ChatMessage {
   final String text;
   final UserMsgStatus status;
+  final bool steering;
 
   /// Plan/30 — optional attached image (one max). `null` for text-only
   /// messages, which is every message before this feature.
@@ -55,11 +83,17 @@ class UserMsg extends ChatMessage {
     required super.id,
     required this.text,
     this.status = UserMsgStatus.confirmed,
+    this.steering = false,
     this.image,
   });
 
-  UserMsg copyWith({UserMsgStatus? status}) =>
-      UserMsg(id: id, text: text, status: status ?? this.status, image: image);
+  UserMsg copyWith({UserMsgStatus? status, bool? steering}) => UserMsg(
+    id: id,
+    text: text,
+    status: status ?? this.status,
+    steering: steering ?? this.steering,
+    image: image,
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -67,10 +101,11 @@ class UserMsg extends ChatMessage {
       other.id == id &&
       other.text == text &&
       other.status == status &&
+      other.steering == steering &&
       other.image == image;
 
   @override
-  int get hashCode => Object.hash(id, text, status, image);
+  int get hashCode => Object.hash(id, text, status, steering, image);
 }
 
 class AssistantMsg extends ChatMessage {

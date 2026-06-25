@@ -21,6 +21,7 @@ void main() {
         image: const MessageImage(data: 'QUJD', mime: 'image/jpeg'),
         ts: DateTime.fromMillisecondsSinceEpoch(1700),
         pending: true,
+        steering: true,
       );
       final back = MessageRecord.fromJson(r.toJson());
       expect(back.id, 'u1');
@@ -29,9 +30,11 @@ void main() {
       expect(back.text, 'hello');
       expect(back.image?.data, 'QUJD');
       expect(back.pending, isTrue);
+      expect(back.steering, isTrue);
       // Projects to the domain UserMsg the UI renders.
       final msg = back.toChatMessage() as UserMsg;
       expect(msg.status, UserMsgStatus.pending);
+      expect(msg.steering, isTrue);
       expect(msg.image, isNotNull);
     });
 

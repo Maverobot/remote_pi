@@ -274,32 +274,49 @@ aceito nesta fatia por usar imagem comprimida (~150–400 KB). Histórico/
 
 ## Mensagem enfileirada durante turn ativo
 
-Fila curta **Pi-side, em memória**: enquanto há turn ativo, o app pode guardar
-um próximo prompt textual. A Pi-extension envia quando o turn atual acaba. Não é
-fila offline do relay; restart perde o estado.
+Fila curta **Pi-side, em memória**, de propriedade do Android: enquanto há turn
+ativo, o app pode guardar próximos prompts textuais de follow-up. A
+Pi-extension drena um item quando o turn atual acaba. Não é fila offline do
+relay; restart perde o estado.
 
 ### Wire
 
 ```jsonc
 // app → Pi-extension
 { "type": "queued_message_set", "id": "msg-2", "text": "próximo prompt" }
-{ "type": "queued_message_clear", "id": "clear-1" }
+{ "type": "queued_message_clear", "id": "clear-1", "target_id": "msg-2" }
+{ "type": "queued_message_clear", "id": "clear-all" }
 
 // Pi-extension → app(s)
-{ "type": "queued_message_state", "id": "msg-2", "text": "próximo prompt" }
-{ "type": "queued_message_state" } // vazio
+{
+  "type": "queued_message_state",
+  "id": "msg-2",
+  "text": "próximo prompt",
+  "items": [
+    { "id": "msg-2", "text": "próximo prompt", "editable": true, "created_at": 1782250000000 }
+  ]
+}
+{ "type": "queued_message_state", "items": [] } // vazio
 ```
 
 ### Semântica
 
-- `queued_message_set`: define/substitui uma pendência textual. `id` vira o id
-  do `user_message` drenado. App pode juntar múltiplos prompts com `\n`.
-- `queued_message_clear`: cancela a pendência.
-- Drain: quando `!turnActive && !currentTurnId`, limpa o estado, broadcasta
-  `queued_message_state` vazio, e processa como `user_message` normal
-  (`echo user_message` + `sendUserMessage(text)`).
+- `queued_message_set`: cria/substitui uma pendência textual Android-owned. `id`
+  vira o id do `user_message` drenado.
+- `queued_message_clear.target_id`: cancela um item. Sem `target_id`, cancela
+  todos os itens Android-owned (compat com o antigo clear de slot único).
+- Enquanto o Pi está ocupado, cada mudança broadcasta o estado completo para
+  todos os owners conectados.
+- Se `queued_message_set` chega quando o Pi já está idle, a extensão drena
+  imediatamente como `user_message` normal e broadcasta estado vazio, para não
+  deixar item preso esperando um turn futuro.
+- Drain: quando `currentTurnId == null`, `working != true` e não há compaction
+  ativa, remove um item, broadcasta `queued_message_state`, faz handoff para o
+  SDK, e só então ecoa `user_message` normal para todos os owners.
 - `session_sync`: envia o `queued_message_state` atual antes do histórico.
 - Só texto. `images` seguem apenas no `user_message` imediato.
+- Filas internas do Pi/TUI não são expostas/editáveis neste MVP: a extension API
+  não fornece ids estáveis nem mutação segura dessa fila.
 - Relay inalterado/opaco.
 
 ---

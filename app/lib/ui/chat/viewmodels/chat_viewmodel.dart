@@ -31,7 +31,7 @@ class ChatViewModel extends ViewModel<ChatState> {
   StreamSubscription<RuntimeRecord>? _runtimeSub;
   StreamSubscription<StreamingMessage?>? _streamingSub;
   StreamSubscription<bool>? _workingSub;
-  StreamSubscription<String?>? _queuedSub;
+  StreamSubscription<List<QueuedMsg>>? _queuedSub;
   StreamSubscription<SessionEvent>? _eventSub;
   StreamSubscription<Map<String, List<RoomInfo>>>? _roomsSub;
   StreamSubscription<ConnectionStatus>? _statusSub;
@@ -44,7 +44,7 @@ class ChatViewModel extends ViewModel<ChatState> {
   List<ChatMessage> _messages = const [];
   StreamingMessage? _streaming;
   bool _working = false;
-  String? _queuedText;
+  List<QueuedMsg> _queuedMessages = const [];
   RuntimeRecord _runtime = const RuntimeRecord();
   bool _pairingRevoked = false;
   String? _peerOfflineReason;
@@ -106,16 +106,27 @@ class ChatViewModel extends ViewModel<ChatState> {
   /// The id to `cancel` to stop the in-flight reply (the user message the
   /// agent is answering). Null when idle. Prefers the live streaming target,
   /// falls back to the SyncService's tracked turn id.
-  String? get cancelTargetId => _streaming?.inReplyTo ?? _sync.workingReplyTo;
+  String? get cancelTargetId =>
+      _streaming?.inReplyTo ??
+      _sync.workingReplyTo ??
+      (isWorking ? 'working' : null);
 
-  String? get queuedText => _queuedText;
+  List<QueuedMsg> get queuedMessages => _queuedMessages;
+  String? get queuedText =>
+      _queuedMessages.isEmpty ? null : _queuedMessages.first.text;
 
-  void setQueuedMessage(String text) {
-    unawaited(_sync.setQueuedMessage(text));
+  void queueMessage(String text) {
+    unawaited(_sync.queueMessage(text));
   }
 
-  void clearQueuedMessage() {
-    unawaited(_sync.clearQueuedMessage());
+  void setQueuedMessage(String text) => queueMessage(text);
+
+  void clearQueuedMessage([String? id]) {
+    unawaited(_sync.clearQueuedMessage(id));
+  }
+
+  void clearQueuedMessages() {
+    unawaited(_sync.clearQueuedMessages());
   }
 
   // ---------------------------------------------------------------------------
@@ -158,7 +169,7 @@ class ChatViewModel extends ViewModel<ChatState> {
     // the constructor avoids inheriting the previous chat's bubble/pill.
     _streaming = _sync.streaming;
     _working = _sync.isWorking;
-    _queuedText = _sync.queuedText;
+    _queuedMessages = _sync.queuedMessages;
     _msgsSub = _read.watchMessages(epk, roomId).listen(_onMessages);
     _runtimeSub = _read.watchRuntime(epk, roomId).listen(_onRuntime);
 
@@ -182,8 +193,8 @@ class ChatViewModel extends ViewModel<ChatState> {
     _recompute();
   }
 
-  void _onQueued(String? text) {
-    _queuedText = text;
+  void _onQueued(List<QueuedMsg> messages) {
+    _queuedMessages = messages;
     _recompute();
   }
 
@@ -248,7 +259,7 @@ class ChatViewModel extends ViewModel<ChatState> {
       peerOfflineReason: _peerOfflineReason,
       peerPresence: peerPresence,
       isWorking: isWorking,
-      queuedText: _queuedText,
+      queuedMessages: _queuedMessages,
     );
   }
 

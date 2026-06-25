@@ -58,9 +58,9 @@ class SyncService extends Service {
   final StreamController<SessionEvent> _eventController =
       StreamController<SessionEvent>.broadcast();
 
-  String? _queuedText;
-  final StreamController<String?> _queuedController =
-      StreamController<String?>.broadcast();
+  List<QueuedMsg> _queuedMessages = const [];
+  final StreamController<List<QueuedMsg>> _queuedController =
+      StreamController<List<QueuedMsg>>.broadcast();
 
   bool _pendingSyncRequest = false;
   Timer? _syncDebounce;
@@ -104,8 +104,10 @@ class SyncService extends Service {
   StreamingMessage? get streaming => _streaming;
   Stream<StreamingMessage?> get streamingStream => _streamingController.stream;
   Stream<SessionEvent> get events => _eventController.stream;
-  String? get queuedText => _queuedText;
-  Stream<String?> get queuedStream => _queuedController.stream;
+  List<QueuedMsg> get queuedMessages => _queuedMessages;
+  String? get queuedText =>
+      _queuedMessages.isEmpty ? null : _queuedMessages.first.text;
+  Stream<List<QueuedMsg>> get queuedStream => _queuedController.stream;
 
   /// True while the active session's agent is producing a reply (whole turn).
   bool get isWorking => _working;
@@ -146,7 +148,7 @@ class SyncService extends Service {
     _chunkBuffer.clear();
     _chunkReplyTo = '';
     _workingReplyTo = null;
-    _setQueuedText(null);
+    _setQueuedMessages(const []);
     // Session switch: the previous chat's in-flight sends are no longer ours
     // to confirm — drop their backstops so a stale timer can't fire later.
     _cancelAllSendTimers();
@@ -179,6 +181,7 @@ class SyncService extends Service {
           image: image,
           ts: now,
           pending: true,
+          steering: isSteer,
         ),
       );
       if (!isSteer) {
@@ -262,19 +265,41 @@ class SyncService extends Service {
   @visibleForTesting
   int get debugPendingSendTimerCount => _pendingSendTimers.length;
 
-  Future<void> setQueuedMessage(String text) async {
+  Future<void> queueMessage(String text) async {
     final ch = _conn.channel;
     if (ch == null) return;
-    _setQueuedText(text);
-    await ch.send(QueuedMessageSet(id: _newId(), text: text));
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+    final id = _newId();
+    _setQueuedMessages([
+      ..._queuedMessages,
+      QueuedMsg(
+        id: id,
+        text: trimmed,
+        editable: true,
+        createdAt: DateTime.now(),
+      ),
+    ]);
+    await ch.send(QueuedMessageSet(id: id, text: trimmed));
   }
 
-  Future<void> clearQueuedMessage() async {
+  Future<void> setQueuedMessage(String text) => queueMessage(text);
+
+  Future<void> clearQueuedMessage([String? targetId]) async {
+    if (targetId == null) {
+      _setQueuedMessages(const []);
+    } else {
+      _setQueuedMessages([
+        for (final item in _queuedMessages)
+          if (item.id != targetId) item,
+      ]);
+    }
     final ch = _conn.channel;
-    _setQueuedText(null);
     if (ch == null) return;
-    await ch.send(QueuedMessageClear(id: _newId()));
+    await ch.send(QueuedMessageClear(id: _newId(), targetId: targetId));
   }
+
+  Future<void> clearQueuedMessages() => clearQueuedMessage();
 
   Future<void> cancel(String targetId) async {
     // User-driven cancel of this message → disarm its no-echo backstop too.
@@ -454,9 +479,10 @@ class SyncService extends Service {
         _flushTimer = Timer(const Duration(milliseconds: 16), _flushChunks);
         _setWorking(true, replyTo: inReplyTo);
 
-      case AgentDone():
+      case AgentDone(:final inReplyTo):
         // Finalize whatever text accumulated since the last tool boundary.
         final text = _finalizeSegment();
+        _clearSteeringLabel(inReplyTo);
         _setWorking(false, preview: text.isEmpty ? null : text);
 
       case AgentMessage(:final inReplyTo, :final text):
@@ -475,8 +501,19 @@ class SyncService extends Service {
               ),
         );
 
-      case QueuedMessageState(:final text):
-        _setQueuedText(text?.isNotEmpty == true ? text : null);
+      case QueuedMessageState(:final items):
+        _setQueuedMessages([
+          for (final item in items)
+            QueuedMsg(
+              id: item.id,
+              text: item.text,
+              editable: item.editable,
+              createdAt: item.createdAt,
+            ),
+        ]);
+
+      case SteerConsumed(:final id):
+        _clearSteeringLabel(id);
 
       case UserInput(
         :final id,
@@ -489,6 +526,12 @@ class SyncService extends Service {
         debugPrint('[msg-echo] id=$id');
         // Echo arrived → the send landed; disarm the no-echo backstop.
         _pendingSendTimers.remove(id)?.cancel();
+        if (_queuedMessages.any((item) => item.id == id)) {
+          _setQueuedMessages([
+            for (final item in _queuedMessages)
+              if (item.id != id) item,
+          ]);
+        }
         // ignore: discarded_futures
         _upsert(
           MsgRole.user,
@@ -640,12 +683,14 @@ class SyncService extends Service {
         // confirmed user/tool rows as the audit trail of what happened.
         // ignore: discarded_futures
         _removePendingById(targetId);
+        _clearSteeringLabels();
         _setWorking(false);
 
       case Bye(:final rawReason):
         if (!_eventController.isClosed) {
           _eventController.add(PeerWentOffline(rawReason));
         }
+        _clearSteeringLabels();
         _setWorking(false);
         final peer = _conn.activePeer;
         if (peer != null) {
@@ -670,6 +715,7 @@ class SyncService extends Service {
           break;
         }
         _discardStreamingState();
+        _clearSteeringLabels();
         _setWorking(false);
         // ignore: discarded_futures
         _upsert(
@@ -1050,6 +1096,45 @@ class SyncService extends Service {
     });
   }
 
+  void _clearSteeringLabel(String id) {
+    final epk = _activeEpk;
+    if (epk == null) return;
+    final room = _activeRoomId;
+    // ignore: discarded_futures
+    _enqueue(() async {
+      if (_activeEpk != epk || _activeRoomId != room) return;
+      final box = await _boxes.msgsBox(epk, room);
+      final seq = _idToSeq[_key(MsgRole.user, id)];
+      if (seq == null) return;
+      final raw = box.get(seq);
+      if (raw == null) return;
+      final existing = MessageRecord.fromJson(_coerce(raw));
+      if (existing.role != MsgRole.user || !existing.steering) return;
+      await box.put(seq, existing.copyWith(steering: false).toJson());
+    });
+  }
+
+  void _clearSteeringLabels() {
+    final epk = _activeEpk;
+    if (epk == null) return;
+    final room = _activeRoomId;
+    // ignore: discarded_futures
+    _enqueue(() async {
+      if (_activeEpk != epk || _activeRoomId != room) return;
+      final box = await _boxes.msgsBox(epk, room);
+      for (final key in box.keys.toList()) {
+        final raw = box.get(key);
+        if (raw == null) continue;
+        final existing = MessageRecord.fromJson(_coerce(raw));
+        if (existing.role != MsgRole.user || !existing.steering) continue;
+        await box.put(
+          (key as num).toInt(),
+          existing.copyWith(steering: false).toJson(),
+        );
+      }
+    });
+  }
+
   Future<void> _removePendingById(String id) {
     final epk = _activeEpk;
     if (epk == null) return Future<void>.value();
@@ -1084,13 +1169,15 @@ class SyncService extends Service {
     );
   }
 
+  void _setQueuedMessages(List<QueuedMsg> items) {
+    final next = List<QueuedMsg>.unmodifiable(items);
+    if (_queuedMessages == next) return;
+    _queuedMessages = next;
+    if (!_queuedController.isClosed) _queuedController.add(next);
+  }
+
   /// Single source of "the active session is working". Drives the in-memory
   /// flag/stream (chat pill) AND the durable session index (Home dot).
-  void _setQueuedText(String? text) {
-    if (_queuedText == text) return;
-    _queuedText = text;
-    if (!_queuedController.isClosed) _queuedController.add(text);
-  }
 
   void _setWorking(bool on, {String? preview, String? replyTo}) {
     _setActivity(

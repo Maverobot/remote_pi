@@ -156,6 +156,10 @@ void main() {
         (m) => m.text == 'refine this',
       );
       expect(sent.streamingBehavior, UserMessageStreamingBehavior.steer);
+      final steerRow = messages(s.epk).singleWhere((r) => r.id == sent.id);
+      expect(steerRow.pending, isTrue);
+      expect(steerRow.steering, isTrue);
+      expect((steerRow.toChatMessage() as UserMsg).steering, isTrue);
       expect(s.sync.workingReplyTo, 'u1');
       expect(s.sync.streaming, isNotNull);
       expect(s.sync.streaming!.inReplyTo, 'u1');
@@ -196,10 +200,147 @@ void main() {
     expect(s.sync.isWorking, isTrue);
     final rows = messages(s.epk);
     expect(rows, hasLength(2));
-    expect(rows.where((r) => r.id == sent.id).single.pending, isFalse);
+    var steerRow = rows.where((r) => r.id == sent.id).single;
+    expect(steerRow.pending, isFalse);
+    expect(steerRow.steering, isTrue, reason: 'echo only means accepted');
+    expect((steerRow.toChatMessage() as UserMsg).steering, isTrue);
     expect(index(s.epk)?.status, SessionActivity.working);
     expect(index(s.epk)?.lastMessagePreview, 'refine this');
 
+    s.ch.push(SteerConsumed(id: sent.id));
+    await _settle();
+
+    steerRow = messages(s.epk).where((r) => r.id == sent.id).single;
+    expect(steerRow.pending, isFalse);
+    expect(
+      steerRow.steering,
+      isFalse,
+      reason: 'actual queue delivery clears label',
+    );
+    expect((steerRow.toChatMessage() as UserMsg).steering, isFalse);
+
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test(
+    'steer_consumed clears one steering label, not every queued steer',
+    () async {
+      final s = await setup();
+      s.ch.push(UserInput(id: 'u1', text: 'primary'));
+      await _settle();
+
+      await s.sync.sendMessage(
+        'first steer',
+        streamingBehavior: UserMessageStreamingBehavior.steer,
+      );
+      await s.sync.sendMessage(
+        'second steer',
+        streamingBehavior: UserMessageStreamingBehavior.steer,
+      );
+      await _settle();
+      final first = s.ch.sent.whereType<UserMessage>().lastWhere(
+        (m) => m.text == 'first steer',
+      );
+      final second = s.ch.sent.whereType<UserMessage>().lastWhere(
+        (m) => m.text == 'second steer',
+      );
+      for (final sent in [first, second]) {
+        s.ch.push(
+          UserInput(
+            id: sent.id,
+            text: sent.text,
+            streamingBehavior: UserMessageStreamingBehavior.steer,
+          ),
+        );
+      }
+      await _settle();
+      expect(
+        messages(s.epk).where((r) => r.id == first.id).single.steering,
+        isTrue,
+      );
+      expect(
+        messages(s.epk).where((r) => r.id == second.id).single.steering,
+        isTrue,
+      );
+
+      s.ch.push(AgentChunk(inReplyTo: 'u1', delta: 'working'));
+      await _settle();
+      expect(
+        messages(s.epk).where((r) => r.id == first.id).single.steering,
+        isTrue,
+      );
+      expect(
+        messages(s.epk).where((r) => r.id == second.id).single.steering,
+        isTrue,
+      );
+
+      s.ch.push(SteerConsumed(id: first.id));
+      await _settle();
+
+      expect(
+        messages(s.epk).where((r) => r.id == first.id).single.steering,
+        isFalse,
+      );
+      expect(
+        messages(s.epk).where((r) => r.id == second.id).single.steering,
+        isTrue,
+      );
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  test('agent_done clears only its steering label as a fallback', () async {
+    final s = await setup();
+    s.ch.push(UserInput(id: 'u1', text: 'primary'));
+    await _settle();
+
+    await s.sync.sendMessage(
+      'first steer',
+      streamingBehavior: UserMessageStreamingBehavior.steer,
+    );
+    await s.sync.sendMessage(
+      'second steer',
+      streamingBehavior: UserMessageStreamingBehavior.steer,
+    );
+    await _settle();
+    final first = s.ch.sent.whereType<UserMessage>().lastWhere(
+      (m) => m.text == 'first steer',
+    );
+    final second = s.ch.sent.whereType<UserMessage>().lastWhere(
+      (m) => m.text == 'second steer',
+    );
+    for (final sent in [first, second]) {
+      s.ch.push(
+        UserInput(
+          id: sent.id,
+          text: sent.text,
+          streamingBehavior: UserMessageStreamingBehavior.steer,
+        ),
+      );
+    }
+    await _settle();
+    expect(
+      messages(s.epk).where((r) => r.id == first.id).single.steering,
+      isTrue,
+    );
+    expect(
+      messages(s.epk).where((r) => r.id == second.id).single.steering,
+      isTrue,
+    );
+
+    s.ch.push(AgentDone(inReplyTo: first.id));
+    await _settle();
+
+    expect(
+      messages(s.epk).where((r) => r.id == first.id).single.steering,
+      isFalse,
+    );
+    expect(
+      messages(s.epk).where((r) => r.id == second.id).single.steering,
+      isTrue,
+    );
     s.conn.dispose();
     s.sync.dispose();
   });
