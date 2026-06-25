@@ -195,7 +195,7 @@ class _FileViewerState extends State<FileViewer> {
       ),
     };
 
-    return ColoredBox(
+    final Widget content = ColoredBox(
       color: colors.panel,
       child: Column(
         children: [
@@ -214,12 +214,11 @@ class _FileViewerState extends State<FileViewer> {
         ],
       ),
     );
-  }
 
-  Widget _editor() {
-    final ctrl = _ctrl;
-    if (ctrl == null) return const SizedBox.shrink();
-    // Cmd+S (macOS) / Ctrl+S salva sem sair do modo edição.
+    // Cmd+S / Ctrl+S envolve o viewer **inteiro** (editor + footer): o markdown/
+    // svg entra em Source pelo botão do footer, então o foco fica fora do campo;
+    // wrapping só o editor deixaria o atalho sem alcance (era o bug do markdown).
+    if (!editable) return content;
     return CallbackShortcuts(
       bindings: {
         const SingleActivator(LogicalKeyboardKey.keyS, meta: true): () =>
@@ -227,8 +226,14 @@ class _FileViewerState extends State<FileViewer> {
         const SingleActivator(LogicalKeyboardKey.keyS, control: true): () =>
             _save(),
       },
-      child: CodeEditor(controller: ctrl, focusNode: _focus),
+      child: content,
     );
+  }
+
+  Widget _editor() {
+    final ctrl = _ctrl;
+    if (ctrl == null) return const SizedBox.shrink();
+    return CodeEditor(controller: ctrl, focusNode: _focus);
   }
 }
 
