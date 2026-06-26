@@ -174,6 +174,13 @@ class CockpitTerminalState extends State<CockpitTerminal> {
 
   late ScrollController _scrollController;
 
+  /// True quando a app (claude/vim) declarou mouse reporting com scroll
+  /// (`MouseMode.reportScroll`): nesse caso **ela** dona o scroll, então
+  /// desligamos o nosso `Scrollable` (vira `NeverScrollableScrollPhysics`) e
+  /// deixamos o [TerminalPane] encaminhar o wheel pra app. Atualizado por um
+  /// listener no terminal porque o mouse mode muda via sequência de escape.
+  bool _appOwnsScroll = false;
+
   CockpitTerminalRender get renderTerminal =>
       _viewportKey.currentContext!.findRenderObject() as CockpitTerminalRender;
 
@@ -185,11 +192,28 @@ class CockpitTerminalState extends State<CockpitTerminal> {
     _shortcutManager = ShortcutManager(
       shortcuts: widget.shortcuts ?? defaultTerminalShortcuts,
     );
+    _appOwnsScroll = widget.terminal.mouseMode.reportScroll;
+    widget.terminal.addListener(_onTerminalMouseModeMaybeChanged);
     super.initState();
+  }
+
+  /// O mouse mode da app muda via escape (DECSET 1000/1002/1006…), processado em
+  /// `terminal.write`, que notifica os listeners. Só reconstruímos quando o bit
+  /// de "app dona o scroll" realmente vira — não a cada frame de output.
+  void _onTerminalMouseModeMaybeChanged() {
+    final owns = widget.terminal.mouseMode.reportScroll;
+    if (owns != _appOwnsScroll) {
+      setState(() => _appOwnsScroll = owns);
+    }
   }
 
   @override
   void didUpdateWidget(CockpitTerminal oldWidget) {
+    if (oldWidget.terminal != widget.terminal) {
+      oldWidget.terminal.removeListener(_onTerminalMouseModeMaybeChanged);
+      widget.terminal.addListener(_onTerminalMouseModeMaybeChanged);
+      _appOwnsScroll = widget.terminal.mouseMode.reportScroll;
+    }
     if (oldWidget.focusNode != widget.focusNode) {
       if (oldWidget.focusNode == null) {
         _focusNode.dispose();
@@ -214,6 +238,7 @@ class CockpitTerminalState extends State<CockpitTerminal> {
 
   @override
   void dispose() {
+    widget.terminal.removeListener(_onTerminalMouseModeMaybeChanged);
     if (widget.focusNode == null) {
       _focusNode.dispose();
     }
@@ -232,6 +257,9 @@ class CockpitTerminalState extends State<CockpitTerminal> {
     Widget child = Scrollable(
       key: _scrollableKey,
       controller: _scrollController,
+      // App dona o scroll (claude/vim com mouse reporting) → não rolamos o nosso
+      // scrollback; o wheel é encaminhado pra app pelo [TerminalPane].
+      physics: _appOwnsScroll ? const NeverScrollableScrollPhysics() : null,
       viewportBuilder: (context, offset) {
         return _CockpitTerminalLeaf(
           key: _viewportKey,

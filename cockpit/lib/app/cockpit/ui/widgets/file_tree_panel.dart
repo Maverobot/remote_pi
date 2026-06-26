@@ -20,9 +20,12 @@ class FileTreePanel extends StatefulWidget {
     super.key,
     required this.rootPath,
     required this.revision,
+    this.selectedPath,
     required this.listChildren,
     required this.gitStatusOf,
     required this.onOpenFile,
+    this.onTapFile,
+    this.onSelectFile,
     required this.onOpenWith,
     required this.onCreateInFolder,
     required this.onCreate,
@@ -40,6 +43,9 @@ class FileTreePanel extends StatefulWidget {
   /// Token externo (VM) que sobe a cada mutação — força reler as pastas abertas.
   final int revision;
 
+  /// Caminho atualmente selecionado no tree (para highlight). Vindo da VM.
+  final String? selectedPath;
+
   final Future<List<FileNode>> Function(String path) listChildren;
 
   /// Status git (cor) de um caminho absoluto. `null` = limpo / fora de repo.
@@ -47,6 +53,12 @@ class FileTreePanel extends StatefulWidget {
 
   /// Duplo-clique num arquivo → abre no pane.
   final ValueChanged<String> onOpenFile;
+
+  /// Clique único → abre preview (VSCode-style).
+  final ValueChanged<String>? onTapFile;
+
+  /// Clique único → seleciona o arquivo no tree (highlight).
+  final ValueChanged<String>? onSelectFile;
 
   /// "Open with" → abre o arquivo/pasta no app/explorador padrão do SO.
   final ValueChanged<String> onOpenWith;
@@ -240,12 +252,17 @@ class _FileTreePanelState extends State<FileTreePanel> {
   Widget build(BuildContext context) {
     final colors = context.colors;
 
+    // Usa o selectedPath da VM se disponível, senão o local.
+    final effectiveSelected = widget.selectedPath ?? _selectedPath;
+
     final edit = _TreeEdit(
       pending: _pending,
       renaming: _renaming,
-      selectedPath: _selectedPath,
+      selectedPath: effectiveSelected,
       onSelect: _select,
       onOpenFile: widget.onOpenFile,
+      onTapFile: widget.onTapFile,
+      onSelectFile: widget.onSelectFile,
       onOpenWith: widget.onOpenWith,
       onCreateInFolder: widget.onCreateInFolder,
       onStartCreate: _startCreate,
@@ -350,6 +367,8 @@ class _TreeEdit {
     required this.selectedPath,
     required this.onSelect,
     required this.onOpenFile,
+    required this.onTapFile,
+    required this.onSelectFile,
     required this.onOpenWith,
     required this.onCreateInFolder,
     required this.onStartCreate,
@@ -369,6 +388,8 @@ class _TreeEdit {
 
   final ValueChanged<String> onSelect;
   final ValueChanged<String> onOpenFile;
+  final ValueChanged<String>? onTapFile;
+  final ValueChanged<String>? onSelectFile;
   final ValueChanged<String> onOpenWith;
   final void Function(String relativeSub, bool terminal) onCreateInFolder;
 
@@ -472,7 +493,11 @@ class _DirViewState extends State<_DirView> {
                 selected: node.path == edit.selectedPath,
                 renaming: edit.renaming == node.path,
                 gitStatus: edit.gitStatusOf(node.path),
-                onTap: () => edit.onSelect(node.path),
+                onTap: () {
+                  edit.onSelect(node.path);
+                  edit.onSelectFile?.call(node.path);
+                  edit.onTapFile?.call(node.path);
+                },
                 onDoubleTap: () => edit.onOpenFile(node.path),
                 onOpenWith: () => edit.onOpenWith(node.path),
                 onStartRename: () => edit.onStartRename(node.path),

@@ -11,9 +11,9 @@ import 'package:flutter/services.dart' show HardwareKeyboard;
 import 'package:flutter/widgets.dart';
 import 'package:xterm/src/core/mouse/button.dart';
 import 'package:xterm/src/core/mouse/button_state.dart';
+import 'package:xterm/src/core/mouse/mode.dart';
 import 'package:xterm/src/ui/controller.dart';
 import 'package:xterm/src/ui/gesture/gesture_detector.dart';
-import 'package:xterm/src/ui/pointer_input.dart';
 
 import 'cockpit_terminal.dart';
 import 'cockpit_terminal_render.dart';
@@ -90,13 +90,19 @@ class _CockpitTerminalGestureHandlerState
     );
   }
 
-  bool get _shouldSendTapEvent =>
-      !widget.readOnly &&
-      // Cmd segurado = o terminal assume o clique (abrir link/seleção), padrão
-      // dos emuladores; não repassa pro app mesmo com mouse reporting ligado.
-      !HardwareKeyboard.instance.isMetaPressed &&
-      // ignore: invalid_use_of_internal_member
-      widget.terminalController.shouldSendPointerInput(PointerInput.tap);
+  /// Seleção local (overlay do nosso renderer) só é permitida quando a app
+  /// **não** dona o mouse, ou quando ⌥ está segurado (escape hatch pra copiar,
+  /// igual iTerm). Com a app no comando (claude/vim), os cliques vão pra ela e a
+  /// seleção é dela — não pintamos uma segunda por cima.
+  bool get _localSelectionAllowed =>
+      terminalView.widget.terminal.mouseMode == MouseMode.none ||
+      HardwareKeyboard.instance.isAltPressed;
+
+  // O forward de mouse pra TUI (down/motion/up) é feito pelo [TerminalPane], que
+  // é a única autoridade — ele vê os eventos crus de ponteiro e sabe encaminhar
+  // o arraste como motion. Aqui NÃO encaminhamos tap (evita reportar o clique
+  // duas vezes pra app). Mantemos só o callback de foco no onTapDown.
+  static const bool _shouldSendTapEvent = false;
 
   void _tapDown(
     GestureTapDownCallback? callback,
@@ -168,15 +174,20 @@ class _CockpitTerminalGestureHandlerState
   }
 
   void onDoubleTapDown(TapDownDetails details) {
+    // Com a app no comando do mouse, o duplo-clique vira seleção de palavra DELA
+    // (via taps encaminhados) — não pintamos uma local por cima.
+    if (!_localSelectionAllowed) return;
     renderTerminal.selectWord(details.localPosition);
   }
 
   void onLongPressStart(LongPressStartDetails details) {
+    if (!_localSelectionAllowed) return;
     _lastLongPressStartDetails = details;
     renderTerminal.selectWord(details.localPosition);
   }
 
   void onLongPressMoveUpdate(LongPressMoveUpdateDetails details) {
+    if (!_localSelectionAllowed) return;
     renderTerminal.selectWord(
       _lastLongPressStartDetails!.localPosition,
       details.localPosition,
@@ -184,6 +195,7 @@ class _CockpitTerminalGestureHandlerState
   }
 
   void onDragStart(DragStartDetails details) {
+    if (!_localSelectionAllowed) return;
     _lastDragStartDetails = details;
 
     details.kind == PointerDeviceKind.mouse
@@ -192,6 +204,7 @@ class _CockpitTerminalGestureHandlerState
   }
 
   void onDragUpdate(DragUpdateDetails details) {
+    if (!_localSelectionAllowed || _lastDragStartDetails == null) return;
     renderTerminal.selectCharacters(
       _lastDragStartDetails!.localPosition,
       details.localPosition,

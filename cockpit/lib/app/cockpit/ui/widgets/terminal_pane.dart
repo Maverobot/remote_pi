@@ -68,6 +68,18 @@ class _TerminalPaneState extends State<TerminalPane>
   CellAnchor? _anchor; // início fixo da seleção (acompanha o buffer)
   bool _selecting = false;
 
+  /// Resto fracionário de linha acumulado ao encaminhar o wheel pra app (trackpad
+  /// manda deltas pequenos e frequentes; sem acumular, arredondaríamos cada um
+  /// pra 1 linha e o scroll ficaria rápido demais).
+  double _wheelLineAccum = 0;
+
+  /// True enquanto um clique/arraste está sendo **encaminhado pra TUI** (claude/
+  /// vim com mouse reporting). Nesse modo o `TerminalPane` é a única autoridade
+  /// de mouse: manda botão down no toque, motion durante o arraste e up no
+  /// soltar — o gesto interno do xterm não encaminha nada (evita duplicar).
+  bool _forwardingMouse = false;
+  CellOffset? _tuiLastCell; // última célula reportada (motion só em mudança)
+
   // --- Abrir URL com Cmd (hover → mãozinha + realce; Cmd+clique → abre) ---
   final _linkDetector = TerminalLinkDetector();
   MouseCursor _cursor = SystemMouseCursors.text;
@@ -103,6 +115,13 @@ class _TerminalPaneState extends State<TerminalPane>
   CockpitTerminalRender? get _render => _viewKey.currentState?.renderTerminal;
 
   bool get _isCmd => HardwareKeyboard.instance.isMetaPressed;
+
+  /// ⌥ (Option) segurado força a seleção **local** mesmo quando a app dona o
+  /// mouse — é o escape hatch pra copiar texto cru, igual iTerm/Terminal.app.
+  bool get _isAlt => HardwareKeyboard.instance.isAltPressed;
+
+  /// A app declarou mouse reporting (claude/vim): ela dona cliques e seleção.
+  bool get _appOwnsMouse => widget.terminal.mouseMode != MouseMode.none;
 
   /// Reavalia o link sob [global] (coords globais). Só detecta com Cmd segurado:
   /// sem Cmd, o terminal opera normal (seleção / clique vai pro app).
@@ -163,17 +182,44 @@ class _TerminalPaneState extends State<TerminalPane>
     if (_isCmd) return;
     final r = _render;
     if (r == null) return;
+    // App dona o mouse (claude/vim): encaminhamos clique+arraste pra ela (ela faz
+    // a própria seleção e rola junto). ⌥ segurado fura isso → seleção local pra
+    // copiar texto cru (igual iTerm).
+    if (_appOwnsMouse && !_isAlt) {
+      final cell = r.getCellOffset(r.globalToLocal(e.position));
+      _forwardingMouse = true;
+      _tuiLastCell = cell;
+      widget.terminal.mouseInput(
+        TerminalMouseButton.left,
+        TerminalMouseButtonState.down,
+        cell,
+      );
+      return;
+    }
     _downLocal = r.globalToLocal(e.position);
     _pointer = _downLocal;
     _selecting = false;
   }
 
   void _onPointerMove(PointerMoveEvent e) {
-    final down = _downLocal;
-    if (down == null) return;
     if ((e.buttons & kPrimaryButton) == 0) return;
     final r = _render;
     if (r == null) return;
+    // Encaminhando pra TUI: manda motion (botão segurado) a cada mudança de
+    // célula — é isso que faz o arraste virar seleção dentro do claude/vim.
+    if (_forwardingMouse) {
+      final cell = r.getCellOffset(r.globalToLocal(e.position));
+      if (_tuiLastCell != null &&
+          cell.x == _tuiLastCell!.x &&
+          cell.y == _tuiLastCell!.y) {
+        return;
+      }
+      _tuiLastCell = cell;
+      _sendMouseMotion(cell);
+      return;
+    }
+    final down = _downLocal;
+    if (down == null) return;
     final local = r.globalToLocal(e.position);
     _pointer = local;
     if (!_selecting) {
@@ -185,6 +231,21 @@ class _TerminalPaneState extends State<TerminalPane>
   }
 
   void _onPointerUp(PointerUpEvent e) {
+    // Fim do encaminhamento pra TUI: solta o botão na célula atual.
+    if (_forwardingMouse) {
+      final r = _render;
+      if (r != null) {
+        final cell = r.getCellOffset(r.globalToLocal(e.position));
+        widget.terminal.mouseInput(
+          TerminalMouseButton.left,
+          TerminalMouseButtonState.up,
+          cell,
+        );
+      }
+      _forwardingMouse = false;
+      _tuiLastCell = null;
+      return;
+    }
     // Cmd+clique (sem arraste) sobre um link → abre no navegador.
     if (_isCmd && !_selecting && _hoverLink != null) {
       _openLink(_hoverLink!.url);
@@ -192,18 +253,85 @@ class _TerminalPaneState extends State<TerminalPane>
     _finishSelecting();
   }
 
+  /// Encaminha um evento de **motion** (ponteiro movido com botão segurado) pra
+  /// TUI. O `mouseInput` do xterm só sabe `down`/`up` — o protocolo de mouse
+  /// (1002/1003) reporta motion com o **bit 32** somado ao id do botão. Como o
+  /// reporter do xterm não expõe isso, montamos a sequência aqui e mandamos pelo
+  /// mesmo `onOutput` que o `mouseInput` usaria. Só vale pros modos que rastreiam
+  /// arraste/movimento — senão a app não espera motion.
+  void _sendMouseMotion(CellOffset cell) {
+    final mode = widget.terminal.mouseMode;
+    if (mode != MouseMode.upDownScrollDrag &&
+        mode != MouseMode.upDownScrollMove) {
+      return;
+    }
+    final out = widget.terminal.onOutput;
+    if (out == null) return;
+    const motionLeft = 0 + 32; // botão esquerdo (0) + bit de motion (32)
+    final x = cell.x + 1; // protocolo é 1-based
+    final y = cell.y + 1;
+    final seq = switch (widget.terminal.mouseReportMode) {
+      MouseReportMode.sgr => '\x1b[<$motionLeft;$x;${y}M',
+      MouseReportMode.urxvt => '\x1b[${32 + motionLeft};$x;${y}M',
+      MouseReportMode.normal || MouseReportMode.utf =>
+        '\x1b[M${String.fromCharCode(32 + motionLeft)}'
+            '${String.fromCharCode(32 + x)}${String.fromCharCode(32 + y + 1)}',
+    };
+    out(seq);
+  }
+
   void _onPointerSignal(PointerSignalEvent e) {
     if (e is! PointerScrollEvent) return;
-    // Na tela alternativa (claude/vim) "rolar" = a app **repinta** as células; a
-    // seleção fica ancorada em posições fixas e não tem como acompanhar — vira
-    // realce sobre texto trocado. Limpamos pra não ficar mentindo. No buffer
-    // normal (scrollback) a seleção acompanha o scroll, então não mexemos.
-    if (widget.terminal.buffer.isAltBuffer && _controller.selection != null) {
+    final term = widget.terminal;
+    // "App dona o scroll" = declarou mouse reporting com scroll (claude/vim).
+    // Nesse caso ela **repinta** as células ao rolar; a seleção ancorada não tem
+    // como acompanhar (vira realce sobre texto trocado), então limpamos. O mesmo
+    // vale pro alt-buffer puro (less etc.). No buffer normal sem mouse reporting
+    // o scroll move o nosso scrollback e a seleção acompanha — não mexemos.
+    final appOwnsScroll = term.mouseMode.reportScroll;
+    final alt = term.buffer.isAltBuffer;
+    if ((appOwnsScroll || alt) && _controller.selection != null) {
       _controller.clearSelection();
+    }
+    // Encaminha o wheel pra app no buffer normal: lá o nosso Scrollable está
+    // NeverScrollable (ver cockpit_terminal.dart), então o wheel chegaria a
+    // ninguém. No alt-buffer quem encaminha é o TerminalScrollGestureHandler do
+    // xterm — não duplicamos.
+    if (appOwnsScroll && !alt) {
+      final r = _render;
+      if (r == null) return;
+      final lineHeight = r.lineHeight;
+      if (lineHeight <= 0) return;
+      _wheelLineAccum += e.scrollDelta.dy / lineHeight;
+      final steps = _wheelLineAccum.truncate();
+      if (steps == 0) return;
+      _wheelLineAccum -= steps;
+      final cell = r.getCellOffset(r.globalToLocal(e.position));
+      final button = steps < 0
+          ? TerminalMouseButton.wheelUp
+          : TerminalMouseButton.wheelDown;
+      for (var i = 0; i < steps.abs(); i++) {
+        term.mouseInput(button, TerminalMouseButtonState.down, cell);
+      }
     }
   }
 
-  void _onPointerCancel(PointerCancelEvent e) => _finishSelecting();
+  void _onPointerCancel(PointerCancelEvent e) {
+    if (_forwardingMouse) {
+      final r = _render;
+      final cell = r?.getCellOffset(r.globalToLocal(e.position)) ?? _tuiLastCell;
+      if (cell != null) {
+        widget.terminal.mouseInput(
+          TerminalMouseButton.left,
+          TerminalMouseButtonState.up,
+          cell,
+        );
+      }
+      _forwardingMouse = false;
+      _tuiLastCell = null;
+    }
+    _finishSelecting();
+  }
 
   void _beginSelecting(CockpitTerminalRender r, Offset down) {
     _anchor?.dispose();

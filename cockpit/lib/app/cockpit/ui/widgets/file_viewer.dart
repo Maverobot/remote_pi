@@ -63,6 +63,7 @@ class _FileViewerState extends State<FileViewer> {
   bool _dirty = false;
   bool _saving = false;
   String _baseline = '';
+  String? _lastObservedPath;
 
   CodeEditingController? _ctrl;
   final _focus = FocusNode();
@@ -100,6 +101,7 @@ class _FileViewerState extends State<FileViewer> {
   @override
   void initState() {
     super.initState();
+    _lastObservedPath = widget.session.path;
     final text = _editableText;
     if (text != null) {
       _baseline = text;
@@ -131,6 +133,40 @@ class _FileViewerState extends State<FileViewer> {
   @override
   void didUpdateWidget(FileViewer old) {
     super.didUpdateWidget(old);
+    
+    // Se o path mudou (preview reutilizado), força rebuild total.
+    if (widget.session.path != _lastObservedPath) {
+      final oldPath = _lastObservedPath;
+      _lastObservedPath = widget.session.path;
+      _editing = false;
+      _dirty = false;
+      _baseline = '';
+      _ctrl?.removeListener(_onCtrlChanged);
+      _ctrl?.dispose();
+      _ctrl = null;
+
+      // Troca o documento do LSP: fecha o antigo, abre o novo.
+      if (oldPath != null) unawaited(_vm?.lspCloseDocument(oldPath));
+      _diagSub?.cancel();
+      _diagSub = null;
+      _diagnostics = const <LspDiagnostic>[];
+
+      // Recria o controller com o novo conteúdo.
+      final text = _editableText;
+      if (text != null) {
+        _baseline = text;
+        _ctrl = CodeEditingController(text: text, language: _language)
+          ..addListener(_onCtrlChanged);
+        widget.session.saveDraft = _save;
+        _startLsp(text);
+      } else {
+        widget.session.saveDraft = null;
+      }
+      // Força rebuild.
+      setState(() {});
+      return;
+    }
+
     final text = _editableText;
     // Tipo deixou de ser editável (raro) → sai do modo edição.
     if (text == null) {
@@ -139,11 +175,16 @@ class _FileViewerState extends State<FileViewer> {
     }
     // Recarga externa (watcher) sobre conteúdo **não** sujo → sincroniza o campo.
     // Com edições pendentes, mantém o buffer do usuário (last-write-wins no save).
+    // Adia para pós-build: evitar setState durante build (setDirty -> notifyListeners).
     if (!_dirty && _ctrl != null && _ctrl!.text != text) {
-      _ctrl!.text = text;
-      _baseline = text;
-      // O disco mudou (agente editou) → mantém o LSP em sync.
-      unawaited(_vm?.lspChangeDocument(widget.session.path, text));
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !_dirty && _ctrl != null && _ctrl!.text != text) {
+          _ctrl!.text = text;
+          _baseline = text;
+          // O disco mudou (agente editou) → mantém o LSP em sync.
+          unawaited(_vm?.lspChangeDocument(widget.session.path, text));
+        }
+      });
     }
     // Virou a aba focada (seleção da tab) → joga o foco no editor.
     if (widget.focused && !old.focused) _focusEditorIfActive();
@@ -202,7 +243,9 @@ class _FileViewerState extends State<FileViewer> {
 
   void _toggleEditing() {
     setState(() => _editing = !_editing);
+    // Ao iniciar a edição, transforma preview em aba normal.
     if (_editing) {
+      widget.session.pin();
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) _focus.requestFocus();
       });
