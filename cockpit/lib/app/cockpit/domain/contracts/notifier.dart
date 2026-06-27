@@ -9,4 +9,9 @@ abstract class Notifier {
     required String agentName,
     required String workspace,
   });
+
+  /// Toca um som curto de "turno terminou" (chime in-app). Usado quando a janela
+  /// está focada — chama atenção sem banner do SO. Distinto do som da
+  /// notificação do SO (que toca só com a janela desfocada).
+  Future<void> playTurnChime();
 }

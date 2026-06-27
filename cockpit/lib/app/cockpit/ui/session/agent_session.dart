@@ -110,6 +110,7 @@ class AgentSession extends PaneItem {
   @override
   bool get unseenFinish => _unseenFinish;
 
+  @override
   void markUnseen() {
     if (_unseenFinish) return;
     _unseenFinish = true;
@@ -140,6 +141,11 @@ class AgentSession extends PaneItem {
   /// Início do turno em andamento (`null` se ocioso).
   DateTime? get turnStartedAt => _turnStartedAt;
   bool get isStreaming => _status == AgentStatus.streaming;
+
+  /// Spinner na aba: o agente só acende com `streaming` (não com `_pendingSend`,
+  /// que apenas bloqueia novo envio — ver [_pendingSend]).
+  @override
+  bool get isWorking => isStreaming;
   bool get isBusy => _status == AgentStatus.streaming || _pendingSend;
   bool get isAlive =>
       _status == AgentStatus.idle || _status == AgentStatus.streaming;

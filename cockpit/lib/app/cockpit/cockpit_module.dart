@@ -15,6 +15,7 @@ import 'package:cockpit/app/cockpit/data/repositories/hive_project_repository.da
 import 'package:cockpit/app/cockpit/data/repositories/hive_workspace_layout_store.dart';
 import 'package:cockpit/app/cockpit/data/rpc/pi_rpc_process_factory.dart';
 import 'package:cockpit/app/cockpit/data/setup/environment_installer_impl.dart';
+import 'package:cockpit/app/cockpit/data/hooks/terminal_status_server_impl.dart';
 import 'package:cockpit/app/cockpit/data/terminal/pty_terminal_gateway_factory.dart';
 import 'package:cockpit/app/cockpit/data/update/auto_updater_self_updater.dart';
 import 'package:cockpit/app/cockpit/data/update/noop_self_updater.dart';
@@ -35,6 +36,7 @@ import 'package:cockpit/app/cockpit/domain/contracts/rpc_gateway_factory.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/self_updater.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/session_history.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/terminal_gateway_factory.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/terminal_status_server.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/update_checker.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/url_opener.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/workspace_layout_store.dart';
@@ -109,6 +111,7 @@ Future<Module> buildCockpitModule() async {
         ..addInstance<WorktreeManager>(WorktreeManagerImpl())
         ..addInstance<SessionHistory>(const SessionHistoryImpl())
         ..addInstance<TerminalGatewayFactory>(const PtyTerminalGatewayFactory())
+        ..addLazySingleton<TerminalStatusServer>(TerminalStatusServerImpl.new)
         ..addInstance<AppLauncherGateway>(const AppLauncherImpl())
         ..addInstance<Notifier>(notifier)
         ..addInstance<UpdateChecker>(const UpdateCheckerImpl())

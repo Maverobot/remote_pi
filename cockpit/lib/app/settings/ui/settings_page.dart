@@ -475,6 +475,16 @@ class _NotificationsPanel extends StatelessWidget {
                     ),
                     if (Platform.isMacOS && s.notificationsEnabled)
                       const _NotificationPermissionRow(),
+                    _Row(
+                      title: 'Play sound on finish',
+                      description:
+                          'Play a short chime when a turn finishes and the '
+                          'window is focused (on any tab or workspace).',
+                      trailing: Switch(
+                        value: s.soundEnabled,
+                        onChanged: controller.setSoundEnabled,
+                      ),
+                    ),
                   ],
                 ),
               ),

@@ -15,6 +15,7 @@ import 'package:cockpit/app/cockpit/domain/contracts/project_repository.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/rpc_gateway_factory.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/session_history.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/terminal_gateway_factory.dart';
+import 'package:cockpit/app/cockpit/domain/contracts/terminal_status_server.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/workspace_layout_store.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/worktree_manager.dart';
 import 'package:cockpit/app/cockpit/domain/entities/file_node.dart';
@@ -65,6 +66,7 @@ class CockpitViewModel extends ChangeNotifier {
     this._worktreeMgr,
     this._fileMutator,
     this._lsp,
+    this._statusServer,
   );
 
   final ProjectRepository _projects;
@@ -82,6 +84,7 @@ class CockpitViewModel extends ChangeNotifier {
   final WorktreeManager _worktreeMgr;
   final FileSystemMutator _fileMutator;
   final LspServerPool _lsp;
+  final TerminalStatusServer _statusServer;
 
   List<LaunchableApp> _availableApps = const [];
 
@@ -155,6 +158,11 @@ class CockpitViewModel extends ChangeNotifier {
   /// Gateia o disparo de notificação de fim de turno.
   bool _notificationsEnabled = true;
   void setNotificationsEnabled(bool value) => _notificationsEnabled = value;
+
+  /// Espelha `AppSettings.soundEnabled`. Gateia o chime de fim de turno (tocado
+  /// com a janela focada). A `CockpitPage` empurra o valor do controller.
+  bool _soundEnabled = true;
+  void setSoundEnabled(bool value) => _soundEnabled = value;
 
   /// Paleta dos avatares de projeto (cores do design).
   static const List<int> _palette = <int>[
@@ -600,6 +608,8 @@ class CockpitViewModel extends ChangeNotifier {
 
   // ---- init -----------------------------------------------------------------
   Future<void> init() async {
+    // Servidor de status do `cockpit-hook` (claude nas abas reporta turno aqui).
+    unawaited(_statusServer.start(_onClaudeStatus));
     _projectList.addAll(await _projects.all());
     // Carrega os layouts salvos (mas não reconstrói nada ainda — lazy).
     for (final project in _projectList) {
@@ -1311,7 +1321,16 @@ class CockpitViewModel extends ChangeNotifier {
       workingDirectory: cwd,
       gateway: _terminalFactory.create(),
       title: title,
+      // Injeta no env da PTY: roteamento (paneId) + caminho do socket. O
+      // `cockpit-hook` do claude herda e reporta status de turno de volta.
+      spawnEnv: <String, String>{
+        'COCKPIT_PANE_ID': id,
+        'COCKPIT_STATUS_SOCK': _statusServer.socketPath,
+      },
     );
+    // claude rodando na aba reporta fim de turno via socket → mesma notificação
+    // do agente (badge se não for a aba ativa; OS notification se desfocado).
+    t.onTurnFinished = () => unawaited(_notifyIfNeeded(t));
     _sessions[t.id] = t;
     return t;
   }
@@ -1393,6 +1412,22 @@ class CockpitViewModel extends ChangeNotifier {
     return ls.isEmpty ? null : ls.first.active;
   }
 
+  /// Status reportado por um `claude` rodando numa aba de terminal (via o
+  /// socket do [TerminalStatusServer]). Roteia pela [ClaudeStatusUpdate.paneId].
+  void _onClaudeStatus(ClaudeStatusUpdate u) {
+    final s = _sessions[u.paneId];
+    if (s is! TerminalSession) return;
+    s.applyClaudeStatus(
+      status: switch (u.status) {
+        'working' => TerminalStatus.working,
+        'waiting' => TerminalStatus.waiting,
+        _ => TerminalStatus.idle,
+      },
+      sessionId: u.sessionId,
+      transcriptPath: u.transcriptPath,
+    );
+  }
+
   void _onAgentTurnEnd(AgentSession s) {
     if (s.sessionPath == null) unawaited(_captureSessionPath(s));
     unawaited(_refreshGit(s.projectId));
@@ -1404,7 +1439,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// OS notification → só se a janela não estiver focada.
   /// Separar as duas responsabilidades evita badge preso: se o usuário já está
   /// na aba, não há nada a marcar — ele verá a resposta ao olhar para a janela.
-  Future<void> _notifyIfNeeded(AgentSession s) async {
+  Future<void> _notifyIfNeeded(PaneItem s) async {
     final isActiveTab = s.id == _focusedAgentId;
 
     if (!isActiveTab) {
@@ -1412,12 +1447,17 @@ class CockpitViewModel extends ChangeNotifier {
       notifyListeners();
     }
 
-    if (!_notificationsEnabled) return;
-
     final windowFocused = await windowManager.isFocused();
     if (!windowFocused) {
-      final workspace = _projectById(s.projectId)?.name ?? '';
-      await _notifier.agentFinished(agentName: s.title, workspace: workspace);
+      // Janela em outro app → notificação do SO (tem som próprio).
+      if (_notificationsEnabled) {
+        final workspace = _projectById(s.projectId)?.name ?? '';
+        await _notifier.agentFinished(agentName: s.title, workspace: workspace);
+      }
+    } else if (_soundEnabled) {
+      // Janela focada → chime curto pra chamar atenção (inclusive na aba ativa).
+      // Nunca junto da notificação → não se confunde com o som dela.
+      await _notifier.playTurnChime();
     }
   }
 
@@ -1951,6 +1991,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    unawaited(_statusServer.stop());
     _gitWatch?.cancel();
     _gitWatchDebounce?.cancel();
     for (final t in _saveTimers.values) {

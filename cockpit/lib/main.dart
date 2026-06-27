@@ -3,12 +3,13 @@ import 'dart:io';
 
 import 'package:cockpit/app/app_module.dart';
 import 'package:cockpit/app/app_widget.dart';
+import 'package:cockpit/app/cockpit/data/hooks/claude_hook_installer_impl.dart';
 import 'package:cockpit/app/cockpit/data/rpc/pi_process_registry.dart';
 import 'package:cockpit/app/core/data/lsp/lsp_process_registry.dart';
 import 'package:cockpit/app/core/data/repositories/hive_settings_store.dart';
 import 'package:cockpit/app/core/env.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
-import 'package:flutter/foundation.dart' show kDebugMode;
+import 'package:flutter/foundation.dart' show debugPrint, kDebugMode;
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:media_kit/media_kit.dart';
@@ -44,6 +45,14 @@ Future<void> main() async {
   // `ShadcnApp` → trocar tema/fonte repinta tudo.
   final settings = SettingsController(HiveSettingsStore(settingsBox));
   await settings.load();
+
+  // Instala os hooks do Cockpit no ~/.claude/settings.json (idempotente) para
+  // que sessões `claude` nas abas reportem status de turno. Não-fatal.
+  unawaited(
+    ClaudeHookInstallerImpl().ensureInstalled().then((r) {
+      r.fold((_) {}, (e) => debugPrint('[claude-hook] install falhou: $e'));
+    }),
+  );
 
   final winBox = await Hive.openBox<dynamic>('window_state');
   await _setupWindow(winBox);

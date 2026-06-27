@@ -81,6 +81,9 @@ class SettingsController extends ChangeNotifier {
   void setNotificationsEnabled(bool value) =>
       _apply(_settings.copyWith(notificationsEnabled: value));
 
+  void setSoundEnabled(bool value) =>
+      _apply(_settings.copyWith(soundEnabled: value));
+
   void _apply(AppSettings next) {
     _settings = next;
     notifyListeners();

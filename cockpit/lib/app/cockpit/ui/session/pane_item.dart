@@ -9,7 +9,15 @@ abstract class PaneItem extends ChangeNotifier {
   String get title;
   String get workingDirectory;
 
-  /// Resultado novo não visto (só agentes); terminais retornam `false`.
+  /// `true` enquanto a aba está processando trabalho (acende o spinner na aba).
+  /// Default `false`; agentes e terminais sobrescrevem.
+  bool get isWorking => false;
+
+  /// Resultado novo não visto; default `false`. Agentes e terminais (com claude)
+  /// sobrescrevem.
   bool get unseenFinish => false;
+
+  /// Marca/limpa o badge de "resultado não visto". No-op por default.
+  void markUnseen() {}
   void clearUnseen() {}
 }

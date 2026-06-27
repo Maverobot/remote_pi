@@ -66,6 +66,7 @@ class _CockpitPageState extends State<CockpitPage> {
   /// `SettingsController` app-scoped, então a página empurra o valor.
   void _syncNotifications() {
     _vm.setNotificationsEnabled(_settings!.settings.notificationsEnabled);
+    _vm.setSoundEnabled(_settings!.settings.soundEnabled);
   }
 
   void _syncLspCommands() {

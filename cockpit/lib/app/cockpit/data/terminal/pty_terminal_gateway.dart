@@ -13,12 +13,13 @@ class PtyTerminalGateway implements TerminalGateway {
     required String workingDirectory,
     int rows = 25,
     int columns = 80,
+    Map<String, String> extraEnv = const <String, String>{},
   }) {
     _pty = Pty.start(
       _shell(),
       arguments: _shellArgs(),
       workingDirectory: workingDirectory.isEmpty ? null : workingDirectory,
-      environment: _terminalEnv(),
+      environment: _terminalEnv(extraEnv),
       rows: rows,
       columns: columns,
     );
@@ -59,10 +60,11 @@ class PtyTerminalGateway implements TerminalGateway {
   ///
   /// O `kyroon_pty` faz `addAll(environment)` por último, então estes overrides
   /// vencem o que veio herdado.
-  Map<String, String> _terminalEnv() => {
+  Map<String, String> _terminalEnv(Map<String, String> extraEnv) => {
     ...Platform.environment,
     'TERM': 'xterm-256color',
     'COLORTERM': 'truecolor',
+    ...extraEnv,
   };
 
   /// Shell por plataforma.

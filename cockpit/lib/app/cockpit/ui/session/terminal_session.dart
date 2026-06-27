@@ -4,8 +4,14 @@ import 'dart:convert';
 import 'package:cockpit/app/cockpit/domain/contracts/terminal_gateway.dart';
 import 'package:cockpit/app/cockpit/ui/session/pane_item.dart';
 import 'package:cockpit/app/cockpit/ui/session/terminal_input.dart';
+import 'package:flutter/foundation.dart';
 import 'package:pasteboard/pasteboard.dart';
 import 'package:xterm/xterm.dart';
+
+/// Status de um `claude` (ou outro harness) rodando dentro de uma aba de
+/// terminal, reportado pelo `cockpit-hook` via socket (ver
+/// [TerminalStatusServer]).
+enum TerminalStatus { idle, working, waiting }
 
 /// Uma aba de terminal: um shell num PTY ([TerminalGateway]) ligado a um
 /// emulador [Terminal] do xterm. O `TerminalView` (na PaneView) renderiza
@@ -17,6 +23,7 @@ class TerminalSession extends PaneItem {
     required this.workingDirectory,
     required TerminalGateway gateway,
     String? title,
+    Map<String, String> spawnEnv = const <String, String>{},
   }) : _gateway = gateway,
        _title = title ?? 'New terminal' {
     // O `ShiftEnterInputHandler` (antes do padrão) faz Shift+Enter virar quebra
@@ -33,7 +40,12 @@ class TerminalSession extends PaneItem {
     // Sobe o shell e liga os dois lados. O `.cast<List<int>>()` re-vincula o
     // tipo do stream (o PTY emite Uint8List) para o `utf8.decoder` aceitar e
     // decodificar em streaming (trata multibyte partido entre chunks).
-    _gateway.start(workingDirectory: workingDirectory, rows: 25, columns: 80);
+    _gateway.start(
+      workingDirectory: workingDirectory,
+      rows: 25,
+      columns: 80,
+      extraEnv: spawnEnv,
+    );
     _sub = _gateway.output
         .cast<List<int>>()
         .transform(const Utf8Decoder(allowMalformed: true))
@@ -47,6 +59,72 @@ class TerminalSession extends PaneItem {
     // Programas mudam o título da janela via OSC 0/2 (ex.: shell mostra o cwd,
     // `vim`/`ssh` mostram o arquivo/host). Refletimos isso no nome da aba.
     terminal.onTitleChange = (osc) => rename(_shortTitle(osc));
+  }
+
+  /// Disparado quando o turno entra em `idle` ou `waiting` (terminou ou precisa
+  /// de aprovação). A VM usa pra notificar o workspace — espelha o `onTurnEnd`
+  /// do [AgentSession].
+  VoidCallback? onTurnFinished;
+
+  TerminalStatus _status = TerminalStatus.idle;
+  TerminalStatus get status => _status;
+
+  /// `true` enquanto o harness está processando um turno (acende o spinner).
+  @override
+  bool get isWorking => _status == TerminalStatus.working;
+
+  /// Session-id e transcript do `claude` rodando nesta aba, capturados do OSC.
+  /// Em memória nesta feature; servem à feature futura de persistir/retomar a
+  /// sessão (`claude --resume <sid>`, ler o `.jsonl`).
+  String? claudeSessionId;
+  String? transcriptPath;
+
+  bool _unseen = false;
+  @override
+  bool get unseenFinish => _unseen;
+
+  @override
+  void markUnseen() {
+    if (_unseen) return;
+    _unseen = true;
+    notifyListeners();
+  }
+
+  @override
+  void clearUnseen() {
+    if (!_unseen) return;
+    _unseen = false;
+    notifyListeners();
+  }
+
+  Timer? _notifyDebounce;
+
+  /// Aplica um status reportado pelo `cockpit-hook` (via [TerminalStatusServer]).
+  /// [sessionId]/[transcriptPath] são capturados pra futura persistência.
+  void applyClaudeStatus({
+    required TerminalStatus status,
+    String? sessionId,
+    String? transcriptPath,
+  }) {
+    if (sessionId != null && sessionId.isNotEmpty) claudeSessionId = sessionId;
+    if (transcriptPath != null && transcriptPath.isNotEmpty) {
+      this.transcriptPath = transcriptPath;
+    }
+    _setStatus(status);
+  }
+
+  void _setStatus(TerminalStatus next) {
+    if (next == _status) return;
+    _status = next;
+    notifyListeners();
+    // Debounce ~50ms antes de notificar: absorve flicker idle→working numa
+    // repintura de TUI (mesma técnica do iTerm2). Só notifica em idle/waiting.
+    _notifyDebounce?.cancel();
+    if (next == TerminalStatus.idle || next == TerminalStatus.waiting) {
+      _notifyDebounce = Timer(const Duration(milliseconds: 50), () {
+        if (_status == next) onTurnFinished?.call();
+      });
+    }
   }
 
   /// Encurta títulos longos pra caber melhor na aba. Caminhos viram o último
@@ -110,6 +188,7 @@ class TerminalSession extends PaneItem {
 
   @override
   Future<void> dispose() async {
+    _notifyDebounce?.cancel();
     await _sub?.cancel();
     await _gateway.kill();
     super.dispose();

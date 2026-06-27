@@ -2,11 +2,14 @@
 /// (`data/terminal/`) usa `flutter_pty` (forkpty no macOS/Linux, ConPTY no
 /// Windows). A `ui/` (TerminalSession) só conhece esta interface.
 abstract class TerminalGateway {
-  /// Sobe o shell num PTY na pasta [workingDirectory].
+  /// Sobe o shell num PTY na pasta [workingDirectory]. [extraEnv] é fundido ao
+  /// ambiente do PTY (ex.: `COCKPIT_PANE_ID`/`COCKPIT_STATUS_SOCK` pra que o
+  /// `cockpit-hook` do claude reporte status de volta).
   void start({
     required String workingDirectory,
     int rows = 25,
     int columns = 80,
+    Map<String, String> extraEnv = const <String, String>{},
   });
 
   /// Bytes do stdout/stderr do shell.

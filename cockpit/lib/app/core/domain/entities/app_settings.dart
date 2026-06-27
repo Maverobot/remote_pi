@@ -23,6 +23,7 @@ class AppSettings {
     this.lspFormatters = const <String, String>{},
     this.formatOnSave = false,
     this.notificationsEnabled = true,
+    this.soundEnabled = true,
   });
 
   final AppThemeMode themeMode;
@@ -69,6 +70,10 @@ class AppSettings {
   /// fora de foco. Editado na aba "Notifications" das Configurações.
   final bool notificationsEnabled;
 
+  /// Tocar um chime curto quando um turno termina com a janela focada (chama
+  /// atenção sem banner do SO). Editado na aba "Notifications".
+  final bool soundEnabled;
+
   AppSettings copyWith({
     AppThemeMode? themeMode,
     String? interfaceFont,
@@ -86,6 +91,7 @@ class AppSettings {
     Map<String, String>? lspFormatters,
     bool? formatOnSave,
     bool? notificationsEnabled,
+    bool? soundEnabled,
   }) {
     return AppSettings(
       themeMode: themeMode ?? this.themeMode,
@@ -105,6 +111,7 @@ class AppSettings {
       lspFormatters: lspFormatters ?? this.lspFormatters,
       formatOnSave: formatOnSave ?? this.formatOnSave,
       notificationsEnabled: notificationsEnabled ?? this.notificationsEnabled,
+      soundEnabled: soundEnabled ?? this.soundEnabled,
     );
   }
 
@@ -122,6 +129,7 @@ class AppSettings {
     if (lspFormatters.isNotEmpty) 'lspFormatters': lspFormatters,
     if (formatOnSave) 'formatOnSave': true,
     if (!notificationsEnabled) 'notificationsEnabled': false,
+    if (!soundEnabled) 'soundEnabled': false,
   };
 
   factory AppSettings.fromJson(Map<dynamic, dynamic> json) {
@@ -152,6 +160,7 @@ class AppSettings {
       lspFormatters: _strMap(json['lspFormatters']),
       formatOnSave: json['formatOnSave'] as bool? ?? false,
       notificationsEnabled: json['notificationsEnabled'] as bool? ?? true,
+      soundEnabled: json['soundEnabled'] as bool? ?? true,
     );
   }
 }
