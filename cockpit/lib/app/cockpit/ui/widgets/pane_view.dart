@@ -21,6 +21,7 @@ import 'package:cockpit/app/core/ui/themes/terminal_theme.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
@@ -1066,23 +1067,26 @@ class _PaneBodyState extends State<_PaneBody> {
       final termStyle = (termFont == null || termFont.isEmpty)
           ? TerminalStyle(fontSize: settings.codeSize)
           : TerminalStyle(fontSize: settings.codeSize, fontFamily: termFont);
-      return ColoredBox(
-        color: context.colors.panel,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
-          child: TerminalPane(
-            terminal: item.terminal,
-            focusNode: _terminalFocus,
-            // Windows: o caminho de IME/TextInput do xterm quebra no desktop
-            // ("Could not set client, view ID is null") e impede digitar. O
-            // modo só-hardware ignora o TextInput e lê KeyEvents crus. No
-            // macOS mantemos o IME (melhor pra acentos/composição).
-            hardwareKeyboardOnly: Platform.isWindows,
-            // Intercepta o atalho de colar pra suportar IMAGEM do clipboard
-            // (o paste padrão do xterm só cola texto). Ver `_onTerminalKey`.
-            onKeyEvent: (event) => _onTerminalKey(event, item),
-            theme: cockpitTerminalThemeFor(Theme.of(context).brightness),
-            textStyle: termStyle,
+      return _TerminalDropTarget(
+        session: item,
+        child: ColoredBox(
+          color: context.colors.panel,
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 8, 0, 8),
+            child: TerminalPane(
+              terminal: item.terminal,
+              focusNode: _terminalFocus,
+              // Windows: o caminho de IME/TextInput do xterm quebra no desktop
+              // ("Could not set client, view ID is null") e impede digitar. O
+              // modo só-hardware ignora o TextInput e lê KeyEvents crus. No
+              // macOS mantemos o IME (melhor pra acentos/composição).
+              hardwareKeyboardOnly: Platform.isWindows,
+              // Intercepta o atalho de colar pra suportar IMAGEM do clipboard
+              // (o paste padrão do xterm só cola texto). Ver `_onTerminalKey`.
+              onKeyEvent: (event) => _onTerminalKey(event, item),
+              theme: cockpitTerminalThemeFor(Theme.of(context).brightness),
+              textStyle: termStyle,
+            ),
           ),
         ),
       );
@@ -1148,6 +1152,79 @@ class _PaneBodyState extends State<_PaneBody> {
           ],
         );
       },
+    );
+  }
+}
+
+// ============================================================================
+// Drop nativo de arquivos/pastas no terminal
+// ============================================================================
+
+/// Envolve o terminal e aceita **drops nativos do SO** (Finder/Explorer): ao
+/// soltar arquivos ou pastas, injeta os **caminhos absolutos** no PTY como se
+/// tivessem sido digitados (caminhos com espaço/aspas são shell-quoted, e vários
+/// itens vêm separados por espaço). Mostra uma borda accent enquanto o item
+/// paira sobre a área — sinal de que vai aceitar o drop.
+class _TerminalDropTarget extends StatefulWidget {
+  const _TerminalDropTarget({required this.session, required this.child});
+
+  final TerminalSession session;
+  final Widget child;
+
+  @override
+  State<_TerminalDropTarget> createState() => _TerminalDropTargetState();
+}
+
+class _TerminalDropTargetState extends State<_TerminalDropTarget> {
+  bool _dragOver = false;
+
+  /// Cota um caminho pro shell: sem caracteres "perigosos" vai cru; senão é
+  /// envolto em aspas simples (escapando aspas simples internas com `'\''`).
+  static String _shellQuote(String path) {
+    final safe = RegExp(r'^[A-Za-z0-9_@%+=:,./-]+$');
+    if (safe.hasMatch(path)) return path;
+    return "'${path.replaceAll("'", r"'\''")}'";
+  }
+
+  void _onDrop(List<XFile> files) {
+    final paths = files
+        .map((f) => f.path)
+        .where((p) => p.isNotEmpty)
+        .map(_shellQuote)
+        .toList();
+    if (paths.isEmpty) return;
+    // Espaço final pra separar de um próximo argumento; o usuário pode apagar.
+    widget.session.insertText('${paths.join(' ')} ');
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return DropTarget(
+      onDragEntered: (_) {
+        if (!_dragOver) setState(() => _dragOver = true);
+      },
+      onDragExited: (_) {
+        if (_dragOver) setState(() => _dragOver = false);
+      },
+      onDragDone: (detail) {
+        if (_dragOver) setState(() => _dragOver = false);
+        _onDrop(detail.files);
+      },
+      child: Stack(
+        children: [
+          widget.child,
+          if (_dragOver)
+            Positioned.fill(
+              child: IgnorePointer(
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    border: Border.all(color: context.colors.accent, width: 2),
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
     );
   }
 }
