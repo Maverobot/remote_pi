@@ -25,6 +25,7 @@ import 'package:cockpit/app/core/ui/themes/themes.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_modular/flutter_modular.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Tela cheia de Configurações (push). Categorias à esquerda (Aparência ·
@@ -209,7 +210,47 @@ class _CategoryNav extends StatelessWidget {
               onTap: () => onSelect(_Category.scheduling),
             ),
           ],
+          // Empurra a versão pro rodapé do nav (identificação visual da build).
+          const Spacer(),
+          const _VersionFooter(),
         ],
+      ),
+    );
+  }
+}
+
+/// Rodapé do nav: "Cockpit `version`" no canto inferior esquerdo, pra
+/// identificar visualmente qual build está rodando. A versão vem do
+/// `PackageInfo` (mesma fonte do self-update), carregada de forma assíncrona.
+class _VersionFooter extends StatefulWidget {
+  const _VersionFooter();
+
+  @override
+  State<_VersionFooter> createState() => _VersionFooterState();
+}
+
+class _VersionFooterState extends State<_VersionFooter> {
+  String? _version;
+
+  @override
+  void initState() {
+    super.initState();
+    PackageInfo.fromPlatform().then((info) {
+      if (mounted) setState(() => _version = info.version);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          _version == null ? 'Cockpit' : 'Cockpit $_version',
+          style: context.typo.label.copyWith(color: colors.text4),
+        ),
       ),
     );
   }
