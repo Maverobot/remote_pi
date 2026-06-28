@@ -83,8 +83,6 @@ class _TasksPanelState extends State<TasksPanel> {
                       key: ValueKey(def.id),
                       def: def,
                       run: vm.stateOf(def.id),
-                      watchSupported: vm.watchSupported(def),
-                      watchOn: vm.watchOn(def.id),
                       profileName: vm.selectedProfile(def),
                       canCycleProfile: def.profiles.length >= 2,
                       commandPreview: vm.commandPreview(def),
@@ -101,7 +99,6 @@ class _TasksPanelState extends State<TasksPanel> {
                       },
                       onStop: () => vm.stop(def.id),
                       onRestart: () => vm.restart(def.id),
-                      onToggleWatch: () => vm.toggleWatch(def),
                       onCycleProfile: () => vm.cycleProfile(def),
                       onKey: (k) => vm.sendKey(def.id, k),
                     ),
@@ -181,8 +178,6 @@ class _TaskRow extends StatelessWidget {
     super.key,
     required this.def,
     required this.run,
-    required this.watchSupported,
-    required this.watchOn,
     required this.profileName,
     required this.canCycleProfile,
     required this.commandPreview,
@@ -190,15 +185,12 @@ class _TaskRow extends StatelessWidget {
     required this.onStart,
     required this.onStop,
     required this.onRestart,
-    required this.onToggleWatch,
     required this.onCycleProfile,
     required this.onKey,
   });
 
   final TaskDefinition def;
   final TaskRun run;
-  final bool watchSupported;
-  final bool watchOn;
   final String? profileName;
   final bool canCycleProfile;
   final String commandPreview;
@@ -206,7 +198,6 @@ class _TaskRow extends StatelessWidget {
   final VoidCallback onStart;
   final VoidCallback onStop;
   final VoidCallback onRestart;
-  final VoidCallback onToggleWatch;
   final VoidCallback onCycleProfile;
   final void Function(String key) onKey;
 
@@ -241,15 +232,6 @@ class _TaskRow extends StatelessWidget {
             ),
           ),
           if (active) ...[
-            if (watchSupported)
-              _IconAction(
-                tooltip: watchOn
-                    ? 'Reload ao salvar: ligado'
-                    : 'Reload ao salvar: desligado',
-                icon: watchOn ? Icons.bolt : Icons.bolt_outlined,
-                color: watchOn ? colors.warn : colors.text3,
-                onTap: onToggleWatch,
-              ),
             for (final k in def.interactiveKeys.where((k) => k.primary))
               _IconAction(
                 tooltip: "${k.label} (envia '${k.key}')",
@@ -262,11 +244,14 @@ class _TaskRow extends StatelessWidget {
                 keys: def.interactiveKeys.where((k) => !k.primary).toList(),
                 onKey: onKey,
               ),
-            _IconAction(
-              tooltip: 'Reiniciar',
-              icon: Icons.restart_alt,
-              onTap: onRestart,
-            ),
+            // Esconde o restart da task quando já há uma tecla primária com o
+            // ícone de restart (ex.: Flutter "Hot restart") — evita 2 ícones iguais.
+            if (!def.interactiveKeys.any((k) => k.primary && k.icon == 'restart'))
+              _IconAction(
+                tooltip: 'Reiniciar',
+                icon: Icons.restart_alt,
+                onTap: onRestart,
+              ),
             _IconAction(
               tooltip: 'Parar',
               icon: Icons.stop,
@@ -296,6 +281,7 @@ class _TaskRow extends StatelessWidget {
     'refresh' => Icons.refresh,
     'restart' => Icons.restart_alt,
     'stop' => Icons.stop,
+    'bolt' => Icons.bolt,
     _ => null,
   };
 }

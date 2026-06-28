@@ -61,7 +61,7 @@
       "properties": {
         "key": { "type": "string", "description": "Sequência escrita no PTY (ex.: r, R, q)." },
         "label": { "type": "string" },
-        "icon": { "enum": ["refresh", "restart", "stop"] },
+        "icon": { "enum": ["refresh", "restart", "stop", "bolt"] },
         "primary": { "type": "boolean", "default": false }
       }
     },

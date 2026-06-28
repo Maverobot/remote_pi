@@ -100,14 +100,14 @@ no app** — o que existe vem daqui.
 |-----------|---------|-------------|-----------|
 | `key`     | string  | **sim**     | Sequência escrita no PTY (ex.: `"r"`, `"R"`, `"q"`). |
 | `label`   | string  | **sim**     | Rótulo amigável (ex.: `"Hot reload"`). |
-| `icon`    | string  | não         | Token de ícone: `refresh`, `restart`, `stop`. Sem ícone → chip com a tecla. |
+| `icon`    | string  | não         | Token de ícone: `refresh`, `restart`, `stop`, `bolt` (raio). Sem ícone → chip com a tecla. |
 | `primary` | boolean | não (`false`) | `true` = botão fixo na linha; `false` = botão secundário. |
 
 ### `watch`
 
 O `flutter run` **não** recarrega ao salvar — isso é feature de plugin de IDE; o
-cockpit reimplementa via observação de arquivos. Há um toggle por task na UI
-(default ligado quando `watch` existe).
+cockpit reimplementa via observação de arquivos. Fica **sempre ligado** enquanto
+a task com `watch` está viva.
 
 | Campo        | Tipo     | Obrigatório | Default | Descrição |
 |--------------|----------|-------------|---------|-----------|
