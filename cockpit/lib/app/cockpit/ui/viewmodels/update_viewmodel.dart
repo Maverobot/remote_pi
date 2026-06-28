@@ -53,7 +53,12 @@ class UpdateViewModel extends ChangeNotifier {
   UpdateInfo? _available; // caminho Linux/notify
   StreamSubscription<SelfUpdateState>? _selfSub;
   bool _selfDismissed = false; // dispensa transiente no modo self-update
+  bool _selfInitialized = false; // o motor de self-update só inicializa uma vez
   bool _disposed = false;
+
+  /// Re-checa de tempos em tempos enquanto o app está aberto (além do boot).
+  Timer? _periodic;
+  static const Duration _checkInterval = Duration(hours: 6);
 
   /// `true` em macOS/Windows (há motor de self-update); `false` no Linux.
   bool get isSelfUpdate => _selfUpdater.isSupported;
@@ -90,11 +95,22 @@ class UpdateViewModel extends ChangeNotifier {
 
   // ---- Boot ----
 
-  /// Consulta updates e decide se o card aparece. Silencioso em falha.
+  /// Checa updates no boot e arma uma re-checagem periódica (a cada
+  /// [_checkInterval]) enquanto o app está aberto. Silencioso em falha.
   Future<void> check() async {
+    await _runCheck();
+    _periodic ??= Timer.periodic(_checkInterval, (_) => _runCheck());
+  }
+
+  /// Uma passada de checagem (boot ou periódica).
+  Future<void> _runCheck() async {
+    if (_disposed) return;
     if (isSelfUpdate) {
       _selfSub ??= _selfUpdater.changes.listen((_) => _safeNotify());
-      await _selfUpdater.initialize();
+      if (!_selfInitialized) {
+        await _selfUpdater.initialize();
+        _selfInitialized = true;
+      }
       await _selfUpdater.checkForUpdates(inBackground: true);
       return;
     }
@@ -153,6 +169,7 @@ class UpdateViewModel extends ChangeNotifier {
   @override
   void dispose() {
     _disposed = true;
+    _periodic?.cancel();
     _selfSub?.cancel();
     super.dispose();
   }
