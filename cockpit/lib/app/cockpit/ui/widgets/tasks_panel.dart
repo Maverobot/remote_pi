@@ -151,25 +151,30 @@ class _TaskRow extends StatelessWidget {
           _StatusDot(status: run.status),
           const SizedBox(width: 8),
           Expanded(
+            // Só abre a aba de output quando a task está viva (tem buffer);
+            // parada → não clicável.
             child: HoverTap(
-              onTap: onTap,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    def.label,
-                    style: context.typo.label.copyWith(color: colors.text),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  Text(
-                    '${def.command} ${def.args.join(' ')}',
-                    style: context.typo.mono.copyWith(
-                      fontSize: 10,
-                      color: colors.text3,
+              onTap: active ? onTap : null,
+              child: Opacity(
+                opacity: active ? 1 : 0.85,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      def.label,
+                      style: context.typo.label.copyWith(color: colors.text),
+                      overflow: TextOverflow.ellipsis,
                     ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+                    Text(
+                      '${def.command} ${def.args.join(' ')}',
+                      style: context.typo.mono.copyWith(
+                        fontSize: 10,
+                        color: colors.text3,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
