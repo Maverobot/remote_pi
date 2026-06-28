@@ -3,6 +3,7 @@ import 'package:cockpit/app/cockpit/domain/entities/task_run.dart';
 import 'package:cockpit/app/cockpit/ui/viewmodels/cockpit_viewmodel.dart';
 import 'package:cockpit/app/cockpit/ui/viewmodels/tasks_viewmodel.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
+import 'package:cockpit/app/core/ui/widgets/app_menu.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
@@ -246,11 +247,12 @@ class _TaskRowState extends State<_TaskRow> {
                     fallback: k.key,
                     onTap: () => widget.onKey(k.key),
                   ),
-                for (final k in def.interactiveKeys.where((k) => !k.primary))
-                  _IconAction(
-                    tooltip: "${k.label} (envia '${k.key}')",
-                    fallback: k.key,
-                    onTap: () => widget.onKey(k.key),
+                if (def.interactiveKeys.any((k) => !k.primary))
+                  _OverflowKeys(
+                    keys: def.interactiveKeys
+                        .where((k) => !k.primary)
+                        .toList(),
+                    onKey: widget.onKey,
                   ),
                 _IconAction(
                   tooltip: 'Reiniciar',
@@ -418,6 +420,34 @@ class _ProfileChip extends StatelessWidget {
         onTap: onTap,
         child: chip,
       ),
+    );
+  }
+}
+
+/// Botão `⌨` que reúne as teclas interativas **secundárias** (não-primárias)
+/// num menu — evita poluir a linha. Selecionar envia a tecla.
+class _OverflowKeys extends StatelessWidget {
+  const _OverflowKeys({required this.keys, required this.onKey});
+
+  final List<InteractiveKey> keys;
+  final void Function(String key) onKey;
+
+  @override
+  Widget build(BuildContext context) {
+    return _IconAction(
+      tooltip: 'Mais teclas',
+      icon: Icons.keyboard,
+      onTap: () async {
+        final chosen = await showAppMenu<String>(
+          context,
+          minWidth: 180,
+          items: [
+            for (final k in keys)
+              AppMenuItem(value: k.key, label: '${k.label}  (${k.key})'),
+          ],
+        );
+        if (chosen != null) onKey(chosen);
+      },
     );
   }
 }
