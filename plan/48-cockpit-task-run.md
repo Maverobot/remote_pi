@@ -295,7 +295,8 @@ badge pisca `◐→●`; toggle off → manual; vite não mostra o toggle.
       interactiveKeys, watch, progressPatterns, profiles) + publicar/− referenciar
       um JSON Schema de verdade (substituindo a URL aspiracional removida)
 - [ ] Passo 6 — watch toggle (Directory.watch) + progress patterns ao vivo
-- [ ] Output ao vivo de cada task num CockpitTerminal embutido
+- [x] Output ao vivo de cada task num CockpitTerminal embutido (inline no
+      subpane; clique na task → terminal; teclado→sendKey; remonta no restart)
 - [x] `flutter analyze` zero issues; `flutter test` (145) e `build macos` ok
 - [x] Sem `if (flutter)` no core/ui — tudo via dados do adapter
 

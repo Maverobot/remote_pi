@@ -21,10 +21,20 @@ class TasksViewModel extends ChangeNotifier {
   String _cwd = '';
   List<TaskDefinition> _tasks = const [];
   bool _loading = false;
+  String? _focusedTaskId;
   final _states = <String, TaskRun>{};
 
   List<TaskDefinition> get tasks => _tasks;
   bool get loading => _loading;
+
+  /// Task cujo output está aberto no terminal embutido (null = nenhum).
+  String? get focusedTaskId => _focusedTaskId;
+
+  /// Abre/fecha o terminal de output de uma task (toggle).
+  void focus(String taskId) {
+    _focusedTaskId = _focusedTaskId == taskId ? null : taskId;
+    notifyListeners();
+  }
 
   /// Estado atual de uma task (idle se nunca rodou).
   TaskRun stateOf(String taskId) =>
@@ -35,6 +45,7 @@ class TasksViewModel extends ChangeNotifier {
     if (cwd == _cwd) return;
     _cwd = cwd;
     _tasks = const [];
+    _focusedTaskId = null;
     _loading = true;
     notifyListeners();
     final found = cwd.isEmpty
@@ -54,6 +65,9 @@ class TasksViewModel extends ChangeNotifier {
   Future<void> restart(String taskId) => _runner.restart(taskId);
 
   void sendKey(String taskId, String key) => _runner.sendKey(taskId, key);
+
+  void resize(String taskId, int rows, int columns) =>
+      _runner.resize(taskId, rows, columns);
 
   /// Bytes do output de uma task (pra um terminal embutido — passo futuro).
   Stream<List<int>> output(String taskId) => _runner.output(taskId);
