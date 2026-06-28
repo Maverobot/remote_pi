@@ -55,9 +55,10 @@ class PtyTaskRunner implements TaskRunnerGateway {
       'COLORTERM': 'truecolor',
     };
 
+    final spawn = await _spawnFor(cmdLine);
     final pty = Pty.start(
-      _shell(),
-      arguments: _shellArgs(cmdLine),
+      spawn.exe,
+      arguments: spawn.args,
       workingDirectory: def.cwd.isEmpty ? null : def.cwd,
       environment: env,
       rows: 24,
@@ -263,6 +264,46 @@ class PtyTaskRunner implements TaskRunnerGateway {
 
   void _emit(TaskRun run) {
     if (!_runs.isClosed) _runs.add(run);
+  }
+
+  /// Executável + args pra rodar [cmdLine] num shell (login/interactive).
+  ///
+  /// No **macOS**, prefixa com `launchctl asuser <uid>` pra **reparentar o
+  /// processo ao launchd** e quebrar a atribuição de *responsible process* ao
+  /// Cockpit. Sem isso, um app GUI lançado por uma task (`flutter run -d macos`)
+  /// é atribuído ao app pai (o Cockpit) e — no modo "merged UI and platform
+  /// thread" do embedder — não consegue ativar/foregroundar e **morre antes de
+  /// inicializar** (`Failed to foreground app; open returned 1`, sem janela).
+  /// Lançado a partir de um terminal o mesmo comando funciona, justamente porque
+  /// o pai não é um app GUI. O reparent **não exige root** (asuser do próprio
+  /// uid), **preserva o PTY no stdin** (hot reload `r`/`R` segue funcionando) e
+  /// **mantém o environment** (PATH/`TERM`/`COLORTERM`). Windows/Linux não têm
+  /// essa atribuição → spawn direto. Se o uid não resolver, cai no spawn direto.
+  Future<({String exe, List<String> args})> _spawnFor(String cmdLine) async {
+    final shellArgv = [_shell(), ..._shellArgs(cmdLine)];
+    if (Platform.isMacOS) {
+      final uid = await _currentUid();
+      if (uid != null) {
+        return (exe: '/bin/launchctl', args: ['asuser', uid, ...shellArgv]);
+      }
+    }
+    return (exe: shellArgv.first, args: shellArgv.sublist(1));
+  }
+
+  String? _cachedUid;
+
+  /// UID do usuário atual (string), pro `launchctl asuser`. `null` se falhar —
+  /// não há API Dart pra `getuid()`, então lê de `id -u` (cacheado).
+  Future<String?> _currentUid() async {
+    if (_cachedUid != null) return _cachedUid;
+    try {
+      final r = await Process.run('id', ['-u']);
+      if (r.exitCode == 0) {
+        final out = (r.stdout as String).trim();
+        if (out.isNotEmpty) return _cachedUid = out;
+      }
+    } catch (_) {}
+    return null;
   }
 
   String _shell() {
