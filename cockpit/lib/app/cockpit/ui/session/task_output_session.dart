@@ -3,8 +3,10 @@ import 'package:xterm/xterm.dart';
 
 /// Aba **read-only** que visualiza o output de uma task. É leve e descartável:
 /// o [terminal] não é dela — vive no `TaskTerminalStore` —, então abrir/fechar
-/// a aba não perde o buffer nem mexe na task. Não persiste entre reinícios do
-/// app (a task morre junto); o restore a descarta via `_sanitizeTree`.
+/// a aba não perde o buffer nem mexe na task. A task em si não sobrevive ao
+/// restart (o processo morre), mas o **output** persiste: o `TaskTerminalStore`
+/// grava o buffer em disco e o re-semeia ao recriar o terminal, então o restore
+/// reabre a aba mostrando o último output (read-only).
 class TaskOutputSession extends PaneItem {
   TaskOutputSession({
     required this.id,
@@ -27,6 +29,9 @@ class TaskOutputSession extends PaneItem {
   final Terminal terminal;
 
   final String _label;
+
+  /// Rótulo cru (sem o prefixo `▶`), persistido pra restaurar a aba.
+  String get label => _label;
 
   @override
   final String workingDirectory;

@@ -1652,9 +1652,12 @@ class CockpitViewModel extends ChangeNotifier {
     return s;
   }
 
-  /// Ids de todas as sessões do tipo `terminal` presentes em QUALQUER layout
-  /// salvo — o conjunto a preservar no GC do scrollback. Lê os descritores
-  /// `sessions` dos docs já carregados em [_savedLayouts].
+  /// Chaves de scrollback a preservar no GC do boot: o `id` de cada sessão
+  /// `terminal` e o `taskId` de cada `task_output` presentes em QUALQUER layout
+  /// salvo. (O store de scrollback é compartilhado — logs de terminal sob o
+  /// `projectId` real, logs de task sob `__tasks__/<taskId>` —, mas o prune casa
+  /// por nome de arquivo, então o keep-set é a união das duas chaves.) Lê os
+  /// descritores `sessions` dos docs já carregados em [_savedLayouts].
   Set<String> _persistedTerminalIds() {
     final ids = <String>{};
     for (final doc in _savedLayouts.values) {
@@ -1662,8 +1665,11 @@ class CockpitViewModel extends ChangeNotifier {
       final sessions = doc['sessions'];
       if (sessions is! Map) continue;
       sessions.forEach((key, desc) {
-        if (desc is Map && desc['type'] == 'terminal' && key is String) {
+        if (desc is! Map) return;
+        if (desc['type'] == 'terminal' && key is String) {
           ids.add(key);
+        } else if (desc['type'] == 'task_output' && desc['taskId'] is String) {
+          ids.add(desc['taskId'] as String);
         }
       });
     }
@@ -1825,9 +1831,21 @@ class CockpitViewModel extends ChangeNotifier {
         _makeEmptyWithId(id, project.id);
         return true;
       case 'task_output':
-        // Aba de output de task não sobrevive ao restart (a task morreu) →
-        // não recria; `_sanitizeTree` remove a aba órfã do layout.
-        return false;
+        // A task em si não roda de novo, mas o output foi persistido pelo
+        // `TaskTerminalStore`. Recria a aba read-only: `terminalFor` semeia o
+        // último output salvo no terminal. Sem `taskId` (descritor antigo) →
+        // descarta no `_sanitizeTree`.
+        final taskId = desc['taskId'] as String?;
+        if (taskId == null || taskId.isEmpty) return false;
+        _sessions[id] = TaskOutputSession(
+          id: id,
+          projectId: project.id,
+          taskId: taskId,
+          label: desc['label'] as String? ?? taskId,
+          terminal: _taskTerminals.terminalFor(taskId),
+          workingDirectory: project.path,
+        );
+        return true;
       case 'agent':
       default:
         _buildAgent(
@@ -2017,9 +2035,14 @@ class CockpitViewModel extends ChangeNotifier {
       return <String, dynamic>{'type': 'viewer', 'path': s.path};
     }
     if (s is TaskOutputSession) {
-      // Marcador efêmero: a task morre no restart do app, então o restore a
-      // descarta (ver `_restoreSession` → false → `_sanitizeTree`).
-      return <String, dynamic>{'type': 'task_output'};
+      // A task não roda de novo no restart, mas o output persiste: guarda o
+      // `taskId` (chave do log no `TaskTerminalStore`) + label pra recriar a aba
+      // read-only mostrando o último output (ver `_restoreSession`).
+      return <String, dynamic>{
+        'type': 'task_output',
+        'taskId': s.taskId,
+        'label': s.label,
+      };
     }
     final a = s as AgentSession;
     if (a.status == AgentStatus.empty) {
@@ -2234,6 +2257,9 @@ class CockpitViewModel extends ChangeNotifier {
       t.cancel();
     }
     _fileWatchDebounce.clear();
+    // Grava o output pendente das tasks antes de sair (o debounce de 1s do
+    // `TaskTerminalStore` pode não ter disparado) → o restore reabre a aba.
+    unawaited(_taskTerminals.flushAll());
     for (final s in _sessions.values) {
       s.dispose();
     }
