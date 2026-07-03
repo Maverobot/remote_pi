@@ -34,7 +34,10 @@ Decisões fechadas (plano 37, 2026-06-05):
   (re-exportados pelo `flutter_modular` — API igual à do `provider`).
 - Resultado tipado: `Result<T, E>`
 - Subprocesso: `dart:io` `Process.start` (spawn do `pi --mode rpc`)
-- Menu nativo: `PlatformMenuBar`
+- Menu de app: abstração em `core/ui/menu/` — modelo declarativo único
+  (`menu_model.dart`), renderizado nativo no macOS (`PlatformMenuBar`) e
+  desenhado na barra de título no Windows/Linux (`Menubar` do shadcn, via
+  `WindowMenuBar`). Fonte de verdade em `buildAppMenus()`
 
 > **Diverge do `app/` de propósito**: o cockpit é organizado em **fatias verticais
 > por feature** (`lib/app/<feature>/{domain,data,ui}`), não em camadas globais. A

@@ -1,10 +1,13 @@
 import 'dart:io';
 
 import 'package:cockpit/app/cockpit/domain/entities/launchable_app.dart';
+import 'package:cockpit/app/core/ui/menu/app_menu_bar.dart';
+import 'package:cockpit/app/core/ui/settings_controller.dart';
 import 'package:cockpit/app/core/ui/widgets/app_menu.dart';
 import 'package:cockpit/app/core/ui/widgets/window_controls.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
+import 'package:flutter_modular/flutter_modular.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Top bar (~46px) customizada — substitui a barra nativa da janela. Semáforo
@@ -50,6 +53,12 @@ class CockpitTopbar extends StatelessWidget {
       children: [
         const WindowControls(),
         const SizedBox(width: 12),
+        // Windows/Linux: barra de menu desenhada na janela (estilo VS Code), ao
+        // lado do título. No macOS o [WindowMenuBar] é no-op (barra é a nativa).
+        if (!Platform.isMacOS) ...[
+          WindowMenuBar(menus: buildAppMenus(context.watch<SettingsController>())),
+          const SizedBox(width: 8),
+        ],
         _IconBtn(
           icon: Icons.view_sidebar_outlined,
           tooltip: 'Collapse sidebar',
