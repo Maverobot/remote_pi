@@ -15,7 +15,7 @@ import 'package:cockpit/app/cockpit/ui/widgets/widgets.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
-import 'package:file_picker/file_picker.dart';
+import 'package:cockpit/app/core/utils/native_folder_picker.dart';
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:flutter_modular/flutter_modular.dart';
@@ -236,8 +236,9 @@ class _CockpitPageState extends State<CockpitPage> {
 
   Future<bool> _addProject() async {
     final vm = _vm;
-    final path = await FilePicker.platform.getDirectoryPath(
+    final path = await NativeFolderPicker.pick(
       dialogTitle: 'Choose the project folder',
+      initialDirectory: vm.selectedProject?.path,
     );
     if (path == null) return false;
     await vm.addProject(path);
@@ -260,8 +261,9 @@ class _CockpitPageState extends State<CockpitPage> {
   Future<bool> _createWorkspace() async {
     final vm = _vm;
     _mark('picker:start');
-    final path = await FilePicker.platform.getDirectoryPath(
+    final path = await NativeFolderPicker.pick(
       dialogTitle: 'Choose the workspace folder',
+      initialDirectory: vm.selectedProject?.path,
     );
     _mark('picker:done path=$path mounted=$mounted');
     if (path == null || !mounted) return false;

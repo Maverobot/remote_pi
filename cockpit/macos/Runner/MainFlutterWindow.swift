@@ -17,6 +17,54 @@ class MainFlutterWindow: NSWindow {
 
     RegisterGeneratedPlugins(registry: flutterViewController)
 
+    registerNativeDialogs(flutterViewController)
+
     super.awakeFromNib()
+  }
+
+  /// Canal nativo pro seletor de PASTA. Existe porque o `file_picker` (em
+  /// nenhuma versão) liga `NSOpenPanel.canCreateDirectories` no diálogo de
+  /// diretório — então o botão "New Folder" nunca aparece. Aqui abrimos o
+  /// `NSOpenPanel` nós mesmos com esse flag ligado e com a pasta inicial
+  /// (`initialDirectory`). Usa `beginSheetModal` (assíncrono) em vez de
+  /// `runModal` pra não travar a platform/UI thread mesclada do embedder.
+  private func registerNativeDialogs(_ controller: FlutterViewController) {
+    let channel = FlutterMethodChannel(
+      name: "cockpit/native_dialogs",
+      binaryMessenger: controller.engine.binaryMessenger
+    )
+    channel.setMethodCallHandler { [weak self] call, result in
+      guard call.method == "pickDirectory" else {
+        result(FlutterMethodNotImplemented)
+        return
+      }
+      let args = call.arguments as? [String: Any]
+      self?.presentDirectoryPanel(
+        initialDirectory: args?["initialDirectory"] as? String,
+        result: result
+      )
+    }
+  }
+
+  private func presentDirectoryPanel(
+    initialDirectory: String?,
+    result: @escaping FlutterResult
+  ) {
+    let panel = NSOpenPanel()
+    panel.canChooseDirectories = true
+    panel.canChooseFiles = false
+    panel.allowsMultipleSelection = false
+    panel.canCreateDirectories = true  // botão "New Folder"
+    panel.showsHiddenFiles = false
+    if let dir = initialDirectory, !dir.isEmpty {
+      panel.directoryURL = URL(fileURLWithPath: dir)
+    }
+    panel.beginSheetModal(for: self) { response in
+      if response == .OK, let url = panel.url {
+        result(url.path)
+      } else {
+        result(nil)  // usuário cancelou
+      }
+    }
   }
 }

@@ -7,6 +7,7 @@ import 'package:cockpit/app/settings/domain/cron_schedule.dart';
 import 'package:cockpit/app/core/data/lsp/lsp_command.dart';
 import 'package:cockpit/app/core/data/lsp/lsp_launchers.dart';
 import 'package:cockpit/app/core/data/setup/storage_location.dart';
+import 'package:cockpit/app/core/utils/native_folder_picker.dart';
 import 'package:cockpit/app/core/domain/entities/app_settings.dart';
 import 'package:cockpit/app/settings/domain/entities/cron_job.dart';
 import 'package:cockpit/app/settings/domain/entities/daemon_info.dart';
@@ -25,7 +26,6 @@ import 'package:cockpit/app/core/ui/menu/workspace_menu_bridge.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
@@ -453,8 +453,9 @@ class _StorageSectionState extends State<_StorageSection> {
 
   Future<void> _changeFolder() async {
     if (_busy) return;
-    final picked = await FilePicker.platform.getDirectoryPath(
+    final picked = await NativeFolderPicker.pick(
       dialogTitle: 'Choose a folder for Cockpit data',
+      initialDirectory: _root, // abre na pasta atual do Cockpit
     );
     if (picked == null || !mounted) return;
     setState(() => _busy = true);
@@ -3546,8 +3547,9 @@ class _DaemonEditorDialogState extends State<_DaemonEditorDialog> {
   }
 
   Future<void> _pickFolder() async {
-    final picked = await FilePicker.platform.getDirectoryPath(
+    final picked = await NativeFolderPicker.pick(
       dialogTitle: 'Choose the Daemon Agent folder',
+      initialDirectory: _cwd, // reabre onde já estava, se já escolhido
     );
     if (picked == null || !mounted) return;
     // A checagem de pasta-duplicada aqui é best-effort (compara o caminho
