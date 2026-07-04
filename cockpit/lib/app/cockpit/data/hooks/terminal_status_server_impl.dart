@@ -133,7 +133,7 @@ class TerminalStatusServerImpl implements TerminalStatusServer {
       if (_token != null && decoded['tok'] != _token) {
         return isCmd
             ? jsonEncode(
-                const CockpitCommandResult.fail('token inválido').toJson(),
+                const CockpitCommandResult.fail('invalid token').toJson(),
               )
             : null;
       }
@@ -163,7 +163,7 @@ class TerminalStatusServerImpl implements TerminalStatusServer {
     final handler = _onCommand;
     if (handler == null) {
       return jsonEncode(
-        const CockpitCommandResult.fail('comandos indisponíveis').toJson(),
+        const CockpitCommandResult.fail('commands unavailable').toJson(),
       );
     }
     final tabRaw = (decoded['tabId'] ?? '').toString();

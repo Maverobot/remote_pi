@@ -70,7 +70,7 @@ Future<void> _cmdSend(List<String> args) async {
   final parsed = _Flags.parse(args);
   final text = parsed.positionals.join(' ');
   if (text.isEmpty) {
-    stderr.writeln('cockpit send: falta o texto a enviar');
+    stderr.writeln('cockpit send: missing text to send');
     exit(2);
   }
   await _writeToPane(parsed.tabId, text);
@@ -79,14 +79,14 @@ Future<void> _cmdSend(List<String> args) async {
 Future<void> _cmdSendKey(List<String> args) async {
   final parsed = _Flags.parse(args);
   if (parsed.positionals.isEmpty) {
-    stderr.writeln('cockpit send-key: falta a tecla (ex.: Enter, C-c, Escape)');
+    stderr.writeln('cockpit send-key: missing key (e.g. Enter, C-c, Escape)');
     exit(2);
   }
   final buf = StringBuffer();
   for (final name in parsed.positionals) {
     final resolved = _resolveKey(name);
     if (resolved == null) {
-      stderr.writeln('cockpit send-key: tecla desconhecida "$name"');
+      stderr.writeln('cockpit send-key: unknown key "$name"');
       exit(2);
     }
     buf.write(resolved);
@@ -97,7 +97,7 @@ Future<void> _cmdSendKey(List<String> args) async {
 Future<void> _cmdOpen(List<String> args) async {
   final parsed = _Flags.parse(args);
   if (parsed.positionals.isEmpty) {
-    stderr.writeln('cockpit open: falta o caminho do arquivo');
+    stderr.writeln('cockpit open: missing file path');
     exit(2);
   }
   // O app tem cwd próprio — resolve pro caminho absoluto no cwd deste pane
@@ -111,7 +111,7 @@ Future<void> _cmdOpen(List<String> args) async {
   if (tabId != null && tabId.isNotEmpty) req['tabId'] = tabId;
   final resp = await _request(req);
   if (resp['ok'] != true) {
-    stderr.writeln('cockpit: ${resp['error'] ?? 'falhou'}');
+    stderr.writeln('cockpit: ${resp['error'] ?? 'failed'}');
     exit(1);
   }
   exit(0);
@@ -134,7 +134,7 @@ Future<void> _cmdList(String cmd, List<String> args) async {
   final parsed = _Flags.parse(args);
   final resp = await _request(<String, dynamic>{'cmd': cmd});
   if (resp['ok'] != true) {
-    stderr.writeln('cockpit: ${resp['error'] ?? 'falhou'}');
+    stderr.writeln('cockpit: ${resp['error'] ?? 'failed'}');
     exit(1);
   }
   final data = (resp['data'] as List?) ?? const [];
@@ -143,7 +143,7 @@ Future<void> _cmdList(String cmd, List<String> args) async {
     exit(0);
   }
   if (data.isEmpty) {
-    stdout.writeln('(nenhum)');
+    stdout.writeln('(none)');
     exit(0);
   }
   if (cmd == 'list-panes') {
@@ -170,8 +170,8 @@ Future<void> _writeToPane(String? tabIdFlag, String text) async {
   final tabId = tabIdFlag ?? Platform.environment['COCKPIT_PANE_ID'];
   if (tabId == null || tabId.isEmpty) {
     stderr.writeln(
-      'cockpit: sem alvo — passe --tab-id <id> ou rode dentro de um terminal '
-      'do Cockpit (COCKPIT_PANE_ID ausente). Use `cockpit list-panes`.',
+      'cockpit: no target — pass --tab-id <id> or run inside a Cockpit '
+      'terminal (COCKPIT_PANE_ID is unset). Use `cockpit list-panes`.',
     );
     exit(2);
   }
@@ -181,7 +181,7 @@ Future<void> _writeToPane(String? tabIdFlag, String text) async {
     'args': <String, dynamic>{'data': base64.encode(utf8.encode(text))},
   });
   if (resp['ok'] != true) {
-    stderr.writeln('cockpit: ${resp['error'] ?? 'falhou'}');
+    stderr.writeln('cockpit: ${resp['error'] ?? 'failed'}');
     exit(1);
   }
   exit(0);
@@ -195,7 +195,7 @@ Future<Map<String, dynamic>> _request(Map<String, dynamic> req) async {
   final port = int.tryParse(env['COCKPIT_STATUS_PORT'] ?? '');
   if ((sock == null || sock.isEmpty) && port == null) {
     stderr.writeln(
-      'cockpit: fora de um terminal do Cockpit (COCKPIT_STATUS_SOCK ausente)',
+      'cockpit: not inside a Cockpit terminal (COCKPIT_STATUS_SOCK is unset)',
     );
     exit(3);
   }
@@ -212,7 +212,7 @@ Future<Map<String, dynamic>> _request(Map<String, dynamic> req) async {
           )
         : await Socket.connect(InternetAddress.loopbackIPv4, port!);
   } catch (e) {
-    stderr.writeln('cockpit: não conectou ao app: $e');
+    stderr.writeln('cockpit: could not connect to app: $e');
     exit(3);
   }
 
@@ -233,13 +233,13 @@ Future<Map<String, dynamic>> _request(Map<String, dynamic> req) async {
   socket.destroy();
   final line = raw.trim();
   if (line.isEmpty) {
-    return <String, dynamic>{'ok': false, 'error': 'sem resposta do app'};
+    return <String, dynamic>{'ok': false, 'error': 'no response from app'};
   }
   try {
     final decoded = jsonDecode(line);
     return decoded is Map
         ? Map<String, dynamic>.from(decoded)
-        : <String, dynamic>{'ok': false, 'error': 'resposta malformada'};
+        : <String, dynamic>{'ok': false, 'error': 'malformed response'};
   } catch (_) {
     return <String, dynamic>{'ok': false, 'error': 'resposta malformada'};
   }
@@ -316,7 +316,7 @@ class _Flags {
       final a = args[i];
       if (a == '--tab-id' || a == '-t') {
         if (i + 1 >= args.length) {
-          stderr.writeln('cockpit: --tab-id precisa de um valor');
+          stderr.writeln('cockpit: --tab-id requires a value');
           exit(2);
         }
         tabId = args[++i];
@@ -344,7 +344,7 @@ Future<void> _cmdInstallSkill(List<String> args) async {
   final home =
       Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
   if (home == null || home.isEmpty) {
-    stderr.writeln('cockpit: HOME não resolvido');
+    stderr.writeln('cockpit: HOME not resolved');
     exit(1);
   }
   final dir = Directory('$home/.claude/skills/cockpit-cli');
@@ -352,13 +352,13 @@ Future<void> _cmdInstallSkill(List<String> args) async {
   if (await file.exists() && !parsed.force) {
     final current = await file.readAsString();
     if (current == _skillMarkdown) {
-      stdout.writeln('cockpit: skill já instalada (${file.path})');
+      stdout.writeln('cockpit: skill already installed (${file.path})');
       exit(0);
     }
   }
   await dir.create(recursive: true);
   await file.writeAsString(_skillMarkdown);
-  stdout.writeln('cockpit: skill instalada em ${file.path}');
+  stdout.writeln('cockpit: skill installed at ${file.path}');
   exit(0);
 }
 
@@ -366,32 +366,32 @@ Future<void> _cmdInstallSkill(List<String> args) async {
 
 void _printHelp(IOSink out) {
   out.writeln(
-    r'''cockpit — CLI interna do Cockpit (visível só nos terminais do app)
+    r'''cockpit — Cockpit's internal CLI (visible only inside the app's terminals)
 
-USO:
-  cockpit send      [--tab-id <id>] <texto>    digita texto literal (sem Enter)
-  cockpit send-key  [--tab-id <id>] <Key>...   pressiona tecla(s) nomeada(s)
-  cockpit open      [--tab-id <id>] <arquivo>  abre o arquivo no viewer do app
-  cockpit <arquivo>                            atalho de `open` (ex.: cockpit .zprofile)
-  cockpit list-panes      [--json]             lista panes ativos
-  cockpit list-workspaces [--json]             lista workspaces (projetos)
-  cockpit install-skill   [--force]            instala a skill do Claude Code
+USAGE:
+  cockpit send      [--tab-id <id>] <text>     type literal text (no Enter)
+  cockpit send-key  [--tab-id <id>] <Key>...   press named key(s)
+  cockpit open      [--tab-id <id>] <file>     open the file in the app's viewer
+  cockpit <file>                               shortcut for `open` (e.g. cockpit .zprofile)
+  cockpit list-panes      [--json]             list active panes
+  cockpit list-workspaces [--json]             list workspaces (projects)
+  cockpit install-skill   [--force]            install the Claude Code skill
   cockpit --help | --version
 
-ALVO:
-  --tab-id <id>   pane alvo. Default = $COCKPIT_PANE_ID (o pane atual).
-                  Ids (t0, t1…) resetam a cada boot do app → descubra com
-                  `cockpit list-panes` antes de mirar outro pane (cross-pane).
+TARGET:
+  --tab-id <id>   target pane. Default = $COCKPIT_PANE_ID (the current pane).
+                  Ids (t0, t1…) reset on every app boot → find them with
+                  `cockpit list-panes` before targeting another pane (cross-pane).
 
-TECLAS (send-key):
+KEYS (send-key):
   Enter Tab Escape Space BSpace Up Down Left Right Home End
-  PageUp PageDown Delete   |   C-<letra> (ex.: C-c = Ctrl+C)
+  PageUp PageDown Delete   |   C-<letter> (e.g. C-c = Ctrl+C)
 
-EXEMPLOS:
-  cockpit send "echo oi" && cockpit send-key Enter
+EXAMPLES:
+  cockpit send "echo hi" && cockpit send-key Enter
   cockpit send-key C-c
   cockpit send --tab-id t3 "ls" ; cockpit send-key --tab-id t3 Enter
-  cockpit .zprofile          # abre o arquivo no viewer (relativo ao cwd do pane)
+  cockpit .zprofile          # opens the file in the viewer (relative to pane cwd)
   cockpit open ~/.gitconfig''',
   );
 }
@@ -408,62 +408,62 @@ name: cockpit-cli
 description: Drive Cockpit's multiplexed terminals from inside a pane. Use when you (an agent running in a Cockpit terminal) need to type text or press keys into your own or another pane, or to list the open panes/workspaces. Triggers on tmux-like control needs: send-keys, run a command in another tab, discover pane ids.
 ---
 
-# cockpit — CLI interna do Cockpit
+# cockpit — Cockpit's internal CLI
 
-Você está rodando dentro de um terminal do **Cockpit** (uma IDE que multiplexa
-terminais). O comando `cockpit` fala com o app e deixa você **injetar texto/teclas**
-em qualquer pane e **listar** panes/workspaces. Ele só existe dentro das abas do
-Cockpit (não está no PATH global).
+You are running inside a **Cockpit** terminal (an IDE that multiplexes
+terminals). The `cockpit` command talks to the app and lets you **inject
+text/keys** into any pane and **list** panes/workspaces. It only exists inside
+Cockpit tabs (it is not on the global PATH).
 
-## Verbos
+## Verbs
 
-- `cockpit send [--tab-id <id>] <texto>` — digita texto literal (sem Enter).
-- `cockpit send-key [--tab-id <id>] <Key>...` — pressiona tecla(s): `Enter`, `Tab`,
+- `cockpit send [--tab-id <id>] <text>` — type literal text (no Enter).
+- `cockpit send-key [--tab-id <id>] <Key>...` — press key(s): `Enter`, `Tab`,
   `Escape`, `Space`, `BSpace`, `Up`/`Down`/`Left`/`Right`, `Home`/`End`,
-  `PageUp`/`PageDown`, `Delete`, e `C-<letra>` (ex.: `C-c` = Ctrl+C).
-- `cockpit open [--tab-id <id>] <arquivo>` — abre o arquivo no viewer do app
-  (aba ao lado do terminal). `cockpit <arquivo>` é o atalho. O caminho é
-  resolvido no cwd do pane (relativo, `~` e absoluto funcionam). Qualquer tipo
-  abre como texto — inclusive sem extensão (`.zprofile`, `Makefile`).
-- `cockpit list-panes [--json]` — panes ativos: `id`, `kind`, `title`,
+  `PageUp`/`PageDown`, `Delete`, and `C-<letter>` (e.g. `C-c` = Ctrl+C).
+- `cockpit open [--tab-id <id>] <file>` — open the file in the app's viewer
+  (tab next to the terminal). `cockpit <file>` is the shortcut. The path is
+  resolved against the pane cwd (relative, `~` and absolute all work). Any type
+  opens as text — including extensionless ones (`.zprofile`, `Makefile`).
+- `cockpit list-panes [--json]` — active panes: `id`, `kind`, `title`,
   `workspaceId`, `working`.
-- `cockpit list-workspaces [--json]` — projetos abertos: `id`, `name`, `panes`.
+- `cockpit list-workspaces [--json]` — open projects: `id`, `name`, `panes`.
 
-## Alvo (--tab-id)
+## Target (--tab-id)
 
-Sem `--tab-id`, o comando age no **seu próprio pane** (via `$COCKPIT_PANE_ID`).
-Para dirigir **outro** pane, passe `--tab-id <id>`.
+Without `--tab-id`, the command acts on **your own pane** (via `$COCKPIT_PANE_ID`).
+To drive **another** pane, pass `--tab-id <id>`.
 
-> Os ids (`t0`, `t1`…) são sequenciais e **mudam a cada boot do app**. Nunca
-> chute um id: rode `cockpit list-panes` primeiro e use o `id` de lá.
+> Ids (`t0`, `t1`…) are sequential and **change on every app boot**. Never
+> guess an id: run `cockpit list-panes` first and use the `id` from there.
 
-## Padrão de uso
+## Usage pattern
 
-Para rodar um comando num pane, **envie o texto e depois o Enter** (o `send` não
-adiciona quebra de linha):
+To run a command in a pane, **send the text and then Enter** (`send` does not
+add a line break):
 
 ```sh
 cockpit send "npm test"
 cockpit send-key Enter
 ```
 
-Cross-pane (dirigir outra aba):
+Cross-pane (drive another tab):
 
 ```sh
-cockpit list-panes                       # descubra o id alvo, ex.: t4
+cockpit list-panes                       # find the target id, e.g. t4
 cockpit send --tab-id t4 "git status"
 cockpit send-key --tab-id t4 Enter
 ```
 
-Interromper um processo travado noutro pane:
+Interrupt a stuck process in another pane:
 
 ```sh
 cockpit send-key --tab-id t4 C-c
 ```
 
-## Erros comuns
+## Common errors
 
-- "COCKPIT_STATUS_SOCK ausente" → você não está num terminal do Cockpit.
-- "pane ... não existe" → id velho (reboot do app). Rode `list-panes` de novo.
-- "pane ... não é um terminal" → o alvo é uma aba de agente/arquivo, não um shell.
+- "COCKPIT_STATUS_SOCK is unset" → you are not inside a Cockpit terminal.
+- "pane ... does not exist" → stale id (app reboot). Run `list-panes` again.
+- "pane ... is not a terminal" → the target is an agent/file tab, not a shell.
 ''';
