@@ -6,13 +6,17 @@
  */
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getCapabilities, setCapabilities } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
 // ── Mock RelayClient ──────────────────────────────────────────────────────────
+
+const _compactMock = vi.hoisted(() => vi.fn());
+const _convertToPngMock = vi.hoisted(() => vi.fn(async () => null));
 
 const relayRef: { current: MockRelay | null } = { current: null };
 const relayInstances: MockRelay[] = [];
@@ -138,6 +142,11 @@ vi.mock("./pairing/qr.js", async (importOriginal) => {
       generateToken: vi.fn().mockReturnValue("test-token"),
     },
   };
+});
+
+vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
+  return { ...orig, compact: _compactMock, convertToPng: _convertToPngMock };
 });
 
 // Import AFTER mocks
@@ -829,7 +838,7 @@ void _getActivePeerCountForTest;
 // ── user_input mirroring (local terminal / RPC) ───────────────────────────────
 
 type AnyEvent = { type: string; [k: string]: unknown };
-type EventHandler = (event: AnyEvent) => unknown;
+type EventHandler = (event: AnyEvent, ctx?: unknown) => unknown;
 
 function captureEventHandler(eventName: string): EventHandler {
   let captured: EventHandler | undefined;
@@ -883,6 +892,33 @@ function captureEventHarness(): {
     },
     emitBus(channel: string, data: unknown) {
       (pi.events as unknown as { emit: (channel: string, data: unknown) => void }).emit(channel, data);
+    },
+  };
+}
+
+function captureMessageRenderer(): {
+  getRenderer(): (message: { details?: unknown }, options: unknown, theme: unknown) => unknown;
+} {
+  let renderer: ((message: { details?: unknown }, options: unknown, theme: unknown) => unknown) | undefined;
+  const pi = {
+    on() { /* no-op */ },
+    registerCommand: () => undefined,
+    registerTool: () => undefined, registerShortcut: () => undefined,
+    registerFlag: () => undefined, getFlag: () => undefined,
+    registerMessageRenderer(type: string, callback: unknown) {
+      if (type === "remote-pi:received-image") {
+        renderer = callback as (message: { details?: unknown }, options: unknown, theme: unknown) => unknown;
+      }
+    },
+    sendMessage: () => undefined,
+    sendUserMessage: () => undefined,
+  } as unknown as ExtensionAPI;
+  (extension as ExtensionFactory)(pi);
+  if (!renderer) throw new Error("custom image renderer not registered");
+  return {
+    getRenderer(): (message: { details?: unknown }, options: unknown, theme: unknown) => unknown {
+      if (!renderer) throw new Error("custom image renderer not registered");
+      return renderer;
     },
   };
 }
@@ -1103,47 +1139,280 @@ describe("multi-channel broadcast (W2D)", () => {
     expect(recipients).toEqual(new Set(["ownerA__1234567890", "ownerB__abcdefghij"]));
   });
 
-  test("plan/30: user_message with an image → sendUserMessage gets ImageContent+TextContent; echo carries images", async () => {
-    await _pairForTest("ownerA__1234567890");
-    // Override _pi with a spy to capture the multimodal content sent to the SDK.
-    const sentToAgent: unknown[] = [];
-    _setPiForTest({
-      sendUserMessage: (c: unknown) => { sentToAgent.push(c); },
-      sendMessage: () => undefined,
+  test("plan/30: user_message with an image → save preview + send metadata-only custom message", async () => {
+    const prevHome = process.env["REMOTE_PI_HOME"];
+    const remoteHome = mkdtempSync(join(tmpdir(), "pi-ext-remote-home-"));
+    process.env["REMOTE_PI_HOME"] = remoteHome;
+
+    try {
+      await _pairForTest("ownerA__1234567890");
+      // Override _pi with a spy to capture the multimodal content sent to the SDK.
+      const sentToAgent: unknown[] = [];
+      const sentMessages: Array<[unknown, ...unknown[]]> = [];
+      const timeline: string[] = [];
+      const messageId = "msg with spaces/and##symbols";
+      _setPiForTest({
+        sendUserMessage: (c: unknown) => { timeline.push("agent"); sentToAgent.push(c); },
+        sendMessage: (...messageArgs) => { timeline.push("preview"); sentMessages.push(messageArgs); },
+      });
+      const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+      relayRef.current!.emit("message", JSON.stringify({
+        peer: "ownerA__1234567890",
+        ct: Buffer.from(JSON.stringify({
+          type: "user_message",
+          id: messageId,
+          text: "what is this?",
+          images: [{ data: "QUJD", mime: "image/png" }],
+        })).toString("base64"),
+      }));
+      await new Promise<void>((r) => setImmediate(r));
+
+      // (a) the local preview is appended before the SDK handoff, so it cannot
+      // be misrouted as a streaming steer message for the same turn.
+      expect(timeline).toEqual(["preview", "agent"]);
+      // (b) the agent received image-first, then the caption text.
+      expect(sentToAgent).toHaveLength(1);
+      expect(sentToAgent[0]).toEqual([
+        { type: "image", data: "QUJD", mimeType: "image/png" },
+        { type: "text", text: "what is this?" },
+      ]);
+
+      const previewCall = sentMessages.find((message) => {
+        const current = message[0] as { customType?: unknown };
+        return current.customType === "remote-pi:received-image";
+      });
+      const preview = previewCall?.[0] as { content?: string; display?: boolean; details?: { messageId?: string; mime?: string; path?: string; size?: number; index?: number; text?: string; error?: string; reason?: string } } | undefined;
+      expect(preview).toBeDefined();
+      expect(previewCall?.[1]).toBeUndefined();
+      expect(preview?.content).toBe("");
+      expect(preview?.display).toBe(true);
+      expect(preview?.details).toMatchObject({
+        messageId,
+        index: 0,
+        mime: "image/png",
+        size: 3,
+        text: "what is this?",
+      });
+      expect(preview?.details).not.toHaveProperty("data");
+      expect(preview?.details?.error).toBeUndefined();
+      expect(preview?.details?.reason).toBeUndefined();
+
+      const expectedBasename = "msg-with-spaces-and-symbols-0.png";
+      if (preview?.details?.path) {
+        expect(preview.details.path).toContain(tmpdir());
+        expect(preview.details.path).toContain("pi-app-");
+        expect(preview.details.path).toContain(expectedBasename);
+        expect(readFileSync(preview.details.path, "utf8")).toBe("ABC");
+      }
+      if (preview?.details?.path && process.platform !== "win32") {
+        const st = statSync(preview.details.path);
+        expect(st.mode & 0o777).toBe(0o600);
+        const stDir = statSync(dirname(preview.details.path));
+        expect(stDir.mode & 0o777).toBe(0o700);
+      }
+      expect(basename(preview?.details?.path ?? "")).toBe(expectedBasename);
+
+      // The echo carries `images` so other owners render the bubble.
+      const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
+        .map((c) => c[0] as string).map(decodeSentCt);
+      const echo = sent.find((d) => d.inner.type === "user_message");
+      expect(echo?.inner).toMatchObject({
+        type: "user_message",
+        id: messageId,
+        text: "what is this?",
+        images: [{ data: "QUJD", mime: "image/png" }],
+      });
+    } finally {
+      if (prevHome === undefined) delete process.env["REMOTE_PI_HOME"];
+      else process.env["REMOTE_PI_HOME"] = prevHome;
+      rmSync(remoteHome, { recursive: true, force: true });
+    }
+  });
+
+  test("JPEG user_message generates optional private PNG preview when converter is available", async () => {
+    const prevHome = process.env["REMOTE_PI_HOME"];
+    const remoteHome = mkdtempSync(join(tmpdir(), "pi-ext-remote-home-"));
+    process.env["REMOTE_PI_HOME"] = remoteHome;
+    _convertToPngMock.mockResolvedValueOnce({ data: "iVBORw0KGgo=", mimeType: "image/png" });
+
+    try {
+      await _pairForTest("ownerA__1234567890");
+      const sentMessages: Array<[unknown, ...unknown[]]> = [];
+      _setPiForTest({
+        sendUserMessage: () => undefined,
+        sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
+      });
+
+      relayRef.current!.emit("message", JSON.stringify({
+        peer: "ownerA__1234567890",
+        ct: Buffer.from(JSON.stringify({
+          type: "user_message",
+          id: "jpeg-msg",
+          text: "jpeg caption",
+          images: [{ data: "QUJD", mime: "image/jpeg" }],
+        })).toString("base64"),
+      }));
+      await new Promise<void>((r) => setImmediate(r));
+
+      const previewCall = sentMessages.find((message) => {
+        const current = message[0] as { customType?: unknown };
+        return current.customType === "remote-pi:received-image";
+      });
+      const preview = previewCall?.[0] as { details?: { path?: string; previewPath?: string } } | undefined;
+      const previewPath = preview?.details?.previewPath;
+      expect(preview?.details?.path).toContain("jpeg-msg-0.jpg");
+      expect(previewPath).toContain("jpeg-msg-0.preview.png");
+      expect(readFileSync(previewPath!)).toEqual(Buffer.from("89504e470d0a1a0a", "hex"));
+      if (process.platform !== "win32") {
+        expect(statSync(previewPath!).mode & 0o777).toBe(0o600);
+      }
+    } finally {
+      if (prevHome === undefined) delete process.env["REMOTE_PI_HOME"];
+      else process.env["REMOTE_PI_HOME"] = prevHome;
+      rmSync(remoteHome, { recursive: true, force: true });
+    }
+  });
+
+  test("converted preview output over 10 MiB falls back to saved original only", async () => {
+    _convertToPngMock.mockResolvedValueOnce({
+      data: Buffer.alloc(10 * 1024 * 1024 + 1).toString("base64"),
+      mimeType: "image/png",
     });
-    const sendsBefore = relayRef.current!.send.mock.calls.length;
+
+    await _pairForTest("ownerA__1234567890");
+    const sentMessages: Array<[unknown, ...unknown[]]> = [];
+    _setPiForTest({
+      sendUserMessage: () => undefined,
+      sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
+    });
 
     relayRef.current!.emit("message", JSON.stringify({
       peer: "ownerA__1234567890",
       ct: Buffer.from(JSON.stringify({
-        type: "user_message", id: "msg-img", text: "what is this?",
+        type: "user_message",
+        id: "jpeg-big-preview",
+        text: "jpeg caption",
         images: [{ data: "QUJD", mime: "image/jpeg" }],
       })).toString("base64"),
     }));
     await new Promise<void>((r) => setImmediate(r));
 
-    // (a) the agent received image-first, then the caption text.
-    expect(sentToAgent).toHaveLength(1);
-    expect(sentToAgent[0]).toEqual([
-      { type: "image", data: "QUJD", mimeType: "image/jpeg" },
-      { type: "text", text: "what is this?" },
-    ]);
-    // The echo carries `images` so other owners render the bubble.
-    const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
-      .map((c) => c[0] as string).map(decodeSentCt);
-    const echo = sent.find((d) => d.inner.type === "user_message");
-    expect(echo?.inner).toMatchObject({
-      type: "user_message", id: "msg-img", text: "what is this?",
-      images: [{ data: "QUJD", mime: "image/jpeg" }],
+    const previewCall = sentMessages.find((message) => {
+      const current = message[0] as { customType?: unknown };
+      return current.customType === "remote-pi:received-image";
     });
+    const preview = previewCall?.[0] as { details?: { path?: string; previewPath?: string } } | undefined;
+    expect(preview?.details?.path).toContain("jpeg-big-preview-0.jpg");
+    expect(preview?.details?.previewPath).toBeUndefined();
+  });
+
+  test("active image steering defers local preview until agent_end", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const onInput = captureEventHandler("input");
+    const onAgentEnd = captureEventHandler("agent_end");
+    onInput({ type: "input", text: "already running", source: "interactive" });
+
+    const sentToAgent: unknown[] = [];
+    const sentMessages: Array<[unknown, ...unknown[]]> = [];
+    _setPiForTest({
+      sendUserMessage: (content: unknown) => { sentToAgent.push(content); },
+      sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
+    });
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "user_message",
+        id: "steer-image",
+        text: "extra photo",
+        streaming_behavior: "steer",
+        images: [{ data: "QUJD", mime: "image/png" }],
+      })).toString("base64"),
+    }));
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(sentToAgent).toHaveLength(1);
+    expect(sentMessages).toHaveLength(0);
+
+    onAgentEnd({ type: "agent_end", messages: [] });
+    expect(sentMessages).toHaveLength(1);
+    expect((sentMessages[0][0] as { customType?: unknown }).customType).toBe("remote-pi:received-image");
+  });
+
+  test("slow idle JPEG conversion defers preview if another turn starts first", async () => {
+    let resolveConversion: ((value: { data: string; mimeType: string }) => void) | undefined;
+    _convertToPngMock.mockReturnValueOnce(new Promise((resolve) => {
+      resolveConversion = resolve;
+    }));
+
+    await _pairForTest("ownerA__1234567890");
+    const onInput = captureEventHandler("input");
+    const onAgentEnd = captureEventHandler("agent_end");
+    const sentMessages: Array<[unknown, ...unknown[]]> = [];
+    _setPiForTest({
+      sendUserMessage: () => undefined,
+      sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
+    });
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "user_message",
+        id: "slow-jpeg",
+        text: "slow photo",
+        images: [{ data: "QUJD", mime: "image/jpeg" }],
+      })).toString("base64"),
+    }));
+    await vi.waitFor(() => expect(_convertToPngMock).toHaveBeenCalled());
+
+    onInput({ type: "input", text: "overtaking local turn", source: "interactive" });
+    resolveConversion?.({ data: "iVBORw0KGgo=", mimeType: "image/png" });
+    await new Promise<void>((r) => setImmediate(r));
+
+    expect(sentMessages).toHaveLength(0);
+
+    onAgentEnd({ type: "agent_end", messages: [] });
+    expect(sentMessages).toHaveLength(1);
+    expect((sentMessages[0][0] as { customType?: unknown }).customType).toBe("remote-pi:received-image");
+  });
+
+  test("received-image preview messages are filtered out of provider and compaction context", () => {
+    const previewMessage = { role: "custom", customType: "remote-pi:received-image", content: "", display: true, details: { path: "/tmp/photo.png" } };
+    const keepCustom = { role: "custom", customType: "remote-pi:mesh-message", content: "keep", display: true };
+    const keepUser = { role: "user", content: "hello" };
+
+    const onContext = captureEventHandler("context");
+    const result = onContext({
+      type: "context",
+      messages: [keepCustom, previewMessage, keepUser],
+    }) as { messages?: unknown[] };
+    expect(result.messages).toEqual([keepCustom, keepUser]);
+
+    const onBeforeCompact = captureEventHandler("session_before_compact");
+    const preparation = {
+      messagesToSummarize: [previewMessage, keepUser],
+      turnPrefixMessages: [keepCustom, previewMessage],
+    };
+    onBeforeCompact({
+      type: "session_before_compact",
+      preparation,
+      branchEntries: [],
+      reason: "manual",
+      willRetry: false,
+      signal: new AbortController().signal,
+    });
+    expect(preparation.messagesToSummarize).toEqual([keepUser]);
+    expect(preparation.turnPrefixMessages).toEqual([keepCustom]);
   });
 
   test("plan/30: user_message without images → no `images` key on the echo (text path unchanged)", async () => {
     await _pairForTest("ownerA__1234567890");
     const sendUserMessage = vi.fn();
+    const sentMessages: Array<[unknown, ...unknown[]]> = [];
     _setPiForTest({
       sendUserMessage,
-      sendMessage: () => undefined,
+      sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
     });
     const sendsBefore = relayRef.current!.send.mock.calls.length;
     relayRef.current!.emit("message", JSON.stringify({
@@ -1154,12 +1423,199 @@ describe("multi-channel broadcast (W2D)", () => {
     }));
     await new Promise<void>((r) => setImmediate(r));
     expect(sendUserMessage).toHaveBeenCalledWith("hi", { deliverAs: "steer" });
+    expect(sentMessages.some((message) => {
+      const current = message[0] as { customType?: unknown };
+      return current.customType === "remote-pi:received-image";
+    })).toBe(false);
     const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
       .map((c) => c[0] as string).map(decodeSentCt);
     const echo = sent.find((d) => d.inner.type === "user_message");
     expect(echo?.inner).toMatchObject({ type: "user_message", id: "msg-txt", text: "hi" });
     expect(echo?.inner).not.toHaveProperty("images");
     expect(echo?.inner).not.toHaveProperty("streaming_behavior");
+  });
+
+  test("image validation sends failure preview for unsupported/invalid image payloads", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const sendUserMessage = vi.fn();
+    const onAgentEnd = captureEventHandler("agent_end");
+    const sentMessages: Array<[unknown, ...unknown[]]> = [];
+    _setPiForTest({
+      sendUserMessage,
+      sendMessage: (...messageArgs) => { sentMessages.push(messageArgs); },
+    });
+
+    const invalidCases = [
+      { id: "invalid-mime", mime: "image/tiff", data: "QUJD" },
+      { id: "data-uri", mime: "image/png", data: "data:image/png;base64,iVBORw0KGgo=" },
+      { id: "whitespace", mime: "image/png", data: "QU JD" },
+      { id: "empty", mime: "image/png", data: "" },
+      { id: "bad-base64", mime: "image/png", data: "%%%" },
+      { id: "bad-padding", mime: "image/png", data: "QUJD==" },
+      { id: "oversize", mime: "image/png", data: Buffer.alloc(10 * 1024 * 1024 + 1, 0x41).toString("base64") },
+    ];
+
+    for (const item of invalidCases) {
+      relayRef.current!.emit("message", JSON.stringify({
+        peer: "ownerA__1234567890",
+        ct: Buffer.from(JSON.stringify({
+          type: "user_message",
+          id: `msg-${item.id}`,
+          text: `oops-${item.id}`,
+          images: [{ data: item.data, mime: item.mime }],
+        })).toString("base64"),
+      }));
+      await new Promise<void>((r) => setImmediate(r));
+    }
+    onAgentEnd({ type: "agent_end", messages: [] });
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(invalidCases.length);
+    const imageCalls = sentMessages.filter((message) => {
+      const current = message[0] as { customType?: unknown };
+      return current.customType === "remote-pi:received-image";
+    });
+    expect(imageCalls).toHaveLength(invalidCases.length);
+    for (const message of imageCalls) {
+      const current = message[0] as {
+        customType?: unknown;
+        content?: string;
+        display?: boolean;
+        details?: {
+          messageId?: string;
+          index?: number;
+          mime?: string;
+          path?: string;
+          size?: number;
+          text?: string;
+          error?: string;
+          reason?: string;
+        };
+      };
+      expect(current.content).toBe("");
+      expect(current.display).toBe(true);
+      expect(message[1]).toBeUndefined();
+      expect(current.details?.messageId).toMatch(/^msg-/);
+      expect(current.details?.index).toBe(0);
+      expect(current.details?.error).toBeTruthy();
+      expect(current.details?.reason).toBeTruthy();
+      expect(current.details).not.toHaveProperty("data");
+    }
+  });
+
+  test("registers and uses remote-pi image renderer with Saved fallback", () => {
+    const { getRenderer } = captureMessageRenderer();
+    const theme = {
+      fg: (token: string, text: string) => `${token}:${text}`,
+      bg: (token: string, text: string) => `${token}:${text}`,
+    };
+    const dir = mkdtempSync(join(tmpdir(), "pi-ext-render-missing-"));
+    const message = {
+      customType: "remote-pi:received-image",
+      content: "",
+      display: true,
+      details: {
+        messageId: "msg-missing",
+        index: 2,
+        path: join(dir, "missing.png"),
+        mime: "image/png",
+        size: 123,
+        error: "missing file",
+        reason: "not present on disk",
+      },
+    };
+    const renderer = getRenderer();
+    const component = renderer(message, { expanded: false }, theme);
+    const rendered = (component as { render: (width: number) => string[] }).render(120).join("\n");
+    expect(rendered).toContain("📷 Photo from Android (msg-missing #2)");
+    expect(rendered).toContain("Saved: ");
+    expect(rendered).toContain(message.details.path);
+    expect(rendered).toContain("Error: missing file");
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("does not attempt inline preview for non-PNG mime when previewPath is unavailable", () => {
+    const { getRenderer } = captureMessageRenderer();
+    const theme = {
+      fg: (token: string, text: string) => `${token}:${text}`,
+      bg: (token: string, text: string) => `${token}:${text}`,
+    };
+    const dir = mkdtempSync(join(tmpdir(), "pi-ext-render-jpeg-"));
+    const imagePath = join(dir, "photo.jpg");
+    // Not a valid PNG/preview payload for Kitty; it should fall back to text only.
+    writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x46, 0x49, 0x46]));
+
+    const prevCaps = getCapabilities();
+    const message = {
+      customType: "remote-pi:received-image",
+      content: "",
+      display: true,
+      details: {
+        messageId: "msg-jpeg",
+        index: 1,
+        path: imagePath,
+        mime: "image/jpeg",
+        size: 10,
+      },
+    };
+    setCapabilities({ ...prevCaps, images: "kitty" as const });
+
+    try {
+      const renderer = getRenderer();
+      const component = renderer(message, { expanded: false }, theme);
+      const rendered = (component as { render: (width: number) => string[] }).render(120).join("\n");
+      expect(rendered).toContain("📷 Photo from Android (msg-jpeg #1)");
+      expect(rendered).not.toContain("\x1b_G");
+      expect(rendered).toContain(imagePath);
+    } finally {
+      setCapabilities(prevCaps);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("renders JPEG inline when previewPath points to generated PNG", () => {
+    const { getRenderer } = captureMessageRenderer();
+    const theme = {
+      fg: (token: string, text: string) => `${token}:${text}`,
+      bg: (token: string, text: string) => `${token}:${text}`,
+    };
+    const dir = mkdtempSync(join(tmpdir(), "pi-ext-render-jpeg-preview-"));
+    const imagePath = join(dir, "photo.jpg");
+    const previewPath = join(dir, "photo.preview.png");
+
+    writeFileSync(imagePath, Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10, 0x46, 0x49, 0x46]));
+    // Minimal PNG header so Image renderer can produce non-empty base64 output.
+    writeFileSync(previewPath, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
+
+    const prevCaps = getCapabilities();
+    const message = {
+      customType: "remote-pi:received-image",
+      content: "",
+      display: true,
+      details: {
+        messageId: "msg-jpeg-preview",
+        index: 2,
+        path: imagePath,
+        previewPath,
+        mime: "image/jpeg",
+        size: 10,
+      },
+    };
+    setCapabilities({ ...prevCaps, images: "kitty" as const });
+
+    try {
+      const renderer = getRenderer();
+      const component = renderer(message, { expanded: false }, theme);
+      const renderedLines = (component as { render: (width: number) => string[] }).render(120);
+      const rendered = renderedLines.join("\n");
+      const imageLineIndex = renderedLines.findIndex((line) => line.includes("\x1b_G"));
+      expect(rendered).toContain("📷 Photo from Android (msg-jpeg-preview #2)");
+      expect(imageLineIndex).toBeGreaterThanOrEqual(0);
+      expect(renderedLines.slice(imageLineIndex + 1).some((line) => line === "")).toBe(true);
+      expect(rendered).toContain(imagePath);
+    } finally {
+      setCapabilities(prevCaps);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   test(
@@ -1377,6 +1833,160 @@ describe("multi-channel broadcast (W2D)", () => {
     expect(buf.some((m) =>
       m.role === "compaction" && m.content === "compacted 10 turns" && m.tokensBefore === 12345,
     )).toBe(true);
+  });
+
+  test("compaction cancel aborts the active compaction and publishes idle", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const harness = captureEventHarness();
+    const onBeforeCompact = harness.handler("session_before_compact");
+    let signal: AbortSignal | undefined;
+    _compactMock.mockImplementationOnce((
+      _preparation: unknown,
+      _model: unknown,
+      _apiKey: unknown,
+      _headers: unknown,
+      _customInstructions: unknown,
+      compactSignal?: AbortSignal,
+    ) => {
+      signal = compactSignal;
+      return new Promise((_resolve, reject) => {
+        compactSignal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    });
+
+    const result = onBeforeCompact(
+      { type: "session_before_compact", preparation: {}, customInstructions: "English" },
+      {
+        model: { id: "m", name: "Model", provider: "p", reasoning: false, contextWindow: 1, maxTokens: 1024 },
+        modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "k" }) },
+      },
+    ) as Promise<unknown>;
+    await vi.waitFor(() => expect(signal).toBeTruthy());
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({ type: "cancel", id: "cancel-compact", target_id: "working" })).toString("base64"),
+    }));
+
+    await expect(result).resolves.toMatchObject({ cancel: true });
+    expect(signal!.aborted).toBe(true);
+
+    const sent = relayRef.current!.send.mock.calls
+      .map((c) => c[0] as string)
+      .map(decodeSentCt);
+    expect(sent.some((d) => d.inner.type === "cancelled" && d.inner.target_id === "working")).toBe(true);
+    const ctrls = relayRef.current!.sendControl.mock.calls
+      .map((c) => c[0] as { type: string; meta?: { working?: boolean } })
+      .filter((f) => f.type === "room_meta_update");
+    expect(ctrls.some((f) => f.meta?.working === true)).toBe(true);
+    expect(ctrls.some((f) => f.meta?.working === false)).toBe(true);
+  });
+
+  test("user_message during compaction echoes immediately and drains after session_compact", async () => {
+    const prevHome = process.env["REMOTE_PI_HOME"];
+    const remoteHome = mkdtempSync(join(tmpdir(), "pi-ext-remote-home-"));
+    process.env["REMOTE_PI_HOME"] = remoteHome;
+
+    try {
+      await _pairForTest("ownerA__1234567890");
+      const harness = captureEventHarness();
+      const onBeforeCompact = harness.handler("session_before_compact");
+      const onCompact = harness.handler("session_compact");
+      const sendUserMessage = vi.fn();
+      const sendMessages: Array<[unknown, ...unknown[]]> = [];
+      _setPiForTest({ sendUserMessage, sendMessage: (...messageArgs) => { sendMessages.push(messageArgs); } });
+      let finish!: (value: unknown) => void;
+      _compactMock.mockImplementationOnce((
+        _preparation: unknown,
+        _model: unknown,
+        _apiKey: unknown,
+        _headers: unknown,
+        _customInstructions: unknown,
+        compactSignal?: AbortSignal,
+      ) => new Promise((resolve, reject) => {
+        finish = resolve;
+        compactSignal?.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })));
+      }));
+
+      const result = onBeforeCompact(
+        { type: "session_before_compact", preparation: {}, customInstructions: "English" },
+        {
+          model: { id: "m", name: "Model", provider: "p", reasoning: false, contextWindow: 1, maxTokens: 1024 },
+          modelRegistry: { getApiKeyAndHeaders: vi.fn().mockResolvedValue({ ok: true, apiKey: "k" }) },
+        },
+      ) as Promise<unknown>;
+      await vi.waitFor(() => expect(_compactMock).toHaveBeenCalled());
+
+      const sendsBefore = relayRef.current!.send.mock.calls.length;
+      relayRef.current!.emit("message", JSON.stringify({
+        peer: "ownerA__1234567890",
+        ct: Buffer.from(JSON.stringify({
+          type: "user_message",
+          id: "msg-during-compact",
+          text: "keep this",
+          images: [{ data: "iVBORw0=", mime: "image/png" }],
+        })).toString("base64"),
+      }));
+      await new Promise<void>((r) => setImmediate(r));
+
+      expect(sendMessages).toHaveLength(0);
+      expect(sendUserMessage).not.toHaveBeenCalled();
+      const echoed = relayRef.current!.send.mock.calls.slice(sendsBefore)
+        .map((c) => c[0] as string)
+        .map(decodeSentCt)
+        .find((d) => d.inner.type === "user_message" && d.inner.id === "msg-during-compact");
+      expect(echoed?.inner).toMatchObject({
+        type: "user_message",
+        id: "msg-during-compact",
+        text: "keep this",
+        streaming_behavior: "steer",
+      });
+
+      finish({ summary: "done", firstKeptEntryId: "e1", tokensBefore: 99 });
+      await expect(result).resolves.toMatchObject({ compaction: { summary: "done" } });
+      onCompact({
+        type: "session_compact",
+        compactionEntry: { type: "compaction", summary: "done", tokensBefore: 99, timestamp: "2026-01-01T00:00:00Z" },
+      });
+
+      await vi.waitFor(() => expect(sendUserMessage).toHaveBeenCalledTimes(1));
+      const [content, options] = sendUserMessage.mock.calls[0]!;
+      expect(content).toEqual([
+        { type: "image", data: "iVBORw0=", mimeType: "image/png" },
+        { type: "text", text: "keep this" },
+      ]);
+      expect(options).toEqual({ deliverAs: "steer" });
+
+      const previewCall = sendMessages.find((message) => {
+        const current = message[0] as { customType?: unknown };
+        return current.customType === "remote-pi:received-image";
+      }) as [unknown, ...unknown[]] | undefined;
+      const preview = previewCall?.[0] as {
+        content?: string;
+        display?: boolean;
+        details?: { index?: number; path?: string; size?: number; messageId?: string };
+      } | undefined;
+      expect(preview).toBeDefined();
+      expect(previewCall?.[1]).toBeUndefined();
+      expect(preview?.content).toBe("");
+      expect(preview?.display).toBe(true);
+      expect(preview?.details).toMatchObject({
+        index: 0,
+        size: 5,
+      });
+      expect(preview?.details?.messageId).toBe("msg-during-compact");
+      if (preview?.details?.path) {
+        expect(preview.details.path).toContain(tmpdir());
+      }
+    } finally {
+      if (prevHome === undefined) delete process.env["REMOTE_PI_HOME"];
+      else process.env["REMOTE_PI_HOME"] = prevHome;
+      rmSync(remoteHome, { recursive: true, force: true });
+    }
   });
 
   test("provider error (assistant stopReason:error) → forwards `error` to owners (was silent)", async () => {
