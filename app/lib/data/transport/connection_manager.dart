@@ -240,6 +240,10 @@ class ConnectionManager extends Service {
       return;
     }
     _activeRoomId = roomId;
+    final active = _activePeer;
+    if (active != null) {
+      _activePeer = active.copyWith(roomId: roomId);
+    }
     // Push down to the underlying WS transport so outbound envelopes
     // get the right `room` value.
     final cur = _status;
@@ -985,8 +989,8 @@ class ConnectionManager extends Service {
     final active = _activePeer;
     if (active == null) return;
     if (toStandardB64(active.remoteEpk) != peerKey) return;
-    if (active.roomId != null && active.roomId == _activeRoomId) {
-      return; // already bound — discovery is a no-op
+    if (active.roomId != null) {
+      return; // explicit room selection — discovery must not override it
     }
     _activeRoomId = discoveredRoom;
     final cur = _status;
