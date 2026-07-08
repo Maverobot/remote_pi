@@ -149,7 +149,10 @@ vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   return { ...orig, compact: _compactMock, convertToPng: _convertToPngMock };
 });
 
-// Import AFTER mocks
+// Keep extension-level mesh tests off the developer's live ~/.pi/remote broker.
+process.env["REMOTE_PI_HOME"] = mkdtempSync(join(tmpdir(), "pi-ext-test-home-"));
+
+// Import AFTER mocks + test env
 const {
   default: extension,
   _getState,
@@ -167,6 +170,7 @@ const {
   _hasActivePeerForTest,
   _getActivePeerCountForTest,
   _restartSupervisorCommand,
+  _getDisposedForTest,
   _setDisposedForTest,
   _hasMeshNodeForTest,
   _getLockedNameForTest,
@@ -177,6 +181,8 @@ const {
   CTRL_PREFIX,
 } = await import("./index.js");
 const { acquireCwdLock } = await import("./session/cwd_lock.js");
+const { MeshNode } = await import("./session/mesh_node.js");
+const { ensureGlobalDirs, LOCAL_SESSION_NAME, sessionAuditPath, sessionSockPath } = await import("./session/global_config.js");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -4544,6 +4550,58 @@ describe("session_shutdown teardown", () => {
     await _connectForTest(makeMockCtx());
     expect(_hasMeshNodeForTest()).toBe(true);
   });
+
+  test("first-run without interactive setup does not leak a cwd lock", async () => {
+    const cwd = "/home/user/projects/no-config-lock";
+    const root = captureHandler("remote-pi");
+
+    await root("", makeMockCtx(cwd));
+
+    expect(_getLockedNameForTest()).toBeNull();
+    const lock = await acquireCwdLock(cwd, "no-config-lock");
+    expect(lock.ok).toBe(true);
+    if (lock.ok) lock.release();
+  });
+
+  test("same-module session_start waits for parked startup before rearming", async () => {
+    process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
+      agent_name: "Backoffice",
+      auto_start_relay: true,
+    });
+    const cwd = "/home/user/projects/root-lock-race";
+    let releaseConnect: (() => void) | undefined;
+    let connecting: Promise<void> | undefined;
+    _defaultConnectImpl = () =>
+      new Promise<void>((resolve) => { releaseConnect = resolve; });
+
+    try {
+      const root = captureHandler("remote-pi");
+      connecting = root("", makeMockCtx(cwd));
+      await vi.waitFor(() => expect(relayRef.current).not.toBeNull());
+      const oldRelay = relayRef.current!;
+
+      const shutdown = captureEventHandler("session_shutdown");
+      await shutdown({ type: "session_shutdown", reason: "resume" });
+      const sessionStart = captureEventHandler("session_start");
+      _defaultConnectImpl = async () => undefined;
+      sessionStart({ type: "session_start" }, makeMockCtx(cwd));
+      expect(_getDisposedForTest()).toBe(true);
+
+      releaseConnect?.();
+      await connecting;
+      expect(oldRelay.close).toHaveBeenCalled();
+
+      await vi.waitFor(() => expect(_getDisposedForTest()).toBe(false));
+      await vi.waitFor(() => expect(_getLockedNameForTest()).toBe("Backoffice"));
+      await vi.waitFor(() => expect(_hasMeshNodeForTest()).toBe(true));
+      expect(_getState()).toBe("started");
+    } finally {
+      releaseConnect?.();
+      await connecting?.catch(() => undefined);
+      delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+      _resetCwdLockForTest();
+    }
+  });
 });
 
 // ── remote-pi:name-assigned event (Cockpit consumes the effective name) ────────
@@ -4854,6 +4912,79 @@ describe("same-folder same-name → #N suffix (no refusal)", () => {
       expect(_hasMeshNodeForTest()).toBe(true);
     } finally {
       if (first.ok) first.release();
+      delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+      _resetCwdLockForTest();
+    }
+  });
+
+  test("concurrent startup in one extension instance does not self-suffix", async () => {
+    process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
+      agent_name: "Backoffice",
+      auto_start_relay: false,
+    });
+    const cwd = "/home/user/projects/remote_pi-concurrent";
+    try {
+      const root = captureHandler("remote-pi");
+      await Promise.all([
+        root("", makeMockCtx(cwd)),
+        root("", makeMockCtx(cwd)),
+      ]);
+
+      expect(_getLockedNameForTest()).toBe("Backoffice");
+      expect(_hasMeshNodeForTest()).toBe(true);
+    } finally {
+      delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+      _resetCwdLockForTest();
+    }
+  });
+
+  test("a stale broker peer is taken over when the cwd lock is free", async () => {
+    process.env["REMOTE_PI_DIRECT_CONFIG"] = JSON.stringify({
+      agent_name: "Backoffice",
+      auto_start_relay: false,
+    });
+    const cwd = mkdtempSync(join(tmpdir(), "remote-pi-stale-broker-"));
+    ensureGlobalDirs();
+    mkdirSync(dirname(sessionSockPath(LOCAL_SESSION_NAME)), { recursive: true });
+    const stale = new MeshNode({
+      sockPath: sessionSockPath(LOCAL_SESSION_NAME),
+      name: "Backoffice",
+      cwd,
+      auditPath: sessionAuditPath(LOCAL_SESSION_NAME),
+    });
+    await stale.connect();
+    expect(stale.name()).toBe("Backoffice");
+
+    const sendMessage = vi.fn();
+    let root: CmdHandler | undefined;
+    const pi = {
+      on: () => undefined,
+      registerCommand(name: string, opts: { handler: CmdHandler }) {
+        if (name === "remote-pi") root = opts.handler;
+      },
+      registerTool: () => undefined,
+      registerShortcut: () => undefined,
+      registerFlag: () => undefined,
+      getFlag: () => undefined,
+      registerMessageRenderer: () => undefined,
+      sendMessage,
+      sendUserMessage: () => undefined,
+    } as unknown as ExtensionAPI;
+    (extension as ExtensionFactory)(pi);
+    if (!root) throw new Error("remote-pi command not registered");
+
+    try {
+      await root("", makeMockCtx(cwd));
+      expect(_getLockedNameForTest()).toBe("Backoffice");
+      expect(_hasMeshNodeForTest()).toBe(true);
+      const ev = sendMessage.mock.calls
+        .map((c) => c[0] as { customType?: string; details?: Record<string, unknown> })
+        .find((m) => m?.customType === "remote-pi:name-assigned");
+      expect(ev?.details).toMatchObject({ requested: "Backoffice", assigned: "Backoffice", changed: false });
+    } finally {
+      try { await stale.close(); } catch { /* already taken over */ }
+      const stop = captureHandler("remote-pi stop");
+      await stop("", makeMockCtx(cwd));
       delete process.env["REMOTE_PI_DIRECT_CONFIG"];
       _resetCwdLockForTest();
     }

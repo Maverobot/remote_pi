@@ -926,11 +926,15 @@ export function _hasMeshNodeForTest(): boolean { return _meshNode !== null; }
 /** Test-only: the effective (possibly `#N`-suffixed) name the cwd-lock reserved. */
 export function _getLockedNameForTest(): string | null { return _lockedName; }
 
-/** Test-only: release + clear the cwd lock (the lock normally survives stop). */
-export function _resetCwdLockForTest(): void {
+function _releaseCwdLock(): void {
   try { _cwdLock?.release(); } catch { /* ignored */ }
   _cwdLock = null;
   _lockedName = null;
+}
+
+/** Test-only: release + clear the cwd lock (the lock normally survives stop). */
+export function _resetCwdLockForTest(): void {
+  _releaseCwdLock();
 }
 
 /**
@@ -1053,6 +1057,9 @@ function _getSyncLimit(): number {
 const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _reconnectAttempt = 0;
+// Coalesces concurrent `/remote-pi` startup paths inside ONE extension instance.
+// Separate Pi processes still keep the existing #N behavior via the cwd lock.
+let _cmdRootInFlight: Promise<void> | null = null;
 
 /** Test-only: exposes pending reconnect timer state. */
 export function _hasPendingReconnect(): boolean {
@@ -2153,18 +2160,12 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     // Only persists here (no _meshNode yet); the live rename happens later via
     // the turn_start hook once the mesh is up.
     void _syncNameFromPi();
-    // Rearm a reused-but-disposed instance. The session_shutdown teardown (below)
-    // sets _disposed=true assuming the host re-evaluates THIS module fresh for the
-    // replacement session, yielding a new instance with _disposed=false. Some hosts
-    // instead REUSE the same module instance across ctx.newSession() — then the
-    // _disposed latch is never cleared (nothing else resets it), so the relay never
-    // reconnects and /remote-pi (via _cmdRoot) silently early-returns until a full
-    // Pi restart. Clearing the latch + re-running the idempotent connect path
-    // restores the relay automatically. No-op when a fresh instance IS created
-    // (_disposed=false there → never fires) and at first boot.
+    // Rearm a reused-but-disposed instance. If the old startup is still in
+    // flight, keep `_disposed=true` until it settles so its post-connect guard
+    // closes the old relay/mesh instead of promoting a ghost.
     if (_disposed) {
-      _disposed = false;
-      void _cmdRoot(ctx);
+      _rearmDisposedInstanceAfterStartup(ctx);
+      return;
     }
     // Auto-start remote-pi on a fresh boot when the cwd's local config has
     // auto_start_relay enabled (default true). Covers BOTH interactive
@@ -2240,11 +2241,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     // No bye reason: the process keeps running and the fresh instance re-joins
     // the SAME relay room, so an explicit offline→online flap would be wrong.
     if (_state !== "idle") _goIdle();
-    if (_cwdLock) {
-      try { _cwdLock.release(); } catch { /* best-effort */ }
-      _cwdLock = null;
-      _lockedName = null;
-    }
+    _releaseCwdLock();
   });
 
   // ── Commands ──────────────────────────────────────────────────────────────
@@ -2438,7 +2435,41 @@ async function _cmdPeers(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
  * `/remote-pi` is intentionally the only command users need day-to-day:
  * idempotent connect + status display.
  */
+function _rearmDisposedInstanceAfterStartup(ctx: Pick<ExtensionContext, "ui" | "cwd">): void {
+  const prior = _cmdRootInFlight;
+  const rearm = () => {
+    queueMicrotask(() => {
+      if (_cmdRootInFlight === prior) _cmdRootInFlight = null;
+      if (!_disposed) return;
+      _disposed = false;
+      void _cmdRoot(ctx);
+    });
+  };
+  if (prior) {
+    void prior.then(rearm, rearm);
+    return;
+  }
+  _disposed = false;
+  void _cmdRoot(ctx);
+}
+
 async function _cmdRoot(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
+  if (_cmdRootInFlight) {
+    await _cmdRootInFlight;
+    _cmdStatus(ctx);
+    return;
+  }
+
+  const run = _cmdRootInner(ctx);
+  _cmdRootInFlight = run;
+  try {
+    await run;
+  } finally {
+    if (_cmdRootInFlight === run) _cmdRootInFlight = null;
+  }
+}
+
+async function _cmdRootInner(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
   // This instance was torn down (session replacement) before its deferred
   // auto-init ran — don't connect, or we'd resurrect a ghost the broker can't
   // reach. The replacement instance (fresh module) drives the live connect.
@@ -2486,11 +2517,16 @@ async function _cmdRoot(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
       return;
     }
   }
+  if (_disposed) {
+    _releaseCwdLock();
+    return;
+  }
 
   // First-time wizard: no local config in this cwd → run interactive setup.
   if (!localConfigExists(cwd)) {
     const ui = ctx.ui as unknown as WizardUI;
     if (typeof ui.select !== "function") {
+      _releaseCwdLock();
       _cmdStatus(ctx);
       return;
     }
@@ -2500,6 +2536,7 @@ async function _cmdRoot(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
       use_relay: true,
     });
     if (!newConfig) {
+      _releaseCwdLock();
       ctx.ui.notify("[remote-pi] Setup cancelled.", "info");
       return;
     }
@@ -3706,6 +3743,10 @@ function _deliverMeshMessageToAgent(
  * broker.
  */
 async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
+  if (_disposed) {
+    _releaseCwdLock();
+    return;
+  }
   const cwd = "cwd" in ctx ? (ctx as ExtensionCommandContext).cwd : process.cwd();
   const local = loadLocalConfig(cwd);
   const sessionName = LOCAL_SESSION_NAME;
@@ -3738,7 +3779,10 @@ async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
     name: agentName,
     cwd: canonCwd,
     auditPath: audit,
-    takeoverExisting: process.env["REMOTE_PI_DAEMON"] === "1",
+    // The cwd lock says this process owns this exact (cwd, name). If the broker
+    // still has that address, it is the previous incarnation (crash/session
+    // replacement), not a legitimate sibling — take it over instead of #2.
+    takeoverExisting: _lockedName === agentName,
   });
 
   peer.onMessage((env) => {
@@ -3804,6 +3848,7 @@ async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
     // the replacement instance would then collide with as `name#2`.
     if (_disposed) {
       try { await peer.close(); } catch { /* best-effort */ }
+      _releaseCwdLock();
       return;
     }
     _meshNode = peer;
@@ -3844,6 +3889,7 @@ async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
     // again from `_cmdStart`).
     _attachBridgeIfReady();
   } catch (err) {
+    _releaseCwdLock();
     ctx.ui.notify(`[remote-pi] join failed: ${String(err)}`, "error");
   }
 }
