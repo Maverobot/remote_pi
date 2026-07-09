@@ -79,6 +79,16 @@ const _kBackoff = [1, 2, 5, 10, 30];
 Duration _backoffFor(int attempt) =>
     Duration(seconds: _kBackoff[attempt.clamp(0, _kBackoff.length - 1)]);
 
+bool _isSubagentRoomName(String? name) {
+  final n = name?.trim().toLowerCase();
+  return n != null && n.startsWith('subagent-');
+}
+
+bool _isSubagentRoom(RoomInfo room) => _isSubagentRoomName(room.name);
+
+bool _isSubagentPersistedRoom(PersistedRoom room) =>
+    _isSubagentRoomName(room.name) || _isSubagentRoomName(room.localName);
+
 // ---------------------------------------------------------------------------
 // Factory typedef — injectable for tests
 // ---------------------------------------------------------------------------
@@ -588,6 +598,28 @@ class ConnectionManager extends Service {
         :final working,
       ):
         final key = toStandardB64(peer);
+        if (_isSubagentRoomName(name)) {
+          final list = _roomsByPeer[key];
+          var removedRoom = false;
+          if (list != null) {
+            final before = list.length;
+            list.removeWhere((r) => r.roomId == roomId);
+            removedRoom = list.length != before;
+            if (list.isEmpty) {
+              _roomsByPeer.remove(key);
+            }
+          }
+          final removedLive = _liveRoomIds[key]?.remove(roomId) ?? false;
+          if (_liveRoomIds[key]?.isEmpty ?? false) {
+            _liveRoomIds.remove(key);
+          }
+          if (removedRoom || removedLive) {
+            roomsDirty = true;
+            // ignore: unawaited_futures
+            _persistRoomsForPeer(key);
+          }
+          break;
+        }
         final list = _roomsByPeer[key] ?? <RoomInfo>[];
         // Preserve any localName the user already set for this room
         // (long-press rename) — only the live metadata comes from the
@@ -664,6 +696,20 @@ class ConnectionManager extends Service {
         final idx = list.indexWhere((r) => r.roomId == roomId);
         if (idx < 0) break;
         final current = list[idx];
+        if (_isSubagentRoom(current)) {
+          list.removeAt(idx);
+          if (list.isEmpty) {
+            _roomsByPeer.remove(key);
+          }
+          _liveRoomIds[key]?.remove(roomId);
+          if (_liveRoomIds[key]?.isEmpty ?? false) {
+            _liveRoomIds.remove(key);
+          }
+          roomsDirty = true;
+          // ignore: unawaited_futures
+          _persistRoomsForPeer(key);
+          break;
+        }
         // Plan/28 Wave D — meta is open-ended; only update the fields
         // the broadcast actually carried. `hasModel` / `hasThinking`
         // distinguishes "field was absent from the meta envelope"
@@ -692,12 +738,15 @@ class ConnectionManager extends Service {
         _persistRoomsForPeer(key);
       case RoomsSnapshot(:final peer, :final rooms):
         final key = toStandardB64(peer);
+        final visibleRooms = rooms.where((r) => !_isSubagentRoom(r)).toList();
         // Merge snapshot into cache: add unknown rooms, refresh
         // metadata (preserving local rename + previous model when
         // the snapshot omits it), update live set.
-        final existing = _roomsByPeer[key] ?? <RoomInfo>[];
+        final rawExisting = _roomsByPeer[key] ?? <RoomInfo>[];
+        final existing = rawExisting.where((r) => !_isSubagentRoom(r)).toList();
+        final purgedHidden = !_roomListEquals(existing, rawExisting);
         final byId = {for (final r in existing) r.roomId: r};
-        for (final r in rooms) {
+        for (final r in visibleRooms) {
           final preservedName = byId[r.roomId]?.name ?? r.name;
           final preservedModel = r.model ?? byId[r.roomId]?.model;
           // Plan/28 Wave D — same convention as model: keep the
@@ -717,12 +766,12 @@ class ConnectionManager extends Service {
           );
         }
         final newList = byId.values.toList();
-        final newLive = rooms.map((r) => r.roomId).toSet();
+        final newLive = visibleRooms.map((r) => r.roomId).toSet();
         final liveChanged = !_setEquals(
           newLive,
           _liveRoomIds[key] ?? const <String>{},
         );
-        final listChanged = !_roomListEquals(newList, existing);
+        final listChanged = purgedHidden || !_roomListEquals(newList, existing);
         if (!liveChanged && !listChanged) {
           // Relay re-emitted a snapshot identical to what we already
           // have. Skip — no listeners need to know.
@@ -734,8 +783,8 @@ class ConnectionManager extends Service {
         // ignore: unawaited_futures
         _persistRoomsForPeer(key);
         // Same legacy-discovery hook as RoomAnnounced.
-        if (rooms.isNotEmpty) {
-          _maybeAdoptLegacyRoom(key, rooms.first.roomId);
+        if (visibleRooms.isNotEmpty) {
+          _maybeAdoptLegacyRoom(key, visibleRooms.first.roomId);
         }
     }
     if (presenceDirty) _schedulePresenceEmit();
@@ -874,7 +923,9 @@ class ConnectionManager extends Service {
     _roomsRestored = true;
     final peers = await _storage.listPeers();
     for (final p in peers) {
-      final cached = await _storage.loadRooms(p.remoteEpk);
+      final cached = (await _storage.loadRooms(
+        p.remoteEpk,
+      )).where((r) => !_isSubagentPersistedRoom(r)).toList();
       if (cached.isEmpty) continue;
       final key = toStandardB64(p.remoteEpk);
       _roomsByPeer[key] = cached

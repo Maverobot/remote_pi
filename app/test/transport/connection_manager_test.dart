@@ -1176,6 +1176,57 @@ void _registerRoomsTests() {
       },
     );
 
+    test('subagent child rooms are ignored and purged', () async {
+      final storage = _FakeStorage([_fakePeer()]);
+      await storage.saveRooms('epk_test', const [
+        PersistedRoom(
+          roomId: 'cached-child',
+          name: 'subagent-reviewer-old',
+          cwd: '/repo',
+          startedAt: 1,
+        ),
+      ]);
+      final ch = _ControllableChannel();
+      final cm = ConnectionManager(
+        factory: (_, _) async => ch,
+        storage: storage,
+        emitDebounce: Duration.zero,
+      );
+      await cm.boot();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(cm.roomsFor('epk_test'), isEmpty,
+          reason: 'cached subagent rooms should not render after app update');
+
+      ch.pushControl(const RoomAnnounced(
+        peer: 'epk_test',
+        roomId: 'live-child',
+        name: 'subagent-reviewer-123',
+        cwd: '/repo',
+        startedAt: 2,
+      ));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(cm.roomsFor('epk_test'), isEmpty);
+      expect(cm.isRoomLive('epk_test', 'live-child'), isFalse);
+
+      ch.pushControl(const RoomsSnapshot(peer: 'epk_test', rooms: [
+        RoomInfo(
+          roomId: 'live-child',
+          name: 'subagent-reviewer-123',
+          cwd: '/repo',
+          startedAt: 2,
+        ),
+        RoomInfo(roomId: 'real-room', name: 'robflow-backend', startedAt: 3),
+      ]));
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+
+      final rooms = cm.roomsFor('epk_test');
+      expect(rooms.map((r) => r.roomId), ['real-room']);
+      expect(cm.isRoomLive('epk_test', 'live-child'), isFalse);
+      expect(cm.isRoomLive('epk_test', 'real-room'), isTrue);
+
+      cm.dispose();
+    });
+
     test(
       '_connect adopts peer.roomId (plan 17 fix — bind room on the '
       'first frame so the relay routes correctly)',
