@@ -221,6 +221,8 @@ const {
   _setPiForTest,
   _getCurrentTurnIdForTest,
   _getPendingSteerIdsForTest,
+  _setAutoInitedForTest,
+  _isPiSubagentChildForTest,
   _connectForTest,
   _startRelayForTest,
   _getCachedPublicKeyForTest,
@@ -4043,6 +4045,10 @@ describe("rooms wiring", () => {
     relayInstances.length = 0;
     _defaultConnectImpl = async () => undefined;
     delete process.env["REMOTE_PI_RELAY"];
+    delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+    delete process.env["PI_SUBAGENT_RUN_ID"];
+    delete process.env["PI_SUBAGENT_CHILD_AGENT"];
+    _setAutoInitedForTest(false);
     const qr = await import("./pairing/qr.js");
     (qr.qrSession.consumeToken as unknown as ReturnType<typeof vi.fn>).mockImplementation(
       (token: string) => {
@@ -4052,6 +4058,26 @@ describe("rooms wiring", () => {
     );
     const stop = captureHandler("remote-pi stop");
     await stop("", makeMockCtx());
+  });
+
+  test("session_start auto-init skips pi-subagents child processes", async () => {
+    const { saveLocalConfig } = await import("./session/local_config.js");
+    const cwd = mkdtempSync(join(tmpdir(), "remote-pi-subagent-child-"));
+    saveLocalConfig(cwd, { agent_name: "remote_pi", auto_start_relay: true });
+    process.env["PI_SUBAGENT_PARENT_SESSION"] = "parent-session";
+    try {
+      expect(_isPiSubagentChildForTest()).toBe(true);
+      const onSessionStart = captureEventHandler("session_start");
+      onSessionStart({ type: "session_start" }, makeMockCtx(cwd));
+      await new Promise<void>((r) => setImmediate(r));
+      await new Promise<void>((r) => setImmediate(r));
+
+      expect(relayInstances).toHaveLength(0);
+      expect(_getState()).toBe("idle");
+    } finally {
+      delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("_cmdStart calls relay.connect with roomId and roomMeta derived from cwd", async () => {

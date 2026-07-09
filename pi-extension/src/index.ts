@@ -257,6 +257,14 @@ let _disposed = false;
 // true) — interactive AND daemon — instead of only REMOTE_PI_DAEMON=1.
 let _autoInited = false;
 
+function _isPiSubagentChildProcess(): boolean {
+  return Boolean(
+    process.env["PI_SUBAGENT_PARENT_SESSION"]
+    || process.env["PI_SUBAGENT_RUN_ID"]
+    || process.env["PI_SUBAGENT_CHILD_AGENT"],
+  );
+}
+
 // Cached state of global pairings (`peers.json`). Pairing is per-machine, so a
 // device paired in any Pi process is paired everywhere. Refreshed on boot,
 // after addPeer (handle_pair_request), and after removePeer (revoke).
@@ -1040,6 +1048,14 @@ export function _getCurrentTurnIdForTest(): string | null {
 export function _getPendingSteerIdsForTest(text: string): string[] {
   const key = _normalizeSteerText(text);
   return _pendingSteers.filter((item) => item.text === key).map((item) => item.id);
+}
+
+export function _setAutoInitedForTest(value: boolean): void {
+  _autoInited = value;
+}
+
+export function _isPiSubagentChildForTest(): boolean {
+  return _isPiSubagentChildProcess();
 }
 
 /** Test-only: override the bound AgentSession so a spy can capture the
@@ -2428,10 +2444,11 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
         process.argv.includes("-p") || process.argv.includes("--print");
       const cwd = isDaemon ? process.cwd() : "cwd" in ctx ? ctx.cwd : undefined;
       if (
-        !isPrintMode &&
-        cwd &&
-        localConfigExists(cwd) &&
-        effectiveAutoStartRelay(loadLocalConfig(cwd))
+        !isPrintMode
+        && !_isPiSubagentChildProcess()
+        && cwd
+        && localConfigExists(cwd)
+        && effectiveAutoStartRelay(loadLocalConfig(cwd))
       ) {
         _autoInited = true;
         const initCtx = isDaemon
