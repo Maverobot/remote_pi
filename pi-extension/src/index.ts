@@ -258,10 +258,9 @@ let _disposed = false;
 let _autoInited = false;
 
 function _isPiSubagentChildProcess(): boolean {
-  return Boolean(
-    process.env["PI_SUBAGENT_PARENT_SESSION"]
-    || process.env["PI_SUBAGENT_RUN_ID"]
-    || process.env["PI_SUBAGENT_CHILD_AGENT"],
+  return (
+    process.env["PI_SUBAGENT_CHILD"] === "1"
+    || Boolean(process.env["PI_SUBAGENT_RUN_ID"] || process.env["PI_SUBAGENT_CHILD_AGENT"])
   );
 }
 

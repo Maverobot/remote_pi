@@ -14,6 +14,16 @@ import { fileURLToPath } from "node:url";
 import { getCapabilities, setCapabilities } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
+function clearPiSubagentEnv(): void {
+  delete process.env["PI_SUBAGENT_CHILD"];
+  delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+  delete process.env["PI_SUBAGENT_RUN_ID"];
+  delete process.env["PI_SUBAGENT_CHILD_AGENT"];
+}
+
+beforeEach(() => {
+  clearPiSubagentEnv();
+});
 const _convertToPngMock = vi.hoisted(() => vi.fn(async () => null));
 
 // ── Mock RelayClient ──────────────────────────────────────────────────────────
@@ -4045,9 +4055,6 @@ describe("rooms wiring", () => {
     relayInstances.length = 0;
     _defaultConnectImpl = async () => undefined;
     delete process.env["REMOTE_PI_RELAY"];
-    delete process.env["PI_SUBAGENT_PARENT_SESSION"];
-    delete process.env["PI_SUBAGENT_RUN_ID"];
-    delete process.env["PI_SUBAGENT_CHILD_AGENT"];
     _setAutoInitedForTest(false);
     const qr = await import("./pairing/qr.js");
     (qr.qrSession.consumeToken as unknown as ReturnType<typeof vi.fn>).mockImplementation(
@@ -4064,7 +4071,7 @@ describe("rooms wiring", () => {
     const { saveLocalConfig } = await import("./session/local_config.js");
     const cwd = mkdtempSync(join(tmpdir(), "remote-pi-subagent-child-"));
     saveLocalConfig(cwd, { agent_name: "remote_pi", auto_start_relay: true });
-    process.env["PI_SUBAGENT_PARENT_SESSION"] = "parent-session";
+    process.env["PI_SUBAGENT_CHILD"] = "1";
     try {
       expect(_isPiSubagentChildForTest()).toBe(true);
       const onSessionStart = captureEventHandler("session_start");
@@ -4075,9 +4082,15 @@ describe("rooms wiring", () => {
       expect(relayInstances).toHaveLength(0);
       expect(_getState()).toBe("idle");
     } finally {
-      delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+      delete process.env["PI_SUBAGENT_CHILD"];
       rmSync(cwd, { recursive: true, force: true });
     }
+  });
+
+  test("PI_SUBAGENT_PARENT_SESSION alone does not identify a child process", () => {
+    process.env["PI_SUBAGENT_PARENT_SESSION"] = "parent-session";
+
+    expect(_isPiSubagentChildForTest()).toBe(false);
   });
 
   test("_cmdStart calls relay.connect with roomId and roomMeta derived from cwd", async () => {
