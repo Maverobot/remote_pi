@@ -13,6 +13,17 @@ import { fileURLToPath } from "node:url";
 import { getCapabilities, setCapabilities } from "@earendil-works/pi-tui";
 import type { ExtensionAPI, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 
+function clearPiSubagentEnv(): void {
+  delete process.env["PI_SUBAGENT_CHILD"];
+  delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+  delete process.env["PI_SUBAGENT_RUN_ID"];
+  delete process.env["PI_SUBAGENT_CHILD_AGENT"];
+}
+
+beforeEach(() => {
+  clearPiSubagentEnv();
+});
+
 // ── Mock RelayClient ──────────────────────────────────────────────────────────
 
 const _compactMock = vi.hoisted(() => vi.fn());
@@ -4070,9 +4081,6 @@ describe("rooms wiring", () => {
     relayInstances.length = 0;
     _defaultConnectImpl = async () => undefined;
     delete process.env["REMOTE_PI_RELAY"];
-    delete process.env["PI_SUBAGENT_PARENT_SESSION"];
-    delete process.env["PI_SUBAGENT_RUN_ID"];
-    delete process.env["PI_SUBAGENT_CHILD_AGENT"];
     _setAutoInitedForTest(false);
     const qr = await import("./pairing/qr.js");
     (qr.qrSession.consumeToken as unknown as ReturnType<typeof vi.fn>).mockImplementation(
@@ -4089,7 +4097,7 @@ describe("rooms wiring", () => {
     const { saveLocalConfig } = await import("./session/local_config.js");
     const cwd = mkdtempSync(join(tmpdir(), "remote-pi-subagent-child-"));
     saveLocalConfig(cwd, { agent_name: "remote_pi", auto_start_relay: true });
-    process.env["PI_SUBAGENT_PARENT_SESSION"] = "parent-session";
+    process.env["PI_SUBAGENT_CHILD"] = "1";
     try {
       expect(_isPiSubagentChildForTest()).toBe(true);
       const onSessionStart = captureEventHandler("session_start");
@@ -4100,7 +4108,7 @@ describe("rooms wiring", () => {
       expect(relayInstances).toHaveLength(0);
       expect(_getState()).toBe("idle");
     } finally {
-      delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+      delete process.env["PI_SUBAGENT_CHILD"];
       rmSync(cwd, { recursive: true, force: true });
     }
   });
@@ -5050,6 +5058,48 @@ describe("pi session name → remote-pi mesh name sync", () => {
       expect(cfg.agent_name).toBe("frompiname");
     } finally {
       process.chdir(prevCwd);
+      _resetCwdLockForTest();
+    }
+  });
+
+  test("child-generated Pi session names are ignored by _syncNameFromPi", async () => {
+    delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+    const prevCwd = process.cwd();
+    process.env["PI_SUBAGENT_CHILD"] = "1";
+    mkdirSync(syncCwd, { recursive: true });
+    const { saveLocalConfig } = await import("./session/local_config.js");
+    process.chdir(syncCwd);
+    try {
+      saveLocalConfig(syncCwd, { agent_name: "remote_pi", auto_start_relay: false });
+      _setPiForTest(makeSyncSpyPi(vi.fn(), "subagent-scout-019f4ae7-1"));
+      await _syncNameFromPiForTest();
+      const cfg = JSON.parse(readFileSync(`${syncCwd}/.pi/remote-pi/config.json`, "utf8"));
+      expect(cfg.agent_name).toBe("remote_pi");
+    } finally {
+      process.chdir(prevCwd);
+      delete process.env["PI_SUBAGENT_CHILD"];
+      _resetCwdLockForTest();
+    }
+  });
+
+  test("PI_SUBAGENT_PARENT_SESSION alone does not block parent session name persistence", async () => {
+    delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+    const prevCwd = process.cwd();
+    process.env["PI_SUBAGENT_PARENT_SESSION"] = "parent-session";
+    process.env["PI_SUBAGENT_RUN_ID"] = "";
+    process.env["PI_SUBAGENT_CHILD_AGENT"] = "";
+    mkdirSync(syncCwd, { recursive: true });
+    process.chdir(syncCwd);
+    try {
+      _setPiForTest(makeSyncSpyPi(vi.fn(), "frompiname"));
+      await _syncNameFromPiForTest();
+      const cfg = JSON.parse(readFileSync(`${syncCwd}/.pi/remote-pi/config.json`, "utf8"));
+      expect(cfg.agent_name).toBe("frompiname");
+    } finally {
+      process.chdir(prevCwd);
+      delete process.env["PI_SUBAGENT_PARENT_SESSION"];
+      delete process.env["PI_SUBAGENT_RUN_ID"];
+      delete process.env["PI_SUBAGENT_CHILD_AGENT"];
       _resetCwdLockForTest();
     }
   });

@@ -255,10 +255,9 @@ let _disposed = false;
 let _autoInited = false;
 
 function _isPiSubagentChildProcess(): boolean {
-  return Boolean(
-    process.env["PI_SUBAGENT_PARENT_SESSION"]
-    || process.env["PI_SUBAGENT_RUN_ID"]
-    || process.env["PI_SUBAGENT_CHILD_AGENT"],
+  return (
+    process.env["PI_SUBAGENT_CHILD"] === "1"
+    || Boolean(process.env["PI_SUBAGENT_RUN_ID"] || process.env["PI_SUBAGENT_CHILD_AGENT"])
   );
 }
 
@@ -1357,7 +1356,7 @@ function _displayName(cwd: string): string {
  */
 let _syncingName = false;
 async function _syncNameFromPi(): Promise<void> {
-  if (_disposed || _syncingName) return;
+  if (_disposed || _syncingName || _isPiSubagentChildProcess()) return;
   // Best-effort name sync. This is invoked fire-and-forget (`void
   // _syncNameFromPi()`) from turn_start and session_start, so any rejection
   // here escapes the runner's per-handler try/catch and crashes pi as an
