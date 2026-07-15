@@ -12,6 +12,7 @@ import 'package:cockpit/app/core/env.dart';
 import 'package:cockpit/app/core/ui/menu/editor_menu_bridge.dart';
 import 'package:cockpit/app/core/ui/menu/workspace_menu_bridge.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
+import 'package:cockpit/app/core/utils/login_shell.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:media_kit/media_kit.dart';
@@ -23,6 +24,12 @@ Future<void> main() async {
 
   // Plano 46 — inicializa o media_kit (libmpv) antes de qualquer Player.
   MediaKit.ensureInitialized();
+
+  // Resolve o shell de login do usuário ANTES do primeiro terminal. Aberto pelo
+  // Finder/Dock não há `$SHELL` no ambiente (launchd não tem shell-pai), então a
+  // resolução consulta o SO (dscl/getent) — e o spawn de PTY, que é síncrono, lê
+  // do cache. Ver login_shell.dart / issue #42.
+  await resolveLoginShell();
 
   // Mata processos `pi --mode rpc` e language servers (LSP) órfãos do ciclo
   // anterior antes de qualquer novo spawn (cobre hot restart e cold restart

@@ -5,13 +5,15 @@ import 'dart:typed_data';
 
 import 'package:cockpit/app/cockpit/data/rpc/pi_process_registry.dart';
 import 'package:cockpit/app/core/data/setup/remote_pi_resolver.dart';
+import 'package:cockpit/app/core/utils/login_shell.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/task_runner_gateway.dart';
 import 'package:cockpit/app/cockpit/domain/entities/task_definition.dart';
 import 'package:cockpit/app/cockpit/domain/entities/task_run.dart';
 import 'package:kyroon_pty/kyroon_pty.dart';
 
 /// Executor de tasks num PTY nativo (`kyroon_pty`). Roda cada task via **login
-/// shell** (`$SHELL -lc "<cmd>"`) pra herdar o PATH do perfil do usuário — sem
+/// shell** (o shell de login do usuário + `-ilc "<cmd>"`, ver [resolveLoginShell])
+/// pra herdar o PATH do perfil do usuário — sem
 /// isso o app GUI não acharia `flutter`/`npm`/`go` (PATH mínimo do Finder).
 /// Mesma razão e mesmas vars (`TERM`/`COLORTERM`) do terminal embutido.
 class PtyTaskRunner implements TaskRunnerGateway {
@@ -26,9 +28,7 @@ class PtyTaskRunner implements TaskRunnerGateway {
 
   @override
   TaskRun runOf(String taskId) =>
-      _running[taskId]?.state ??
-      _lastState[taskId] ??
-      TaskRun.idleFor(taskId);
+      _running[taskId]?.state ?? _lastState[taskId] ?? TaskRun.idleFor(taskId);
 
   @override
   Stream<List<int>> output(String taskId) =>
@@ -280,7 +280,7 @@ class PtyTaskRunner implements TaskRunnerGateway {
   /// **mantém o environment** (PATH/`TERM`/`COLORTERM`). Windows/Linux não têm
   /// essa atribuição → spawn direto. Se o uid não resolver, cai no spawn direto.
   Future<({String exe, List<String> args})> _spawnFor(String cmdLine) async {
-    final shellArgv = [_shell(), ..._shellArgs(cmdLine)];
+    final shellArgv = [await _shell(), ..._shellArgs(cmdLine)];
     if (Platform.isMacOS) {
       final uid = await _currentUid();
       if (uid != null) {
@@ -306,11 +306,14 @@ class PtyTaskRunner implements TaskRunnerGateway {
     return null;
   }
 
-  String _shell() {
+  /// Shell da task. POSIX: o shell de **login real** do usuário — `$SHELL` some
+  /// quando o app é aberto pelo Finder/Dock (sem shell-pai) e o fish/bash do
+  /// usuário viraria zsh (issue #42).
+  Future<String> _shell() async {
     if (Platform.isWindows) {
       return Platform.environment['ComSpec'] ?? 'cmd.exe';
     }
-    return Platform.environment['SHELL'] ?? '/bin/zsh';
+    return resolveLoginShell();
   }
 
   /// Args do shell pra rodar UM comando e herdar o PATH do perfil. POSIX

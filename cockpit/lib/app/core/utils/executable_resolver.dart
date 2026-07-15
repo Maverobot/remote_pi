@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:cockpit/app/core/utils/login_shell.dart';
+
 /// Resolve o caminho de um executável (`pi`, `node`, `remote-pi`, …) de forma
 /// robusta — apps GUI não herdam a PATH do shell.
 ///
@@ -91,7 +93,7 @@ Future<String> resolveExecutable(
 ///    o `Process.run` captura e nós ignoramos; lemos só o `stdout`. Por isso
 ///    **não** gateamos no `exitCode`: parseamos a saída direto.
 Future<String?> unixWhich(String name) async {
-  final shell = Platform.environment['SHELL'] ?? '/bin/sh';
+  final shell = await resolveLoginShell();
   return await _runWhich(shell, ['-lc', 'which $name']) ??
       await _runWhich(shell, ['-ic', 'which $name']);
 }

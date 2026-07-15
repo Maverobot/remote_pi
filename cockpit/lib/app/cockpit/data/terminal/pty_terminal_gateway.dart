@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cockpit/app/cockpit/domain/contracts/terminal_gateway.dart';
+import 'package:cockpit/app/core/utils/login_shell.dart';
 import 'package:kyroon_pty/kyroon_pty.dart';
 
 /// PTY nativo via `kyroon_pty`. Roda o shell real do SO num pseudo-terminal.
@@ -75,7 +76,10 @@ class PtyTerminalGateway implements TerminalGateway {
       if (_isWindowsArm) return Platform.environment['COMSPEC'] ?? 'cmd.exe';
       return 'powershell.exe';
     }
-    return Platform.environment['SHELL'] ?? '/bin/zsh';
+    // POSIX: shell de **login real** do usuário. Não use `$SHELL` direto — ela
+    // some quando o app é aberto pelo Finder/Dock (sem shell-pai), e o fish/bash
+    // do usuário vira zsh (issue #42). O cache é aquecido no `main`.
+    return loginShellOrFallback();
   }
 
   /// Argumentos do shell.
