@@ -1223,6 +1223,8 @@ void _registerRoomsTests() {
         await Future<void>.delayed(const Duration(milliseconds: 10));
         expect(cm.activeRoomId, 'main',
             reason: 'no persisted roomId → falls back to main');
+        expect(cm.activePeer?.roomId, isNull,
+            reason: 'legacy peer must remain unbound until discovery');
 
         // Relay announces the real room for this peer.
         ch.pushControl(const RoomAnnounced(
