@@ -1043,6 +1043,11 @@ class _ControllableChannel implements IChannel, IControlLink {
   final _ctrl = StreamController<ServerMessage>.broadcast();
   final _controlCtrl = StreamController<ControlInbound>.broadcast();
   final List<Map<String, dynamic>> sentControl = [];
+  String? activeRoom;
+
+  void setActiveRoom(String roomId) {
+    activeRoom = roomId;
+  }
 
   @override
   Stream<ServerMessage> get serverMessages => _ctrl.stream;
@@ -1236,6 +1241,81 @@ void _registerRoomsTests() {
         final saved = storage.savedPeers;
         expect(saved, isNotEmpty);
         expect(saved.last.roomId, 'discovered-room-id');
+
+        cm.dispose();
+      },
+    );
+
+    test(
+      'explicit room switch is not overwritten by later room announce',
+      () async {
+        final storage = _FakeStorage([]);
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: storage,
+          emitDebounce: Duration.zero,
+        );
+        const peer = PeerRecord(
+          remoteEpk: 'epk_explicit',
+          sessionName: 'Pi',
+          relayUrl: 'wss://x',
+          pairedAt: '2026-01-01T00:00:00Z',
+          roomId: 'robflow',
+        );
+        await cm.connectTo(peer);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+        expect(cm.activeRoomId, 'robflow');
+
+        cm.switchRoom('remote');
+        expect(cm.activeRoomId, 'remote');
+        expect(ch.activeRoom, 'remote');
+
+        ch.pushControl(const RoomAnnounced(
+          peer: 'epk_explicit',
+          roomId: 'robflow',
+          name: 'robflow',
+          cwd: '/work/robflow',
+          startedAt: 1000,
+        ));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        expect(cm.activeRoomId, 'remote');
+        expect(ch.activeRoom, 'remote');
+        expect(storage.savedPeers, isEmpty);
+
+        cm.dispose();
+      },
+    );
+
+    test(
+      'explicit room switch is not overwritten by rooms snapshot order',
+      () async {
+        final ch = _ControllableChannel();
+        final cm = ConnectionManager(
+          factory: (_, _) async => ch,
+          storage: _FakeStorage([]),
+          emitDebounce: Duration.zero,
+        );
+        const peer = PeerRecord(
+          remoteEpk: 'epk_explicit_snapshot',
+          sessionName: 'Pi',
+          relayUrl: 'wss://x',
+          pairedAt: '2026-01-01T00:00:00Z',
+          roomId: 'robflow',
+        );
+        await cm.connectTo(peer);
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        cm.switchRoom('remote');
+        ch.pushControl(const RoomsSnapshot(peer: 'epk_explicit_snapshot', rooms: [
+          RoomInfo(roomId: 'robflow', startedAt: 1000),
+          RoomInfo(roomId: 'remote', startedAt: 1001),
+        ]));
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+
+        expect(cm.activeRoomId, 'remote');
+        expect(ch.activeRoom, 'remote');
 
         cm.dispose();
       },
