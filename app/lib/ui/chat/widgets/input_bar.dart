@@ -791,7 +791,11 @@ class _QuickActionsButtonState extends State<_QuickActionsButton>
     return SizeTransition(
       sizeFactor: _sizeFactor,
       axis: Axis.horizontal,
-      alignment: Alignment.centerLeft,
+      // -1.0 = start (centerLeft) — `alignment:` only exists on Flutter
+      // ≥3.44 and breaks the 3.41 CI toolchain; drop the ignore once CI
+      // moves to ≥3.44.
+      // ignore: deprecated_member_use
+      axisAlignment: -1.0,
       child: FadeTransition(
         opacity: _fade,
         child: Row(
