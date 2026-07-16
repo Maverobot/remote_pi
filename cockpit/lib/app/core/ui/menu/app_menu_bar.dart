@@ -267,16 +267,33 @@ class WindowMenuBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (Platform.isMacOS && !renderOnMacOS) return const SizedBox.shrink();
-    return Menubar(
-      border: false,
-      children: <MenuItem>[
-        MenuButton(
-          subMenu: menus
-              .map((m) => _windowMenu(context, m))
-              .toList(growable: false),
-          child: const Icon(Icons.menu, size: 16),
-        ),
-      ],
+    // O botão de menubar do shadcn embute um padding horizontal generoso
+    // (`baseContentPadding * 0.75` da densidade do tema), pensado pra itens de
+    // texto lado a lado — "File View Window". Aqui há um ícone só, e esse
+    // padding o empurrava pra dentro e o deixava fora da grade dos ícones
+    // vizinhos da topbar. Zerado, o botão fica do tamanho da caixa abaixo e o
+    // espaçamento passa a ser só o da topbar.
+    return ComponentTheme<MenubarButtonTheme>(
+      data: MenubarButtonTheme(
+        padding: (context, states, value) => EdgeInsets.zero,
+      ),
+      child: Menubar(
+        border: false,
+        children: <MenuItem>[
+          MenuButton(
+            subMenu: menus
+                .map((m) => _windowMenu(context, m))
+                .toList(growable: false),
+            // Mesma caixa de 28x28 dos `_IconBtn` da topbar, pro hambúrguer
+            // cair na mesma grade dos ícones vizinhos.
+            child: const SizedBox(
+              width: 28,
+              height: 28,
+              child: Icon(Icons.menu, size: 16),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

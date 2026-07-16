@@ -40,7 +40,10 @@ class CockpitTopbar extends StatelessWidget {
     return WindowTitleBar(
       children: [
         const WindowControls(),
-        const SizedBox(width: 12),
+        // Folga do semáforo — só onde ele existe. No Windows/Linux o
+        // [WindowControls] é `SizedBox.shrink()`, então isto separaria o
+        // primeiro item de coisa nenhuma.
+        if (Platform.isMacOS) const SizedBox(width: 12),
         // Windows/Linux: barra de menu desenhada na janela (estilo VS Code), ao
         // lado do título. No macOS o [WindowMenuBar] é no-op (barra é a nativa).
         if (!Platform.isMacOS) ...[

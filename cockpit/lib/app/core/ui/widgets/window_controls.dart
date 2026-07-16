@@ -53,9 +53,14 @@ class WindowTitleBar extends StatelessWidget {
           // Camada interativa — botões disparam o onTap sem o hold da arena.
           Positioned.fill(
             child: Padding(
+              // O recuo à esquerda existe pro semáforo do macOS respirar longe
+              // do canto arredondado da janela. No Windows/Linux não há controle
+              // nenhum à esquerda (eles vão pra direita, via
+              // [WindowControlsTrailing]), então o mesmo 18 vira espaço morto e
+              // empurra o primeiro item pra dentro sem motivo.
               // Windows/Linux: caption cola no canto direito (sem padding).
               padding: EdgeInsets.only(
-                left: 18,
+                left: Platform.isMacOS ? 18 : 8,
                 right: Platform.isWindows || Platform.isLinux ? 0 : 12,
               ),
               child: Row(children: children),
