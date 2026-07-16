@@ -18,6 +18,22 @@ import 'package:cockpit/app/core/utils/login_shell.dart';
 /// - [unixHomeRelative]: caminhos relativos a `$HOME` (ex.: `.local/bin/pi`).
 /// - [windowsExtraDirs]: diretórios absolutos extras a sondar no Windows
 ///   (ex.: `C:\Program Files\nodejs`), além da PATH e de `%APPDATA%\npm`.
+/// Existe (e dá pra executar) o arquivo em [path]?
+///
+/// **Não** basta `File.exists()` no Windows: os **App Execution Aliases** do
+/// MSIX/Store — como o `pwsh.exe` do PowerShell 7, e também `python.exe`,
+/// `winget.exe` — são reparse points de 0 byte que as APIs de arquivo NÃO
+/// conseguem abrir (`errno 1920`, `ERROR_CANT_ACCESS_FILE`). Para o `File` eles
+/// simplesmente não existem, embora o `CreateProcess` os resolva sem problema e
+/// o `where` os liste. E é justamente por alias que esses comandos entram na
+/// PATH do usuário — a única PATH que um app GUI herda.
+///
+/// O Dart os enxerga como **link**, então o `Link.exists()` fecha o buraco.
+Future<bool> _executablePathExists(String path) async {
+  if (await File(path).exists()) return true;
+  return Link(path).exists();
+}
+
 /// `true` se [exec] dá pra resolver para um caminho real — usado pra mostrar o
 /// status (● encontrado / ○ ausente) de um language server na tela "Language".
 /// Caminho absoluto: testa existência direta. Nome simples: resolve via
@@ -26,10 +42,10 @@ Future<bool> isExecutableAvailable(String exec) async {
   final name = exec.trim();
   if (name.isEmpty) return false;
   if (name.contains('/') || name.contains(r'\')) {
-    return File(name).existsSync();
+    return _executablePathExists(name);
   }
   final resolved = await resolveExecutable(name);
-  return resolved != name && File(resolved).existsSync();
+  return resolved != name && await _executablePathExists(resolved);
 }
 
 Future<String> resolveExecutable(
@@ -117,6 +133,7 @@ Future<String?> _runWhich(String shell, List<String> args) async {
 }
 
 /// `where <name>` no Windows — resolve PATHEXT e devolve o 1º caminho existente.
+/// Aceita App Execution Alias do MSIX (ver [_executablePathExists]).
 Future<String?> _windowsWhere(String name) async {
   try {
     final res = await Process.run('where', [
@@ -125,7 +142,7 @@ Future<String?> _windowsWhere(String name) async {
     if (res.exitCode != 0) return null;
     for (final line in (res.stdout as String? ?? '').split('\n')) {
       final p = line.trim();
-      if (p.isNotEmpty && await File(p).exists()) return p;
+      if (p.isNotEmpty && await _executablePathExists(p)) return p;
     }
   } catch (_) {
     // where indisponível / timeout → cai pros fallbacks.
@@ -146,7 +163,7 @@ Future<String?> _searchWindowsPath(String name) async {
     if (dir.isEmpty) continue;
     for (final ext in pathExt) {
       final candidate = '$dir\\$name$ext';
-      if (await File(candidate).exists()) return candidate;
+      if (await _executablePathExists(candidate)) return candidate;
     }
   }
   return null;
