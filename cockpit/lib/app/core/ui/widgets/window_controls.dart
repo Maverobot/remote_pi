@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cockpit/app/core/ui/themes/themes.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind;
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -47,9 +49,7 @@ class WindowTitleBar extends StatelessWidget {
       child: Stack(
         children: [
           // Fundo arrastável — ATRÁS dos botões (ver doc da classe).
-          const Positioned.fill(
-            child: DragToMoveArea(child: SizedBox.expand()),
-          ),
+          const Positioned.fill(child: _DragToMoveArea()),
           // Camada interativa — botões disparam o onTap sem o hold da arena.
           Positioned.fill(
             child: Padding(
@@ -67,6 +67,110 @@ class WindowTitleBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// Área que arrasta a janela — **inclusive no toque**.
+///
+/// Substitui o `DragToMoveArea` do window_manager, que é mouse-only no Windows:
+/// ele chama `startDragging()`, que faz
+/// `SendMessage(WM_SYSCOMMAND, SC_MOVE | HTCAPTION)` — o loop modal de mover do
+/// Windows, que rastreia o **mouse**. O dedo é entregue como `WM_POINTER` para a
+/// view do Flutter, então o loop nunca recebe movimento e a janela fica parada
+/// (medido: arrastar a barra com o dedo não movia um pixel).
+///
+/// Por isso o caminho é escolhido pelo tipo do ponteiro:
+///
+/// - **mouse/stylus** → `startDragging()` nativo. Mais suave e integra com o
+///   snap/aero do Windows; não dá pra reproduzir isso na mão.
+/// - **toque** → arrasto manual: guarda o offset do dedo dentro da janela no
+///   down e reposiciona a janela a cada move. Mantém o ponto sob o dedo.
+///
+/// O `onPanStart` do gesture detector é restrito a `supportedDevices` **sem**
+/// toque de propósito: se o caminho nativo disparasse junto, o loop modal
+/// entraria e brigaria com o reposicionamento manual.
+class _DragToMoveArea extends StatefulWidget {
+  const _DragToMoveArea();
+
+  @override
+  State<_DragToMoveArea> createState() => _DragToMoveAreaState();
+}
+
+class _DragToMoveAreaState extends State<_DragToMoveArea> {
+  /// Posição do dedo (relativa à janela) no último reposicionamento, e a origem
+  /// da janela naquele instante. Movemos a janela pelo delta entre elas, então o
+  /// ponto tocado não escorrega.
+  Offset? _grab;
+  Offset? _origin;
+
+  /// Um reposicionamento por vez: `setPosition` é chamada de plataforma e os
+  /// moves de toque chegam mais rápido do que ela responde. Sem isso a fila
+  /// cresce e a janela segue andando depois que o dedo já parou.
+  bool _busy = false;
+
+  Future<void> _onDown(PointerDownEvent e) async {
+    if (e.kind != PointerDeviceKind.touch) return;
+    // Maximizada não se arrasta — o Windows também não deixa, e `setPosition`
+    // nela não faria nada de útil.
+    if (await windowManager.isMaximized()) return;
+    if (!mounted) return;
+    _origin = await windowManager.getPosition();
+    _grab = e.position;
+  }
+
+  Future<void> _onMove(PointerMoveEvent e) async {
+    if (e.kind != PointerDeviceKind.touch) return;
+    final grab = _grab;
+    final origin = _origin;
+    if (grab == null || origin == null) return;
+    if (_busy) return; // descarta: o próximo move já traz a posição atual
+    _busy = true;
+    try {
+      // `e.position` é relativo à janela; como a janela se move junto, o delta
+      // contra o último ponto agarrado é o quanto ela deve andar.
+      await windowManager.setPosition(origin + (e.position - grab));
+      if (!mounted) return;
+      _origin = await windowManager.getPosition();
+      _grab = e.position;
+    } finally {
+      _busy = false;
+    }
+  }
+
+  void _onUp(PointerEvent e) {
+    _grab = null;
+    _origin = null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // Duplo-toque continua valendo pra TODOS os dispositivos (inclusive dedo) —
+    // por isso ele fica num detector próprio, fora do `supportedDevices` que
+    // restringe só o arrasto nativo.
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onDoubleTap: _toggleMaximize,
+      child: Listener(
+        behavior: HitTestBehavior.translucent,
+        onPointerDown: (e) => unawaited(_onDown(e)),
+        onPointerMove: (e) => unawaited(_onMove(e)),
+        onPointerUp: _onUp,
+        onPointerCancel: _onUp,
+        child: GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          // SEM toque: o caminho nativo é mouse-only (ver doc da classe) e, se
+          // disparasse no dedo, o loop modal brigaria com o arrasto manual.
+          supportedDevices: const {
+            PointerDeviceKind.mouse,
+            PointerDeviceKind.stylus,
+            PointerDeviceKind.invertedStylus,
+            PointerDeviceKind.trackpad,
+          },
+          onPanStart: (_) => windowManager.startDragging(),
+          child: const SizedBox.expand(),
+        ),
       ),
     );
   }
