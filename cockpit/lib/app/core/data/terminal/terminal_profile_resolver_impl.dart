@@ -14,8 +14,9 @@ typedef RawProcessRunner =
 
 /// Descoberta de perfis por plataforma (plano 50).
 ///
-/// - **Windows**: PowerShell (`powershell.exe`, ou `pwsh.exe` se aquele não
-///   existir), cmd (`%ComSpec%`) e uma entrada por distro do `wsl.exe -l -q`.
+/// - **Windows**: PowerShell 7 (`pwsh.exe`) e Windows PowerShell (
+///   `powershell.exe`) — **cada um é um perfil**, quando instalado —, cmd
+///   (`%ComSpec%`) e uma entrada por distro do `wsl.exe -l -q`.
 /// - **POSIX**: o login shell real do usuário (reusa `resolveLoginShell()` da
 ///   issue #42) com `-l`.
 ///
@@ -101,7 +102,7 @@ class TerminalProfileResolverImpl implements TerminalProfileResolver {
       return profileById(wanted) ??
           (_isWindowsArm
               ? _cmdProfile()
-              : _powershellProfile('powershell.exe'));
+              : _powershellProfile());
     }
     // POSIX: `loginShellOrFallback()` é síncrono e lê o cache do login_shell
     // (aquecido no boot); se ainda não resolveu, degrada pro $SHELL/fallback.
@@ -122,11 +123,19 @@ class TerminalProfileResolverImpl implements TerminalProfileResolver {
   Future<List<TerminalProfile>> _discoverWindows() async {
     final profiles = <TerminalProfile>[];
 
-    // PowerShell clássico; se não houver, o pwsh (PowerShell 7+).
+    // PowerShell 7+ e Windows PowerShell 5.1 são perfis SEPARADOS, não um o
+    // substituto do outro: quem tem os dois instalados quer escolher entre eles.
+    // (Antes o `pwsh` só entrava se o `powershell.exe` faltasse — como este
+    // último sempre existe no Windows, o 7 nunca era oferecido.)
+    //
+    // O 7 vem primeiro por ser o moderno, mas o PADRÃO de quem nunca escolheu
+    // continua o 5.1 (ver `_platformFallback`): trocar o shell de quem já usa
+    // seria surpresa. O 7 fica a um clique no seletor.
+    if (await _existsSafe('pwsh.exe')) {
+      profiles.add(_pwshProfile());
+    }
     if (await _existsSafe('powershell.exe')) {
-      profiles.add(_powershellProfile('powershell.exe'));
-    } else if (await _existsSafe('pwsh.exe')) {
-      profiles.add(_powershellProfile('pwsh.exe'));
+      profiles.add(_powershellProfile());
     }
 
     profiles.add(_cmdProfile());
@@ -214,10 +223,20 @@ class TerminalProfileResolverImpl implements TerminalProfileResolver {
     }
   }
 
-  TerminalProfile _powershellProfile(String exe) => TerminalProfile(
+  /// PowerShell 7+ (`pwsh.exe`), instalado à parte pelo usuário.
+  TerminalProfile _pwshProfile() => const TerminalProfile(
+    id: TerminalProfile.pwshId,
+    label: 'PowerShell 7',
+    executable: 'pwsh.exe',
+  );
+
+  /// Windows PowerShell 5.1 — o que vem no SO. O rótulo diz "Windows" (a mesma
+  /// distinção que o Windows Terminal faz) porque com os dois instalados um
+  /// "PowerShell" solto não diria qual.
+  TerminalProfile _powershellProfile() => const TerminalProfile(
     id: TerminalProfile.powershellId,
-    label: 'PowerShell',
-    executable: exe,
+    label: 'Windows PowerShell',
+    executable: 'powershell.exe',
   );
 
   /// `%ComSpec%` quando presente (o mapa de env do Windows é case-insensitive;

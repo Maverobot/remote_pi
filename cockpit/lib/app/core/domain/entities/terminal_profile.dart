@@ -41,8 +41,13 @@ class TerminalProfile {
   /// [id] do perfil de login shell POSIX (macOS/Linux).
   static const String loginShellId = 'login-shell';
 
-  /// [id] do perfil PowerShell (Windows).
+  /// [id] do perfil Windows PowerShell 5.1 — o `powershell.exe` que vem no SO.
+  /// **Não** renomear: é o que a config de padrão guarda desde a wave 1.
   static const String powershellId = 'powershell';
+
+  /// [id] do perfil PowerShell 7+ (`pwsh.exe`), instalado à parte. Perfil
+  /// próprio, e não substituto do [powershellId]: quem tem os dois quer escolher.
+  static const String pwshId = 'pwsh';
 
   /// [id] do perfil cmd (Windows).
   static const String cmdId = 'cmd';

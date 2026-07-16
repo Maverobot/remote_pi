@@ -93,7 +93,57 @@ void main() {
       expect(ids, [TerminalProfile.powershellId, TerminalProfile.cmdId]);
     });
 
-    test('powershell.exe ausente → cai no pwsh.exe (PowerShell 7+)', () async {
+    // Regressão: o pwsh era um `else if` do powershell.exe, e como este último
+    // sempre existe no Windows, o PowerShell 7 nunca era oferecido — nem no
+    // seletor do `+`, nem nas Configurações.
+    test('os dois PowerShell instalados → DOIS perfis, o 7 primeiro', () async {
+      final runner = _FakeRunner(const {});
+      final resolver = TerminalProfileResolverImpl(
+        operatingSystem: 'windows',
+        isWindowsArm: false,
+        runProcess: runner.call,
+        executableExists: (exe) async =>
+            exe == 'powershell.exe' || exe == 'pwsh.exe',
+      );
+
+      final ids = (await resolver.discover()).map((p) => p.id).toList();
+
+      expect(ids, [
+        TerminalProfile.pwshId,
+        TerminalProfile.powershellId,
+        TerminalProfile.cmdId,
+      ]);
+      expect(resolver.profileById(TerminalProfile.pwshId)!.executable,
+          'pwsh.exe');
+      expect(resolver.profileById(TerminalProfile.powershellId)!.executable,
+          'powershell.exe');
+      // Rótulos precisam desambiguar: "PowerShell" solto não diria qual é qual.
+      expect(resolver.profileById(TerminalProfile.pwshId)!.label,
+          'PowerShell 7');
+      expect(resolver.profileById(TerminalProfile.powershellId)!.label,
+          'Windows PowerShell');
+    });
+
+    test('padrão de quem nunca escolheu segue o 5.1, mesmo com o 7 instalado',
+        () async {
+      final runner = _FakeRunner(const {});
+      final resolver = TerminalProfileResolverImpl(
+        operatingSystem: 'windows',
+        isWindowsArm: false,
+        runProcess: runner.call,
+        executableExists: (exe) async =>
+            exe == 'powershell.exe' || exe == 'pwsh.exe',
+      );
+      await resolver.discover();
+
+      // Listar o 7 primeiro NÃO pode trocar o shell de quem já usa o app.
+      expect(resolver.effectiveDefault(null).id, TerminalProfile.powershellId);
+      // Mas escolher o 7 é respeitado.
+      expect(resolver.effectiveDefault(TerminalProfile.pwshId).id,
+          TerminalProfile.pwshId);
+    });
+
+    test('só o pwsh instalado → perfil do 7, sem inventar o 5.1', () async {
       final runner = _FakeRunner(const {});
       final resolver = TerminalProfileResolverImpl(
         operatingSystem: 'windows',
@@ -102,11 +152,13 @@ void main() {
         executableExists: (exe) async => exe == 'pwsh.exe',
       );
 
-      final ps = resolver.profileById(TerminalProfile.powershellId);
-      await resolver.discover();
-      final ps2 = resolver.profileById(TerminalProfile.powershellId)!;
-      expect(ps, isNull); // antes do discover não há cache
-      expect(ps2.executable, 'pwsh.exe');
+      expect(resolver.profileById(TerminalProfile.pwshId), isNull); // sem cache
+      final ids = (await resolver.discover()).map((p) => p.id).toList();
+
+      expect(ids, [TerminalProfile.pwshId, TerminalProfile.cmdId]);
+      expect(resolver.profileById(TerminalProfile.powershellId), isNull);
+      expect(resolver.profileById(TerminalProfile.pwshId)!.executable,
+          'pwsh.exe');
     });
   });
 
