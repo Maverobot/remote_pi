@@ -1,4 +1,5 @@
 import 'package:cockpit/app/cockpit/domain/entities/file_node.dart';
+import 'package:cockpit/app/cockpit/domain/entities/git_file_status.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/file_tree_panel.dart';
 import 'package:cockpit/app/core/domain/result.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
@@ -71,5 +72,63 @@ void main() {
         expect(tappedFile, '/workspace/file1.txt');
       },
     );
+
+    testWidgets('source control alternates between list and tree views', (
+      tester,
+    ) async {
+      const changedPath = '/workspace/lib/app/main.dart';
+
+      await tester.pumpWidget(
+        ShadcnApp(
+          theme: buildTheme(brightness: Brightness.dark),
+          home: Scaffold(
+            child: FileTreePanel(
+              rootPath: '/workspace',
+              revision: 1,
+              listChildren: (_) async => const [],
+              gitStatusOf: (path) =>
+                  path == changedPath ? GitFileStatus.modified : null,
+              onOpenFile: (_) {},
+              onOpenDiff: (_) {},
+              isGitRepo: true,
+              changedPaths: const [changedPath],
+              onOpenWith: (_) {},
+              onCreateInFolder: (_, _) {},
+              onCreate: (_, _, _) async => const Success(null),
+              onRename: (_, _) async => const Success(null),
+              onDelete: (_) async => const Success(null),
+              onMove: (_, _) async => const Success(null),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const ValueKey('source-control-tab')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('main.dart'), findsOneWidget);
+      expect(find.text('lib/app'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const ValueKey('source-control-view-toggle')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('lib/app'), findsNothing);
+      expect(find.text('lib'), findsOneWidget);
+      expect(find.text('app'), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('source-control-file:$changedPath')),
+        findsOneWidget,
+      );
+
+      await tester.tap(
+        find.byKey(const ValueKey('source-control-view-toggle')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('lib/app'), findsOneWidget);
+    });
   });
 }

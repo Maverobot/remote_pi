@@ -142,6 +142,10 @@ class _FileTreePanelState extends State<FileTreePanel> {
   /// Aba ativa do painel: árvore de arquivos, busca ou source control.
   _RightPaneTab _tab = _RightPaneTab.files;
 
+  /// Source Control começa na lista compacta e pode alternar para a hierarquia
+  /// de pastas sem afetar a árvore principal de arquivos.
+  bool _sourceControlTree = false;
+
   /// Criação inline em andamento (uma de cada vez).
   _PendingCreate? _pending;
 
@@ -404,6 +408,7 @@ class _FileTreePanelState extends State<FileTreePanel> {
                   ),
                 if (widget.isGitRepo)
                   _HeaderIcon(
+                    key: const ValueKey('source-control-tab'),
                     icon: Icons.account_tree_outlined,
                     tooltip: 'Source Control',
                     selected: scMode,
@@ -411,8 +416,22 @@ class _FileTreePanelState extends State<FileTreePanel> {
                         setState(() => _tab = _RightPaneTab.sourceControl),
                   ),
                 const Spacer(),
+                if (scMode)
+                  _HeaderIcon(
+                    key: const ValueKey('source-control-view-toggle'),
+                    icon: _sourceControlTree
+                        ? Icons.view_list_outlined
+                        : Icons.account_tree_outlined,
+                    tooltip: _sourceControlTree
+                        ? 'View as List'
+                        : 'View as Tree',
+                    onTap: () => setState(
+                      () => _sourceControlTree = !_sourceControlTree,
+                    ),
+                  ),
                 // "New file/folder" só no modo Files (o source control é leitura).
-                if (widget.rootPath.isNotEmpty && tab == _RightPaneTab.files) ...[
+                if (widget.rootPath.isNotEmpty &&
+                    tab == _RightPaneTab.files) ...[
                   _HeaderIcon(
                     icon: Icons.note_add_outlined,
                     tooltip: 'New file',
@@ -450,6 +469,7 @@ class _FileTreePanelState extends State<FileTreePanel> {
                     gitStatusOf: widget.gitStatusOf,
                     selectedPath: effectiveSelected,
                     onOpenDiff: widget.onOpenDiff,
+                    viewAsTree: _sourceControlTree,
                     onTapDiff: (path) {
                       _select(path);
                       (widget.onTapDiff ?? widget.onOpenDiff)(path);
@@ -1194,6 +1214,7 @@ class _ChangedTree extends StatelessWidget {
     required this.selectedPath,
     required this.onOpenDiff,
     required this.onTapDiff,
+    required this.viewAsTree,
   });
 
   final String rootPath;
@@ -1202,6 +1223,7 @@ class _ChangedTree extends StatelessWidget {
   final String? selectedPath;
   final ValueChanged<String> onOpenDiff;
   final ValueChanged<String> onTapDiff;
+  final bool viewAsTree;
 
   @override
   Widget build(BuildContext context) {
@@ -1236,6 +1258,23 @@ class _ChangedTree extends StatelessWidget {
       return ap.toLowerCase().compareTo(bp.toLowerCase());
     });
 
+    if (viewAsTree) {
+      final root = _ChangedDirectory('');
+      for (final file in files) {
+        root.add(file);
+      }
+      return SingleChildScrollView(
+        padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+        child: _ChangedDirectoryView(
+          directory: root,
+          gitStatusOf: gitStatusOf,
+          selectedPath: selectedPath,
+          onOpenDiff: onOpenDiff,
+          onTapDiff: onTapDiff,
+        ),
+      );
+    }
+
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
       child: Column(
@@ -1255,14 +1294,147 @@ class _ChangedTree extends StatelessWidget {
   }
 }
 
+/// Nó em memória da visualização hierárquica de mudanças.
+class _ChangedDirectory {
+  _ChangedDirectory(this.name);
+
+  final String name;
+  final Map<String, _ChangedDirectory> directories =
+      <String, _ChangedDirectory>{};
+  final List<_ChangedFile> files = <_ChangedFile>[];
+
+  void add(_ChangedFile file) {
+    var current = this;
+    for (final part in file.dir.split('/').where((part) => part.isNotEmpty)) {
+      current = current.directories.putIfAbsent(
+        part,
+        () => _ChangedDirectory(part),
+      );
+    }
+    current.files.add(file);
+  }
+}
+
+/// Conteúdo de uma pasta da árvore de Source Control. A raiz não desenha linha;
+/// subpastas começam expandidas para a troca de visualização revelar os arquivos.
+class _ChangedDirectoryView extends StatefulWidget {
+  const _ChangedDirectoryView({
+    required this.directory,
+    required this.gitStatusOf,
+    required this.selectedPath,
+    required this.onOpenDiff,
+    required this.onTapDiff,
+    this.depth = 0,
+    this.isRoot = true,
+  });
+
+  final _ChangedDirectory directory;
+  final GitFileStatus? Function(String absolutePath) gitStatusOf;
+  final String? selectedPath;
+  final ValueChanged<String> onOpenDiff;
+  final ValueChanged<String> onTapDiff;
+  final int depth;
+  final bool isRoot;
+
+  @override
+  State<_ChangedDirectoryView> createState() => _ChangedDirectoryViewState();
+}
+
+class _ChangedDirectoryViewState extends State<_ChangedDirectoryView> {
+  bool _expanded = true;
+
+  @override
+  Widget build(BuildContext context) {
+    final directories = widget.directory.directories.values.toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+    final files = widget.directory.files.toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!widget.isRoot)
+          HoverTap(
+            key: ValueKey(
+              'source-control-folder:${widget.depth}:${widget.directory.name}',
+            ),
+            hoverColor: context.colors.panel,
+            borderRadius: BorderRadius.circular(5),
+            onTap: () => setState(() => _expanded = !_expanded),
+            padding: EdgeInsets.only(left: 6 + widget.depth * 14, right: 6),
+            child: SizedBox(
+              height: 26,
+              child: Row(
+                children: [
+                  Icon(
+                    _expanded
+                        ? Icons.keyboard_arrow_down
+                        : Icons.keyboard_arrow_right,
+                    size: 15,
+                    color: context.colors.text3,
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(
+                    _expanded
+                        ? Icons.folder_open_outlined
+                        : Icons.folder_outlined,
+                    size: 16,
+                    color: context.colors.text3,
+                  ),
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(
+                      widget.directory.name,
+                      overflow: TextOverflow.ellipsis,
+                      style: context.typo.body.copyWith(
+                        fontSize: 13,
+                        color: context.colors.text2,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        if (widget.isRoot || _expanded) ...[
+          for (final directory in directories)
+            _ChangedDirectoryView(
+              directory: directory,
+              gitStatusOf: widget.gitStatusOf,
+              selectedPath: widget.selectedPath,
+              onOpenDiff: widget.onOpenDiff,
+              onTapDiff: widget.onTapDiff,
+              depth: widget.isRoot ? 0 : widget.depth + 1,
+              isRoot: false,
+            ),
+          for (final file in files)
+            _ChangedRow(
+              key: ValueKey('source-control-file:${file.absPath}'),
+              file: file,
+              gitStatus: widget.gitStatusOf(file.absPath),
+              selected: file.absPath == widget.selectedPath,
+              depth: widget.isRoot ? 0 : widget.depth + 1,
+              showDirectory: false,
+              onTap: () => widget.onTapDiff(file.absPath),
+              onDoubleTap: () => widget.onOpenDiff(file.absPath),
+            ),
+        ],
+      ],
+    );
+  }
+}
+
 /// Uma linha da lista plana de source control (só leitura, sem menu).
 class _ChangedRow extends StatefulWidget {
   const _ChangedRow({
+    super.key,
     required this.file,
     required this.gitStatus,
     required this.selected,
     required this.onTap,
     required this.onDoubleTap,
+    this.depth = 0,
+    this.showDirectory = true,
   });
 
   final _ChangedFile file;
@@ -1270,6 +1442,8 @@ class _ChangedRow extends StatefulWidget {
   final bool selected;
   final VoidCallback? onTap;
   final VoidCallback? onDoubleTap;
+  final int depth;
+  final bool showDirectory;
 
   @override
   State<_ChangedRow> createState() => _ChangedRowState();
@@ -1306,7 +1480,7 @@ class _ChangedRowState extends State<_ChangedRow> {
       hoverColor: colors.panel,
       borderRadius: BorderRadius.circular(5),
       onTap: _handleTap,
-      padding: const EdgeInsets.only(left: 6, right: 6),
+      padding: EdgeInsets.only(left: 6 + widget.depth * 14, right: 6),
       child: SizedBox(
         height: 26,
         child: Row(
@@ -1321,7 +1495,7 @@ class _ChangedRowState extends State<_ChangedRow> {
                 style: typo.body.copyWith(fontSize: 13, color: nameColor),
               ),
             ),
-            if (file.dir.isNotEmpty) ...[
+            if (widget.showDirectory && file.dir.isNotEmpty) ...[
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
@@ -1360,6 +1534,7 @@ Color? _gitColor(AppColors colors, GitFileStatus? status) {
 
 class _HeaderIcon extends StatelessWidget {
   const _HeaderIcon({
+    super.key,
     required this.icon,
     required this.tooltip,
     required this.onTap,
