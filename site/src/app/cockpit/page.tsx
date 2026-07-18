@@ -244,14 +244,20 @@ export default function CockpitPage() {
           <section id="cli">
             <div className="section-head reveal" style={{ marginTop: 110 }}>
               <span className="eyebrow">CLI</span>
-              <h2>Drive the panes from inside a pane.</h2>
+              <h2>Drive the tabs from inside a tab.</h2>
               <p>
                 Cockpit ships a small <code>cockpit</code> command — a control
                 mode for its terminals. From any shell in the app, an agent (or
-                you) can type into another pane, press keys, open files in the
+                you) can type into another tab, press keys, open files in the
                 viewer, and list what&apos;s open. It&apos;s on the{" "}
                 <code>PATH</code> only inside Cockpit&apos;s own terminals, so it
                 never leaks into your global shell.
+              </p>
+              <p>
+                The unit the CLI addresses is a <strong>tab</strong> — one
+                terminal or agent session. A <strong>pane</strong> is the split
+                leaf that groups several tabs; the CLI doesn&apos;t address
+                panes.
               </p>
             </div>
 
@@ -260,8 +266,9 @@ export default function CockpitPage() {
                 <p>
                   The binary is app-managed under <code>~/.cockpit/bin</code> and
                   added to the <code>PATH</code> of Cockpit&apos;s terminals only.
-                  Commands target the current pane by default (
-                  <code>$COCKPIT_PANE_ID</code>) — pass <code>--tab-id</code> to
+                  Commands target the current tab by default (
+                  <code>$COCKPIT_TAB_ID</code>; <code>$COCKPIT_PANE_ID</code>{" "}
+                  remains as a legacy alias) — pass <code>--tab-id</code> to
                   reach another one.
                 </p>
               </Callout>
@@ -278,7 +285,7 @@ export default function CockpitPage() {
               }}
             >
               <div className="feat-card">
-                <h3>Type across panes</h3>
+                <h3>Type across tabs</h3>
                 <p>
                   <code>send</code> writes literal text into a terminal and{" "}
                   <code>send-key</code> presses named keys — <code>Enter</code>,{" "}
@@ -290,7 +297,7 @@ export default function CockpitPage() {
                 <h3>Open files in the viewer</h3>
                 <p>
                   <code>open &lt;file&gt;</code> (or just <code>cockpit
-                  &lt;file&gt;</code>) resolves the path against the pane&apos;s
+                  &lt;file&gt;</code>) resolves the path against the tab&apos;s
                   working directory and opens it in a viewer tab beside the
                   terminal.
                 </p>
@@ -298,9 +305,10 @@ export default function CockpitPage() {
               <div className="feat-card">
                 <h3>See what&apos;s open</h3>
                 <p>
-                  <code>list-panes</code> and <code>list-workspaces</code> report
-                  the pane and workspace ids you need to target — the same ids{" "}
-                  <code>--tab-id</code> accepts.
+                  <code>list-tabs</code> (alias: <code>list-panes</code>) and{" "}
+                  <code>list-workspaces</code> report the tab and workspace ids
+                  you need to target — the same ids <code>--tab-id</code>{" "}
+                  accepts.
                 </p>
               </div>
             </div>
@@ -309,12 +317,12 @@ export default function CockpitPage() {
               <CodeBlock
                 label="Cockpit terminal"
                 prompt
-                code={`# type a command into this pane and run it
+                code={`# type a command into this tab and run it
 cockpit send "pnpm test"
 cockpit send-key Enter
 
-# steer another pane by id
-cockpit list-panes
+# steer another tab by id
+cockpit list-tabs
 cockpit send --tab-id 2 "git status"
 cockpit send-key --tab-id 2 Enter
 
