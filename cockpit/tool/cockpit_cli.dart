@@ -9,6 +9,10 @@
 //   cockpit send-key  [--tab-id <id>] <Key>...    pressiona tecla(s) nomeada(s)
 //   cockpit open      [--tab-id <id>] <arquivo>   abre o arquivo no viewer
 //   cockpit <arquivo>                             atalho de `open`
+//   cockpit read-pane [<label|tab-id>] [--lines N] [--offset N] [--from-start]
+//                                                 lê o output de um pane
+//   cockpit read-task <task-id> [--lines N] [--offset N] [--from-start]
+//                                                 lê o output de uma task
 //   cockpit list-panes      [--json]              panes ativos
 //   cockpit list-workspaces [--json]              workspaces (projetos) abertos
 //   cockpit install-skill   [--force]             instala a skill do Claude Code
@@ -23,7 +27,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-const String _version = '0.1.0';
+const String _version = '0.2.0';
 
 Future<void> main(List<String> argv) async {
   final args = List<String>.from(argv);
@@ -54,6 +58,10 @@ Future<void> main(List<String> argv) async {
       await _cmdList('list-panes', args);
     case 'list-workspaces':
       await _cmdList('list-workspaces', args);
+    case 'read-pane':
+      await _cmdRead('read-pane', args);
+    case 'read-task':
+      await _cmdRead('read-task', args);
     case 'install-skill':
       await _cmdInstallSkill(args);
     default:
@@ -193,6 +201,53 @@ Future<void> _writeToPane(String? tabIdFlag, String text) async {
   exit(0);
 }
 
+/// `read-pane [<label|tab-id>]` / `read-task <task-id>` — lê uma janela do
+/// output do alvo. `--lines N` (default 100), `--offset N` (pula N a partir da
+/// âncora), `--from-start` (âncora no começo; default = tail). A saída é sempre
+/// cronológica (de cima pra baixo) — as flags só escolhem a janela. Payload
+/// volta base64 numa linha (framing do socket é uma-linha-por-conexão).
+Future<void> _cmdRead(String cmd, List<String> args) async {
+  final parsed = _Flags.parse(args);
+  final target = parsed.positionals.isNotEmpty ? parsed.positionals.first : '';
+  if (cmd == 'read-task' && target.isEmpty) {
+    stderr.writeln('cockpit read-task: missing task id');
+    exit(2);
+  }
+  final req = <String, dynamic>{
+    'cmd': cmd,
+    'args': <String, dynamic>{
+      if (target.isNotEmpty) 'target': target,
+      if (parsed.lines != null) 'lines': parsed.lines,
+      if (parsed.offset != null) 'offset': parsed.offset,
+      if (parsed.fromStart) 'fromStart': true,
+    },
+  };
+  // Sem alvo posicional, o server cai no próprio pane (COCKPIT_PANE_ID).
+  final tabId = parsed.tabId ?? Platform.environment['COCKPIT_PANE_ID'];
+  if (tabId != null && tabId.isNotEmpty) req['tabId'] = tabId;
+  final resp = await _request(req);
+  if (resp['ok'] != true) {
+    stderr.writeln('cockpit: ${resp['error'] ?? 'failed'}');
+    exit(1);
+  }
+  final data = (resp['data'] as Map?) ?? const {};
+  String text;
+  try {
+    text = utf8.decode(base64.decode((data['text'] ?? '').toString()));
+  } catch (_) {
+    stderr.writeln('cockpit: malformed payload');
+    exit(1);
+  }
+  if (text.isNotEmpty) stdout.writeln(text);
+  if (data['truncated'] == true) {
+    stderr.writeln(
+      'cockpit: output truncated (server cap 2000 lines/read — page with '
+      '--offset)',
+    );
+  }
+  exit(0);
+}
+
 // ---- transporte (socket) ----------------------------------------------------
 
 Future<Map<String, dynamic>> _request(Map<String, dynamic> req) async {
@@ -307,20 +362,61 @@ String? _resolveKey(String name) {
 // ---- flags ------------------------------------------------------------------
 
 class _Flags {
-  _Flags(this.positionals, this.tabId, this.json, this.force);
+  _Flags(
+    this.positionals,
+    this.tabId,
+    this.json,
+    this.force,
+    this.lines,
+    this.offset,
+    this.fromStart,
+  );
   final List<String> positionals;
   final String? tabId;
   final bool json;
   final bool force;
+  final int? lines;
+  final int? offset;
+  final bool fromStart;
+
+  static int _intValue(String flag, String raw) {
+    final v = int.tryParse(raw);
+    if (v == null || v < 0) {
+      stderr.writeln('cockpit: $flag requires a non-negative integer');
+      exit(2);
+    }
+    return v;
+  }
 
   static _Flags parse(List<String> args) {
     final positionals = <String>[];
     String? tabId;
     var json = false;
     var force = false;
+    int? lines;
+    int? offset;
+    var fromStart = false;
     for (var i = 0; i < args.length; i++) {
       final a = args[i];
-      if (a == '--tab-id' || a == '-t') {
+      if (a == '--lines' || a == '-n') {
+        if (i + 1 >= args.length) {
+          stderr.writeln('cockpit: --lines requires a value');
+          exit(2);
+        }
+        lines = _intValue('--lines', args[++i]);
+      } else if (a.startsWith('--lines=')) {
+        lines = _intValue('--lines', a.substring('--lines='.length));
+      } else if (a == '--offset') {
+        if (i + 1 >= args.length) {
+          stderr.writeln('cockpit: --offset requires a value');
+          exit(2);
+        }
+        offset = _intValue('--offset', args[++i]);
+      } else if (a.startsWith('--offset=')) {
+        offset = _intValue('--offset', a.substring('--offset='.length));
+      } else if (a == '--from-start') {
+        fromStart = true;
+      } else if (a == '--tab-id' || a == '-t') {
         if (i + 1 >= args.length) {
           stderr.writeln('cockpit: --tab-id requires a value');
           exit(2);
@@ -339,7 +435,7 @@ class _Flags {
         positionals.add(a);
       }
     }
-    return _Flags(positionals, tabId, json, force);
+    return _Flags(positionals, tabId, json, force, lines, offset, fromStart);
   }
 }
 
@@ -379,10 +475,20 @@ USAGE:
   cockpit send-key  [--tab-id <id>] <Key>...   press named key(s)
   cockpit open      [--tab-id <id>] <file>     open the file in the app's viewer
   cockpit <file>                               shortcut for `open` (e.g. cockpit .zprofile)
+  cockpit read-pane [<label|tab-id>]           read a pane's rendered output
+  cockpit read-task <task-id>                  read a task's output (even w/o tab)
   cockpit list-panes      [--json]             list active panes
   cockpit list-workspaces [--json]             list workspaces (projects)
   cockpit install-skill   [--force]            install the Claude Code skill
   cockpit --help | --version
+
+READ (read-pane / read-task):
+  --lines N     how many lines (default 100, server cap 2000)
+  --offset N    skip N lines from the anchor (pagination)
+  --from-start  anchor at the start of the buffer (default: tail/end)
+  Output is always chronological (top→bottom); flags only pick the window.
+  read-pane without a target reads the CURRENT pane; a target may be a stable
+  pane label or a tab-id.
 
 TARGET:
   --tab-id <id>   target pane. Default = $COCKPIT_PANE_ID (the current pane).
@@ -398,7 +504,10 @@ EXAMPLES:
   cockpit send-key C-c
   cockpit send --tab-id t3 "ls" ; cockpit send-key --tab-id t3 Enter
   cockpit .zprofile          # opens the file in the viewer (relative to pane cwd)
-  cockpit open ~/.gitconfig''',
+  cockpit open ~/.gitconfig
+  cockpit read-pane Extension --lines 50       # last 50 lines of pane "Extension"
+  cockpit read-pane t4 --lines 200 --from-start
+  cockpit read-task test --lines 80            # tail of task "test" output''',
   );
 }
 
@@ -411,7 +520,7 @@ String _pad(String? s, int n) {
 
 const String _skillMarkdown = r'''---
 name: cockpit-cli
-description: Drive Cockpit's multiplexed terminals from inside a pane. Use when you (an agent running in a Cockpit terminal) need to type text or press keys into your own or another pane, or to list the open panes/workspaces. Triggers on tmux-like control needs: send-keys, run a command in another tab, discover pane ids.
+description: Drive Cockpit's multiplexed terminals from inside a pane. Use when you (an agent running in a Cockpit terminal) need to type text or press keys into your own or another pane, read another pane's or a task's output, or list the open panes/workspaces. Triggers on tmux-like control needs: send-keys, run a command in another tab, read a tab's scrollback, inspect a task run's output, discover pane ids.
 ---
 
 # cockpit — Cockpit's internal CLI
@@ -431,6 +540,19 @@ Cockpit tabs (it is not on the global PATH).
   (tab next to the terminal). `cockpit <file>` is the shortcut. The path is
   resolved against the pane cwd (relative, `~` and absolute all work). Any type
   opens as text — including extensionless ones (`.zprofile`, `Makefile`).
+- `cockpit read-pane [<label|tab-id>] [--lines N] [--offset N] [--from-start]`
+  — read a pane's **rendered output** as plain text (no ANSI escapes; covers
+  TUIs on the alt-screen too). Without a target it reads your **own** pane; a
+  target may be a stable pane `label` or a tab-id. Default window: the **last
+  100 lines** (tail). `--lines N` sets the window size (server cap 2000);
+  `--from-start` anchors at the beginning of the buffer instead of the end;
+  `--offset N` skips N lines from the chosen anchor (pagination: read the last
+  100, then `--lines 100 --offset 100` for the 100 before those). Output is
+  always chronological (top→bottom) — the flags only pick the window.
+- `cockpit read-task <task-id> [--lines N] [--offset N] [--from-start]` — same
+  windowed read, but for a **task run's** output (the Task Run feature). Works
+  even if no task-output tab is open. The task id is the task's `key`/id (e.g.
+  from `.cockpit/tasks.json` or the task list in the UI).
 - `cockpit list-panes [--json]` — active panes: `id`, `kind`, `title`
   (dynamic), `label` (manual stable name, or null), `workspaceId`, `working`.
   Resolve a pane by its stable `label`, not the dynamic `title`.
@@ -468,9 +590,30 @@ Interrupt a stuck process in another pane:
 cockpit send-key --tab-id t4 C-c
 ```
 
+Read what another pane printed (e.g. check on a worker, debug a failure):
+
+```sh
+cockpit read-pane t4 --lines 50            # last 50 lines of t4
+cockpit read-pane Extension                # by stable label (last 100 lines)
+cockpit read-pane t4 --lines 100 --offset 100   # the 100 lines before those
+cockpit read-task test --lines 80          # tail of task "test" output
+```
+
+Typical loop — dispatch work to a pane, wait, then read the result:
+
+```sh
+cockpit send --tab-id t4 "npm test" && cockpit send-key --tab-id t4 Enter
+# poll `cockpit list-panes --json` until t4 shows "working": false, then:
+cockpit read-pane t4 --lines 60
+```
+
 ## Common errors
 
 - "COCKPIT_STATUS_SOCK is unset" → you are not inside a Cockpit terminal.
 - "pane ... does not exist" → stale id (app reboot). Run `list-panes` again.
 - "pane ... is not a terminal" → the target is an agent/file tab, not a shell.
+- "has no readable output" → read-pane target is an agent/file tab; only
+  terminal and task-output panes are readable.
+- "no output recorded for task ..." → the task never ran this app boot (or the
+  id is wrong).
 ''';

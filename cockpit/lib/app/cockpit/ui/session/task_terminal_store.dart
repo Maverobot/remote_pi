@@ -46,6 +46,10 @@ class TaskTerminalStore {
   /// Terminal da task (cria um vazio na primeira vez — read-only na UI). O
   /// `onResize` é ligado ao pty pra o output refluir ao tamanho do viewer; na
   /// primeira criação, semeia de forma assíncrona o output salvo em disco.
+  /// Terminal já existente da task, sem criar um vazio (leitura via CLI
+  /// `cockpit read-task` — criar aqui registraria um buffer fantasma).
+  Terminal? existingTerminal(String taskId) => _terminals[taskId];
+
   Terminal terminalFor(String taskId) => _terminals.putIfAbsent(taskId, () {
     final term = Terminal(maxLines: 10000);
     term.onResize = (w, h, pw, ph) => _runner.resize(taskId, h, w);

@@ -46,6 +46,7 @@ import 'package:cockpit/app/core/data/lsp/lsp_server_pool.dart';
 import 'package:cockpit/app/core/data/lsp/lsp_text_edit.dart';
 import 'package:cockpit/app/core/domain/entities/lsp_diagnostic.dart';
 import 'package:cockpit/app/core/domain/result.dart';
+import 'package:cockpit/app/cockpit/ui/session/terminal_read_window.dart';
 import 'package:cockpit/app/core/utils/user_home.dart';
 import 'package:cockpit/app/cockpit/ui/session/agent_session.dart';
 import 'package:cockpit/app/cockpit/ui/session/diff_viewer_session.dart';
@@ -259,7 +260,8 @@ class CockpitViewModel extends ChangeNotifier {
       _terminalProfiles.effectiveDefault(_defaultTerminalProfileId);
 
   /// Perfis descobertos, para o seletor ao lado do `+`. Já aquecidos no boot.
-  List<TerminalProfile> get terminalProfiles => _terminalProfiles.cachedProfiles;
+  List<TerminalProfile> get terminalProfiles =>
+      _terminalProfiles.cachedProfiles;
 
   /// O seletor de terminal deve aparecer? **Só no Windows** — é lá que existe
   /// escolha real (PowerShell/cmd/WSL). No POSIX o perfil é o login shell do
@@ -2206,8 +2208,13 @@ class CockpitViewModel extends ChangeNotifier {
       subRelative.isEmpty ? project.name : _basename(subRelative),
     );
     return terminal
-        ? _buildTerminal(_nid('t'), project.id, cwd, title: title,
-            profile: profile)
+        ? _buildTerminal(
+            _nid('t'),
+            project.id,
+            cwd,
+            title: title,
+            profile: profile,
+          )
         : _buildAgent(_nid('a'), project, cwd, title: title);
   }
 
@@ -2463,9 +2470,85 @@ class CockpitViewModel extends ChangeNotifier {
             .toList();
         return CockpitCommandResult.ok(ws);
 
+      // `cockpit read-pane [<label|tab-id>]` — devolve uma janela de linhas do
+      // buffer renderizado do pane (texto plano, sem ANSI — é o que o xterm já
+      // pintou). Args: `lines` (default 100), `offset` (pula N a partir da
+      // âncora), `fromStart` (âncora no começo; default = fim/tail). A ordem
+      // das linhas é sempre cronológica — as flags só escolhem a janela.
+      case 'read-pane':
+        final target = (c.args['target'] ?? '').toString();
+        final PaneItem? s;
+        if (target.isNotEmpty) {
+          final resolved = _resolvePaneTarget(target);
+          if (resolved case Failure(:final error)) {
+            return CockpitCommandResult.fail(error);
+          }
+          s = (resolved as Success<PaneItem, String>).value;
+        } else {
+          final id = c.tabId;
+          if (id == null || id.isEmpty) {
+            return const CockpitCommandResult.fail(
+              'missing target (pass <label|tab-id> or run inside a Cockpit '
+              'terminal)',
+            );
+          }
+          s = _sessions[id];
+          if (s == null) {
+            return CockpitCommandResult.fail('pane "$id" does not exist');
+          }
+        }
+        final term = switch (s) {
+          TerminalSession t => t.terminal,
+          TaskOutputSession t => t.terminal,
+          _ => null,
+        };
+        if (term == null) {
+          return CockpitCommandResult.fail(
+            'pane "${s.id}" (${_paneKind(s)}) has no readable output',
+          );
+        }
+        return CockpitCommandResult.ok(readTerminalWindow(term, c.args));
+
+      // `cockpit read-task <task-id>` — mesma leitura, mas do terminal da task
+      // no `TaskTerminalStore` (funciona mesmo sem aba `task_output` aberta).
+      case 'read-task':
+        final taskId = (c.args['target'] ?? '').toString();
+        if (taskId.isEmpty) {
+          return const CockpitCommandResult.fail('missing task id');
+        }
+        final term = _taskTerminals.existingTerminal(taskId);
+        if (term == null) {
+          return CockpitCommandResult.fail(
+            'no output recorded for task "$taskId" (never ran this boot?)',
+          );
+        }
+        return CockpitCommandResult.ok(readTerminalWindow(term, c.args));
+
       default:
         return CockpitCommandResult.fail('unknown command: "${c.cmd}"');
     }
+  }
+
+  /// Resolve o alvo de um `read-pane`: primeiro por id exato (`t3`), depois
+  /// por `manualLabel` (case-insensitive). Label ambíguo = erro — nunca chuta
+  /// pane (mesma regra do dispatch de orquestração).
+  Result<PaneItem, String> _resolvePaneTarget(String target) {
+    final byId = _sessions[target];
+    if (byId != null) return Success(byId);
+    final lower = target.toLowerCase();
+    final byLabel = _sessions.values
+        .where((s) => s.manualLabel?.toLowerCase() == lower)
+        .toList();
+    if (byLabel.length == 1) return Success(byLabel.first);
+    if (byLabel.length > 1) {
+      return Failure(
+        'label "$target" is ambiguous (${byLabel.length} panes) — '
+        'use a tab-id from `cockpit list-panes`',
+      );
+    }
+    return Failure(
+      'no pane with id or label "$target" (see `cockpit list-panes`)',
+    );
   }
 
   /// Id da folha (coluna de splits) que contém a aba [tabId] no projeto
@@ -3038,8 +3121,9 @@ class CockpitViewModel extends ChangeNotifier {
     final rootsChanged = !listEquals(oldRoots, roots);
     if (rootsChanged) {
       // Roots que sumiram (repo removido / .git criado na mãe) → limpa estado.
-      for (final gone
-          in (oldRoots ?? const <String>[]).where((r) => !roots.contains(r))) {
+      for (final gone in (oldRoots ?? const <String>[]).where(
+        (r) => !roots.contains(r),
+      )) {
         _gitInfo.remove(gone);
         _gitTree.remove(gone);
       }
