@@ -50,6 +50,7 @@ class FileTreePanel extends StatefulWidget {
     required this.onOpenFile,
     this.onTapFile,
     this.onSelectFile,
+    this.onClearSelection,
     required this.onOpenDiff,
     this.onTapDiff,
     required this.isGitRepo,
@@ -130,6 +131,9 @@ class FileTreePanel extends StatefulWidget {
   /// Clique único → seleciona o arquivo no tree (highlight).
   final ValueChanged<String>? onSelectFile;
 
+  /// Clique numa área vazia da árvore → limpa a seleção/highlight.
+  final VoidCallback? onClearSelection;
+
   /// Duplo-clique (modo source control) / "Show git diff" → abre o diff no pane.
   final ValueChanged<String> onOpenDiff;
 
@@ -188,6 +192,11 @@ class _PendingCreate {
 class _FileTreePanelState extends State<FileTreePanel> {
   int _localRefresh = 0;
   String? _selectedPath;
+
+  /// `true` quando o item selecionado é uma **pasta** (senão é arquivo). Guia o
+  /// alvo do New file/New folder do header: pasta selecionada → cria dentro dela;
+  /// arquivo → cria na pasta-mãe; nada selecionado → cria na raiz.
+  bool _selectedIsFolder = false;
 
   /// Aba ativa do painel: árvore de arquivos, busca ou source control.
   _RightPaneTab _tab = _RightPaneTab.files;
@@ -319,9 +328,55 @@ class _FileTreePanelState extends State<FileTreePanel> {
   bool _isUnder(String path, String root) =>
       path == root || path.startsWith('$root/');
 
-  void _select(String path) {
-    setState(() => _selectedPath = path);
+  void _select(String path, [bool isFolder = false]) {
+    setState(() {
+      _selectedPath = path;
+      _selectedIsFolder = isFolder;
+    });
+    // Pasta não passa pelo `onSelectFile` (que seta o highlight da VM); sem
+    // limpar, o `effectiveSelected` ficaria preso no último arquivo aberto e a
+    // pasta não acenderia. Limpar deixa o `_selectedPath` (a pasta) virar o
+    // highlight efetivo.
+    if (isFolder) widget.onClearSelection?.call();
     _treeFocus.requestFocus();
+  }
+
+  /// Limpa a seleção — chamado ao clicar numa área vazia da árvore. Zera o alvo
+  /// local (→ New file/folder volta a mirar a raiz) e o highlight da VM.
+  void _deselect() {
+    if (_selectedPath == null && widget.selectedPath == null) return;
+    setState(() {
+      _selectedPath = null;
+      _selectedIsFolder = false;
+    });
+    widget.onClearSelection?.call();
+  }
+
+  /// Pasta-alvo dos botões New file/New folder do **header**: a pasta
+  /// selecionada, a pasta-mãe do arquivo selecionado, ou a raiz quando nada está
+  /// selecionado. `null` = sem alvo válido (multi-root sem seleção → ambíguo, o
+  /// botão nem aparece; a criação por-root vive no [_RootHeader]).
+  String? _headerCreateTarget() {
+    final sel = _selectedPath;
+    final rootFallback = widget.roots.length <= 1 ? widget.rootPath : null;
+    if (sel == null || sel.isEmpty) return rootFallback;
+    if (_selectedIsFolder) return sel;
+    final i = sel.lastIndexOf('/');
+    return i > 0 ? sel.substring(0, i) : rootFallback;
+  }
+
+  /// Dispara o New file/folder do header no alvo resolvido, expandindo a root
+  /// que o contém (multi-root) pra o `_DirView`-raiz montar e revelar o input.
+  void _headerCreate(bool isFolder) {
+    final target = _headerCreateTarget();
+    if (target == null || target.isEmpty) return;
+    for (final r in widget.roots) {
+      if (target == r.path || target.startsWith('${r.path}/')) {
+        _expandRoot(r.path);
+        break;
+      }
+    }
+    _startCreate(target, isFolder);
   }
 
   // ---- criação inline -------------------------------------------------------
@@ -567,22 +622,21 @@ class _FileTreePanelState extends State<FileTreePanel> {
                     ),
                   ),
                 // "New file/folder" só no modo Files (o source control é
-                // leitura). Em **multi-root** (2+ roots) o alvo seria ambíguo
-                // ("em qual repo?") e o container não tem `_DirView` pro input
-                // inline renderizar — então some daqui e vai pra cada
-                // `_RootHeader` (mira `root.path`, que tem árvore).
-                if (widget.rootPath.isNotEmpty &&
-                    widget.roots.length <= 1 &&
-                    tab == _RightPaneTab.files) ...[
+                // leitura). O alvo é [_headerCreateTarget]: pasta/arquivo
+                // selecionado, senão a raiz (single-root). Em **multi-root** sem
+                // seleção o alvo é ambíguo ("em qual repo?") → `null` e o botão
+                // some daqui (a criação por-root vive em cada `_RootHeader`).
+                if (tab == _RightPaneTab.files &&
+                    (_headerCreateTarget()?.isNotEmpty ?? false)) ...[
                   _HeaderIcon(
                     icon: Icons.note_add_outlined,
                     tooltip: 'New file',
-                    onTap: () => _startCreate(widget.rootPath, false),
+                    onTap: () => _headerCreate(false),
                   ),
                   _HeaderIcon(
                     icon: Icons.create_new_folder_outlined,
                     tooltip: 'New folder',
-                    onTap: () => _startCreate(widget.rootPath, true),
+                    onTap: () => _headerCreate(true),
                   ),
                 ],
                 _HeaderIcon(
@@ -628,12 +682,17 @@ class _FileTreePanelState extends State<FileTreePanel> {
                       onWillAcceptWithDetails: (d) => d.data != widget.rootPath,
                       onAcceptWithDetails: (d) =>
                           _requestMove(d.data, widget.rootPath),
-                      builder: (context, candidates, _) =>
-                          SingleChildScrollView(
-                            padding: const EdgeInsets.symmetric(
-                              vertical: 8,
-                              horizontal: 6,
-                            ),
+                      // Tap na área vazia da árvore → deseleciona (o New file/
+                      // folder volta a mirar a raiz). As linhas têm onTap próprio
+                      // (descendentes), então o tap nelas não chega aqui.
+                      builder: (context, candidates, _) => GestureDetector(
+                        behavior: HitTestBehavior.translucent,
+                        onTap: _deselect,
+                        child: SingleChildScrollView(
+                          padding: const EdgeInsets.symmetric(
+                            vertical: 8,
+                            horizontal: 6,
+                          ),
                             child: widget.roots.length > 1
                                 // Multi-root: uma seção colapsável por root,
                                 // cada uma com sua própria _DirView (paths
@@ -692,6 +751,7 @@ class _FileTreePanelState extends State<FileTreePanel> {
                                     edit: edit,
                                   ),
                           ),
+                        ),
                     ),
                   ),
           ),
@@ -852,7 +912,7 @@ class _TreeEdit {
   final String? renaming;
   final String? selectedPath;
 
-  final ValueChanged<String> onSelect;
+  final void Function(String path, bool isFolder) onSelect;
   final ValueChanged<String> onOpenFile;
   final ValueChanged<String>? onTapFile;
   final ValueChanged<String>? onSelectFile;
@@ -973,7 +1033,7 @@ class _DirViewState extends State<_DirView> {
                 renaming: edit.renaming == node.path,
                 gitStatus: edit.gitStatusOf(node.path),
                 onTap: () {
-                  edit.onSelect(node.path);
+                  edit.onSelect(node.path, false);
                   edit.onSelectFile?.call(node.path);
                   edit.onTapFile?.call(node.path);
                 },
@@ -1058,7 +1118,7 @@ class _FolderState extends State<_Folder> {
           onCancelRename: edit.onCancelRename,
           onDelete: () => edit.onRequestDelete(widget.node.path),
           onTap: () {
-            edit.onSelect(widget.node.path);
+            edit.onSelect(widget.node.path, true);
             setState(() => _expanded = !_expanded);
           },
         ),

@@ -751,6 +751,14 @@ class CockpitViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// Limpa a seleção do FileTreePanel (clicar em área vazia da árvore) — some
+  /// o highlight e o New file/folder do header volta a mirar a raiz.
+  void clearFileSelection() {
+    if (_selectedFileInTree == null) return;
+    _selectedFileInTree = null;
+    notifyListeners();
+  }
+
   // ---- busca (find-in-files + abrir resultado) ------------------------------
 
   /// Busca por **conteúdo** na pasta do projeto selecionado (painel Cmd+Shift+F).

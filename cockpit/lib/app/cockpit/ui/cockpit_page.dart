@@ -878,6 +878,7 @@ class _CockpitPageState extends State<CockpitPage> {
                             onTapFile: vm.openFile, // clique único = preview
                             onSelectFile:
                                 vm.selectFileInTree, // atualiza highlight
+                            onClearSelection: vm.clearFileSelection,
                             onOpenDiff: (path) =>
                                 vm.openDiff(path, isPreview: false),
                             onTapDiff: vm.openDiff, // clique único = preview
