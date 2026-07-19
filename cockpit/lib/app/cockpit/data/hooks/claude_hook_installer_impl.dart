@@ -23,8 +23,10 @@ class ClaudeHookInstallerImpl implements ClaudeHookInstaller {
   static const String _markerValue = 'v1';
 
   /// Eventos de ciclo de vida que instrumentamos. working: UserPromptSubmit/
-  /// PreToolUse/PostToolUse; waiting/idle: Notification; idle: Stop/SessionStart/
-  /// SessionEnd. (Mapeamento real mora no `cockpit-hook`.)
+  /// PreToolUse/PostToolUse (exceto PreToolUse de ferramenta interativa —
+  /// AskUserQuestion/ExitPlanMode — que vira waiting); waiting/idle:
+  /// Notification; idle: Stop/SessionStart/SessionEnd. (Mapeamento real mora
+  /// no `cockpit-hook`.)
   static const List<String> _events = <String>[
     'UserPromptSubmit',
     'PreToolUse',
