@@ -1,14 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io'
-    show
-        Directory,
-        File,
-        FileSystemEntity,
-        FileSystemEntityType,
-        FileSystemEvent,
-        FileSystemException,
-        Platform;
+import 'dart:io' show File, FileSystemException, Platform;
 import 'dart:math' show max;
 
 import 'package:cockpit/app/core/data/setup/remote_pi_resolver.dart';
@@ -28,7 +20,6 @@ import 'package:cockpit/app/cockpit/domain/contracts/file_system_reader.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/folder_lister.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/git_command_runner.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/git_diff_reader.dart';
-import 'package:cockpit/app/cockpit/domain/contracts/git_status_reader.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/notifier.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/project_repository.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/rpc_gateway_factory.dart';
@@ -71,6 +62,7 @@ import 'package:cockpit/app/cockpit/ui/session/task_terminal_store.dart';
 import 'package:cockpit/app/cockpit/domain/contracts/terminal_scrollback_store.dart';
 import 'package:cockpit/app/cockpit/ui/session/terminal_session.dart';
 import 'package:cockpit/app/cockpit/ui/states/pane_node.dart';
+import 'package:cockpit/app/cockpit/ui/viewmodels/git_controller.dart';
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -96,7 +88,7 @@ class CockpitViewModel extends ChangeNotifier {
     this._terminalProfiles,
     this._fileReader,
     this._layoutStore,
-    this._gitReader,
+    this.git,
     this._fileSearcher,
     this._launcher,
     this._worktreeMgr,
@@ -112,7 +104,28 @@ class CockpitViewModel extends ChangeNotifier {
     this._taskDiscovery,
     this._taskRunner,
     this._dbService,
-  );
+  ) {
+    // Contexto do shell que o GitController precisa (page-scoped, mesma vida).
+    git
+      ..resolvePath = ((id) => _projectById(id)?.path)
+      ..isSystemTerminal = isSystemTerminal
+      ..selectedProjectId = (() => _selectedProjectId)
+      ..pollTargets = _gitPollTargets
+      ..onStructuralFsChange = _bumpFileTree;
+    git.addListener(notifyListeners);
+  }
+
+  /// Alvos do poll de git: a família visível na rail (raiz do projeto
+  /// selecionado + seus forks); vazio quando nada/Cockpit selecionado.
+  List<String> _gitPollTargets() {
+    final selected = _selectedProjectId;
+    if (selected == null || isSystemTerminal(selected)) return const [];
+    final rootId = _rootOf(selected);
+    return [
+      rootId,
+      for (final fork in _worktrees[rootId] ?? const <Project>[]) fork.id,
+    ];
+  }
 
   final ProjectRepository _projects;
   final RealmRepository _realmRepo;
@@ -134,7 +147,10 @@ class CockpitViewModel extends ChangeNotifier {
   final TerminalProfileResolver _terminalProfiles;
   final FileReader _fileReader;
   final WorkspaceLayoutStore _layoutStore;
-  final GitStatusReader _gitReader;
+
+  /// Estado git extraído (info/roots/watcher/poll/comandos). O VM delega as
+  /// leituras pra manter a API pública da UI e re-emite os notify dele.
+  final GitController git;
   final FileSearcher _fileSearcher;
   final AppLauncherGateway _launcher;
   final WorktreeManager _worktreeMgr;
@@ -187,52 +203,6 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// `true` enquanto reconstruímos um projeto — evita gravar layout meio-feito.
   bool _restoring = false;
-
-  /// Estado git por **root path** (branch + sujos). Para workspace single-root
-  /// a chave coincide com o `Project.id` (id == path), então o comportamento é
-  /// o histórico. Num multi-root há uma entrada por root; a pasta-mãe não tem
-  /// entrada própria. `null` = a root não é repo git.
-  final Map<String, GitInfo?> _gitInfo = <String, GitInfo?>{};
-
-  /// Status git por **caminho relativo à root** (arquivos + pastas agregadas),
-  /// por root path. Derivado de [_gitInfo]; alimenta a coloração da árvore de
-  /// arquivos. Pasta agrega o estado mais forte dos descendentes ([
-  /// GitFileStatus.strongest]).
-  final Map<String, Map<String, GitFileStatus>> _gitTree =
-      <String, Map<String, GitFileStatus>>{};
-
-  /// Roots git derivadas por projeto (**runtime, nunca persistido** — a
-  /// existência mora no filesystem, mesmo espírito das worktrees/plano 42).
-  /// Regra implícita: raiz com `.git` → `[path]` (single-root, caso histórico);
-  /// raiz sem `.git` → filhas imediatas com `.git` (multi-root/multirepo);
-  /// nenhuma → `[path]` (pasta comum). Reavaliado a cada [_refreshGit].
-  final Map<String, List<String>> _rootsByProject = <String, List<String>>{};
-
-  /// Watcher do working tree do projeto **selecionado** (filesystem ao vivo).
-  /// Recriado ao trocar de projeto; debounce junta rajadas de eventos.
-  StreamSubscription<FileSystemEvent>? _gitWatch;
-  Timer? _gitWatchDebounce;
-  String? _gitWatchPath;
-
-  /// Debounce próprio da árvore de arquivos: eventos **estruturais**
-  /// (create/delete/move) fora do `.git/` bumpam o [fileTreeRevision] pra
-  /// árvore reler as pastas abertas — cobre arquivos criados/removidos por
-  /// fora (Finder, agente, scripts) sem exigir Refresh manual. Separado do
-  /// [_gitWatchDebounce] pra um modify (que não muda a árvore) não segurar
-  /// o bump nem vice-versa.
-  Timer? _fileTreeWatchDebounce;
-
-  /// Poll de segurança do git. O `_gitWatch` só cobre o projeto **selecionado**
-  /// e o `Directory.watch(recursive:)` do macOS coalesce/perde eventos (e forks
-  /// de worktree, cujo `index`/`HEAD` moram fora do working tree, nem sempre
-  /// disparam evento). Sem isso a rail fica desatualizada até o usuário trocar
-  /// de workspace e voltar. Relê o git de **todos** os projetos abertos (raízes
-  /// + forks) periodicamente; `_refreshGit` só notifica quando algo mudou, então
-  /// o custo em UI é nulo em repos parados. Poll restrito à **família visível**
-  /// do projeto selecionado (a raiz + seus forks) — o resto da rail atualiza ao
-  /// selecionar / no fim de turno do agente.
-  Timer? _gitPoll;
-  static const Duration _gitPollInterval = Duration(seconds: 3);
 
   /// Worktrees (forks) por workspace raiz, na ordem do `git worktree list`
   /// (decisão 20). Reconciliado contra o git nos ganchos de refresh; a
@@ -419,44 +389,24 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Roots git do projeto. Sempre não-vazio: single-root = `[path]`
   /// (comportamento histórico, N=1); multi-root = as filhas-repo derivadas.
-  List<String> rootsOf(String projectId) {
-    final derived = _rootsByProject[projectId];
-    if (derived != null && derived.isNotEmpty) return derived;
-    final p = _projectById(projectId)?.path;
-    return p == null || p.isEmpty ? const [] : [p];
-  }
+  List<String> rootsOf(String projectId) => git.rootsOf(projectId);
 
   /// `true` quando o workspace é multi-root (pasta-mãe sem `.git` com 2+
   /// repos filhos). Toda a UI multi-root é gateada por isto — N=1 nunca muda.
   bool isMultiRoot(String projectId) => rootsOf(projectId).length > 1;
 
   /// Estado git de uma **root** específica ([rootPath] absoluto).
-  GitInfo? gitInfoForRoot(String rootPath) => _gitInfo[rootPath];
+  GitInfo? gitInfoForRoot(String rootPath) => git.infoForRoot(rootPath);
 
   /// Estado git do projeto (branch + sujos), ou `null` se não for repo git.
   /// Em multi-root não existe "o" GitInfo do workspace — devolve `null` (a
   /// rail usa [rootsGitSummary] pro chip agregado).
-  GitInfo? gitInfo(String projectId) {
-    final roots = rootsOf(projectId);
-    if (roots.length != 1) return null;
-    return _gitInfo[roots.first];
-  }
+  GitInfo? gitInfo(String projectId) => git.infoOf(projectId);
 
   /// Agregado pro chip da rail em multi-root: (nº de roots, roots com
-  /// **alteração de arquivo**). Conta só `isDirty` — divergência de upstream
-  /// (ahead/behind) NÃO entra, senão o chip acende "· 1" numa root só com
-  /// commits não enviados/não puxados, sem nenhuma mudança de arquivo. Espelha
-  /// o [_GitBadge] single-root, que também usa só `isDirty` pro contador âmbar
-  /// (ahead/behind lá aparecem à parte como setas ↑/↓).
-  (int roots, int dirtyRoots) rootsGitSummary(String projectId) {
-    final roots = rootsOf(projectId);
-    var dirty = 0;
-    for (final r in roots) {
-      final info = _gitInfo[r];
-      if (info != null && info.isDirty) dirty++;
-    }
-    return (roots.length, dirty);
-  }
+  /// **alteração de arquivo**). Ver [GitController.rootsSummary].
+  (int roots, int dirtyRoots) rootsGitSummary(String projectId) =>
+      git.rootsSummary(projectId);
 
   /// Root (path absoluto) que contém [absolutePath] no projeto [projectId],
   /// ou `null` se o caminho está fora de todas (ex.: solto na pasta-mãe).
@@ -476,17 +426,7 @@ class CockpitViewModel extends ChangeNotifier {
     if (pid == null) return null;
     final root = rootContaining(pid, absolutePath);
     if (root == null) return null;
-    final rel = _subOf(absolutePath, root);
-    if (rel.isEmpty) return null;
-    // Mudança real (mapa agregado) vence; senão herda da raiz colapsada que
-    // cobre este caminho — pasta untracked nova vs. ignorado.
-    final dirty = _gitTree[root]?[rel];
-    if (dirty != null) return dirty;
-    final info = _gitInfo[root];
-    if (info == null) return null;
-    if (info.isUntracked(rel)) return GitFileStatus.untracked;
-    if (info.isIgnored(rel)) return GitFileStatus.ignored;
-    return null;
+    return git.statusForRelPath(root, _subOf(absolutePath, root));
   }
 
   /// Aba que o usuário está olhando.
@@ -869,15 +809,11 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// `true` se o workspace [projectId] tem git — single-root: a raiz é repo;
   /// multi-root: qualquer root (habilita a aba Source Control).
-  bool isGitRepo(String projectId) =>
-      rootsOf(projectId).any((r) => _gitInfo[r] != null);
+  bool isGitRepo(String projectId) => git.isGitRepo(projectId);
 
   /// Status git (relativo à **root**) dos arquivos com mudança de uma root.
-  Map<String, GitFileStatus> changedFilesOfRoot(String rootPath) {
-    final info = _gitInfo[rootPath];
-    if (info == null) return const {};
-    return info.files;
-  }
+  Map<String, GitFileStatus> changedFilesOfRoot(String rootPath) =>
+      git.changedFilesOfRoot(rootPath);
 
   /// Caminhos **absolutos** com mudança git do projeto selecionado (exclui
   /// ignorados), varrendo **todas as roots** — alimenta a árvore podada do
@@ -1410,16 +1346,16 @@ class CockpitViewModel extends ChangeNotifier {
     // Só o projeto selecionado é ativado (sobe os processos) no boot.
     final selected = _selectedProjectId;
     if (selected != null) await _activateProject(selected);
-    _startGitWatch(selected); // watcher ao vivo do projeto inicial
+    git.watchProject(selected); // watcher ao vivo do projeto inicial
     _ready = true;
     notifyListeners();
     // Estado git + worktrees de todos os projetos (assíncrono — a rail atualiza
     // conforme chega). Só há raízes no boot; os forks entram pela reconciliação.
     for (final project in _projectList) {
-      unawaited(_refreshGit(project.id));
+      unawaited(git.refresh(project.id));
       unawaited(_refreshWorktrees(project.id));
     }
-    _startGitPoll(); // safety net contra eventos de FS perdidos (bug: rail stale)
+    git.startPoll(); // safety net contra eventos de FS perdidos (bug: rail stale)
     // Detecta IDEs instaladas (assíncrono — topbar atualiza ao chegar).
     unawaited(
       _launcher.probe().then((apps) {
@@ -1493,9 +1429,9 @@ class CockpitViewModel extends ChangeNotifier {
       final next = _selectedProjectId;
       if (next != null) {
         unawaited(_activateProject(next));
-        _startGitWatch(next);
+        git.watchProject(next);
       } else {
-        _startGitWatch(null);
+        git.watchProject(null);
       }
     }
     notifyListeners();
@@ -1535,13 +1471,13 @@ class CockpitViewModel extends ChangeNotifier {
     }
     if (next == null) {
       _selectedProjectId = null;
-      _startGitWatch(null);
+      git.watchProject(null);
     } else if (next != _selectedProjectId) {
       _selectedProjectId = next;
       _clearFocusedNotification();
       unawaited(_activateProject(next));
-      _startGitWatch(next);
-      unawaited(_refreshGit(next));
+      git.watchProject(next);
+      unawaited(git.refresh(next));
       unawaited(_refreshWorktrees(_rootOf(next)));
     }
     notifyListeners();
@@ -1639,9 +1575,9 @@ class CockpitViewModel extends ChangeNotifier {
       _selectedProjectId = next;
       if (next != null) {
         unawaited(_activateProject(next));
-        _startGitWatch(next);
+        git.watchProject(next);
       } else {
-        _startGitWatch(null);
+        git.watchProject(null);
       }
     }
     notifyListeners();
@@ -1714,7 +1650,7 @@ class CockpitViewModel extends ChangeNotifier {
     await _projects.save(project);
     unawaited(_projects.saveLastSelected(_activeRealmId, project.id));
     await _activateProject(project.id); // sem layout salvo → pane vazia
-    unawaited(_refreshGit(project.id));
+    unawaited(git.refresh(project.id));
     unawaited(_refreshWorktrees(project.id)); // pode já ter worktrees no disco
     notifyListeners();
     return project;
@@ -1799,13 +1735,7 @@ class CockpitViewModel extends ChangeNotifier {
     }
     _focused.remove(id);
     _savedLayouts.remove(id);
-    // Estado git é chaveado por root path (single-root: == id; multi-root:
-    // uma entrada por root derivada).
-    for (final root in _rootsByProject[id] ?? [id]) {
-      _gitInfo.remove(root);
-      _gitTree.remove(root);
-    }
-    _rootsByProject.remove(id);
+    git.forget(id);
     _saveTimers.remove(id)?.cancel();
   }
 
@@ -1985,22 +1915,12 @@ class CockpitViewModel extends ChangeNotifier {
     if (root == null) return 'File is outside the workspace roots.';
     final rel = _subOf(absPath, root);
     if (gitStatusForPath(absPath) == GitFileStatus.untracked) {
-      final err = await _collectGit(root, ['add', '--', rel]);
+      final err = await git.collect(root, ['add', '--', rel]);
       if (err != null) return err;
     }
-    final err = await _collectGit(root, ['commit', '-m', message, '--', rel]);
-    unawaited(_refreshGit(pid));
+    final err = await git.collect(root, ['commit', '-m', message, '--', rel]);
+    unawaited(git.refresh(pid));
     return err;
-  }
-
-  /// Roda um git rápido e devolve `null` (exit 0) ou a saída como erro.
-  Future<String?> _collectGit(String root, List<String> args) async {
-    final run = _gitRunner.run(root, args);
-    final lines = <String>[];
-    final sub = run.output.listen(lines.add);
-    final code = await run.exitCode;
-    await sub.cancel();
-    return code == 0 ? null : lines.join('\n');
   }
 
   Future<String?> _restoreFile(String absPath, {required bool staged}) async {
@@ -2009,32 +1929,28 @@ class CockpitViewModel extends ChangeNotifier {
     final root = rootContaining(pid, absPath);
     if (root == null) return 'File is outside the workspace roots.';
     final rel = _subOf(absPath, root);
-    final run = _gitRunner.run(root, [
+    final err = await git.collect(root, [
       'restore',
       if (staged) '--staged',
       '--',
       rel,
     ]);
-    final lines = <String>[];
-    final sub = run.output.listen(lines.add);
-    final code = await run.exitCode;
-    await sub.cancel();
-    unawaited(_refreshGit(pid));
+    unawaited(git.refresh(pid));
     _fileTreeRevision++; // conteúdo em disco pode ter mudado (restore)
     notifyListeners();
-    return code == 0 ? null : lines.join('\n');
+    return err;
   }
 
   // === Git commands (Sync / Pull / Push) — feature "more git" ===
 
   /// Sync = `git pull` e, se OK, `git push` no repo em [repoPath]. Stream ao vivo.
-  GitRun gitSync(String repoPath) => _gitRunner.syncPullPush(repoPath);
+  GitRun gitSync(String repoPath) => git.sync(repoPath);
 
   /// `git pull` no repo em [repoPath].
-  GitRun gitPull(String repoPath) => _gitRunner.run(repoPath, const ['pull']);
+  GitRun gitPull(String repoPath) => git.pull(repoPath);
 
   /// `git push` no repo em [repoPath].
-  GitRun gitPush(String repoPath) => _gitRunner.run(repoPath, const ['push']);
+  GitRun gitPush(String repoPath) => git.push(repoPath);
 
   /// "Update from parent": mergeia a branch **do pai** (root de origem) no
   /// checkout do worktree [fork] — o inverso do [mergeWorktreeToParent].
@@ -2042,7 +1958,9 @@ class CockpitViewModel extends ChangeNotifier {
   /// o pai nunca é tocado.
   GitRun updateWorktreeFromParent(Project fork) {
     final origin = _forkOriginPath(fork);
-    final parentBranch = origin == null ? null : _gitInfo[origin]?.branch;
+    final parentBranch = origin == null
+        ? null
+        : git.infoForRoot(origin)?.branch;
     if (parentBranch == null) {
       final controller = StreamController<String>()
         ..add('Parent branch not found.');
@@ -2108,8 +2026,8 @@ class CockpitViewModel extends ChangeNotifier {
     unawaited(_projects.saveLastSelected(_activeRealmId, _rootOf(id)));
     _clearFocusedNotification();
     unawaited(_activateProject(id)); // reconstrói (lazy) se ainda não ativo
-    _startGitWatch(id); // segue o working tree do novo projeto ao vivo
-    unawaited(_refreshGit(id)); // pode ter mudado desde a última vez
+    git.watchProject(id); // segue o working tree do novo projeto ao vivo
+    unawaited(git.refresh(id)); // pode ter mudado desde a última vez
     unawaited(_refreshWorktrees(_rootOf(id))); // reflete worktrees externas
     notifyListeners();
   }
@@ -3336,7 +3254,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   void _onAgentTurnEnd(AgentSession s) {
     if (s.sessionPath == null) unawaited(_captureSessionPath(s));
-    unawaited(_refreshGit(s.projectId));
+    unawaited(git.refresh(s.projectId));
     unawaited(_refreshWorktrees(_rootOf(s.projectId)));
     unawaited(_notifyIfNeeded(s));
   }
@@ -3889,185 +3807,6 @@ class CockpitViewModel extends ChangeNotifier {
     });
   }
 
-  /// (Re)lê o estado git de um projeto e atualiza a rail. Chamado no boot (todos),
-  /// ao selecionar e no fim de turno do agente (que pode ter mexido em arquivos).
-  /// Reavalia as **roots** (implícitas, do filesystem) e lê o git de cada uma —
-  /// single-root é o caso N=1 e se comporta como sempre.
-  Future<void> _refreshGit(String projectId) async {
-    final project = _projectById(projectId);
-    // Sink único de git — barra o Cockpit (sem pasta) de uma vez: cobre o
-    // watcher, o poll e o refresh manual/fim-de-turno.
-    if (project == null || project.isSystemTerminal) return;
-
-    final roots = _deriveRoots(project.path);
-    final oldRoots = _rootsByProject[projectId];
-    final rootsChanged = !listEquals(oldRoots, roots);
-    if (rootsChanged) {
-      // Roots que sumiram (repo removido / .git criado na mãe) → limpa estado.
-      for (final gone in (oldRoots ?? const <String>[]).where(
-        (r) => !roots.contains(r),
-      )) {
-        _gitInfo.remove(gone);
-        _gitTree.remove(gone);
-      }
-      _rootsByProject[projectId] = roots;
-    }
-
-    var changed = rootsChanged;
-    for (final root in roots) {
-      final info = await _gitReader.read(root);
-      // Evita rebuild se nada mudou (branch + ahead/behind + mapa de arquivos).
-      final old = _gitInfo[root];
-      if (old == info) {
-        _gitInfo[root] = info; // garante a chave mesmo sem mudança visível
-        continue;
-      }
-      _gitInfo[root] = info;
-      _gitTree[root] = _buildGitTree(info?.files);
-      changed = true;
-    }
-    if (changed) notifyListeners();
-  }
-
-  /// Deriva as roots git de uma pasta (síncrono, raso — só `existsSync`):
-  /// - `path/.git` existe (dir **ou arquivo** — worktrees usam arquivo) →
-  ///   `[path]` (single-root; monorepo é isso, N=1).
-  /// - senão, filhas imediatas com `.git` → multi-root (assinatura de multirepo).
-  /// - nenhuma → `[path]` (pasta comum, sem git — comportamento atual).
-  static List<String> _deriveRoots(String path) {
-    if (path.isEmpty) return const [];
-    if (FileSystemEntity.typeSync('$path/.git') !=
-        FileSystemEntityType.notFound) {
-      return [path];
-    }
-    final roots = <String>[];
-    try {
-      for (final entry in Directory(path).listSync(followLinks: false)) {
-        if (entry is! Directory) continue;
-        final name = entry.path.split(Platform.pathSeparator).last;
-        if (name.startsWith('.')) continue;
-        if (FileSystemEntity.typeSync('${entry.path}/.git') !=
-            FileSystemEntityType.notFound) {
-          roots.add(entry.path.replaceAll('\\', '/'));
-        }
-      }
-    } catch (_) {
-      return [path]; // pasta ilegível → trata como comum
-    }
-    if (roots.isEmpty) return [path];
-    roots.sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
-    return roots;
-  }
-
-  /// Expande o mapa path→status (só arquivos) num índice que também cobre as
-  /// **pastas ancestrais**, cada uma com o estado mais forte dos descendentes.
-  static Map<String, GitFileStatus> _buildGitTree(
-    Map<String, GitFileStatus>? files,
-  ) {
-    if (files == null || files.isEmpty) return const <String, GitFileStatus>{};
-    final tree = <String, GitFileStatus>{};
-    for (final entry in files.entries) {
-      final path = entry.key; // relativo, separador '/'
-      tree[path] = GitFileStatus.strongest(tree[path], entry.value)!;
-      // Propaga pros ancestrais: 'a/b/c.dart' → 'a/b', 'a'.
-      var slash = path.lastIndexOf('/');
-      while (slash > 0) {
-        final dir = path.substring(0, slash);
-        tree[dir] = GitFileStatus.strongest(tree[dir], entry.value)!;
-        slash = dir.lastIndexOf('/');
-      }
-    }
-    return tree;
-  }
-
-  /// (Re)inicia o watcher de filesystem do projeto **selecionado** → mantém a
-  /// árvore/branch atualizadas ao vivo conforme o disco muda (o agente edita
-  /// arquivos, troca de branch, comita). No-op se já observa esse mesmo path.
-  void _startGitWatch(String? projectId) {
-    // Cockpit não tem pasta → nunca observa (evita `Directory('').watch`).
-    if (projectId != null && isSystemTerminal(projectId)) {
-      _gitWatch?.cancel();
-      _gitWatchDebounce?.cancel();
-      _gitWatch = null;
-      _gitWatchPath = null;
-      return;
-    }
-    final path = projectId == null ? null : _projectById(projectId)?.path;
-    if (path == _gitWatchPath) return; // já observando este projeto
-    _gitWatch?.cancel();
-    _gitWatchDebounce?.cancel();
-    _gitWatch = null;
-    _gitWatchPath = path;
-    if (path == null || projectId == null) return;
-    try {
-      _gitWatch = Directory(path)
-          .watch(recursive: true)
-          .listen(
-            (event) => _onGitFsEvent(projectId, event),
-            // A subscription pode morrer sozinha (erro de FSEvents, limite de
-            // FDs, dir recriada). Sem isso o guard `path == _gitWatchPath`
-            // impediria o re-arm e as updates ao vivo parariam de vez — o poll
-            // ainda cobre, mas re-armamos pra manter a latência baixa.
-            onError: (_) => _rearmGitWatch(path),
-            onDone: () => _rearmGitWatch(path),
-            cancelOnError: true,
-          );
-    } catch (_) {
-      _gitWatchPath = null; // pasta inacessível → sem watcher (só poll/manual)
-    }
-  }
-
-  /// Re-arma o watcher se a subscription do projeto [path] morreu enquanto ele
-  /// ainda é o observado. Zera o guard pra `_startGitWatch` não sair cedo.
-  void _rearmGitWatch(String path) {
-    if (_gitWatchPath != path) return; // já trocaram de projeto → ignora
-    _gitWatch = null;
-    _gitWatchPath = null;
-    _startGitWatch(_selectedProjectId);
-  }
-
-  /// (Re)inicia o poll periódico de git de todos os projetos abertos. Ver
-  /// [_gitPoll].
-  void _startGitPoll() {
-    _gitPoll?.cancel();
-    _gitPoll = Timer.periodic(_gitPollInterval, (_) {
-      final selected = _selectedProjectId;
-      if (selected == null || isSystemTerminal(selected)) return;
-      // Raiz do selecionado + seus forks = a família visível na rail.
-      final rootId = _rootOf(selected);
-      unawaited(_refreshGit(rootId));
-      for (final fork in _worktrees[rootId] ?? const <Project>[]) {
-        unawaited(_refreshGit(fork.id));
-      }
-    });
-  }
-
-  /// Evento de filesystem do watcher. Filtra o ruído interno do `.git/` (o
-  /// próprio `git status` mexe em `index.lock` etc. → loop), exceto `HEAD` e
-  /// `index`, que sinalizam checkout/commit/staging. Debounce junta rajadas.
-  void _onGitFsEvent(String projectId, FileSystemEvent event) {
-    final p = event.path.replaceAll('\\', '/');
-    final gitIdx = p.indexOf('/.git/');
-    if (gitIdx != -1) {
-      final rest = p.substring(gitIdx + 6); // depois de '/.git/'
-      if (rest != 'HEAD' && rest != 'index') return;
-    } else if (event.type == FileSystemEvent.create ||
-        event.type == FileSystemEvent.delete ||
-        event.type == FileSystemEvent.move) {
-      // Mudança estrutural no working tree → árvore de arquivos relê as
-      // pastas abertas (modify não muda a estrutura, só o conteúdo).
-      _fileTreeWatchDebounce?.cancel();
-      _fileTreeWatchDebounce = Timer(
-        const Duration(milliseconds: 400),
-        _bumpFileTree,
-      );
-    }
-    _gitWatchDebounce?.cancel();
-    _gitWatchDebounce = Timer(const Duration(milliseconds: 400), () {
-      unawaited(_refreshGit(projectId));
-    });
-  }
-
   /// Reconcilia as worktrees de um workspace raiz contra o git (decisões 4, 5,
   /// 17, 20). Forks novos entram em [_projectList]; forks sumidos (por fora ou
   /// via remove) têm o runtime encerrado (mata `pi` + fecha panes — decisão 9) e,
@@ -4140,7 +3879,7 @@ class CockpitViewModel extends ChangeNotifier {
 
     // dirtyCount por fork (decisão 8) — cada um notifica se mudou.
     for (final f in forks) {
-      unawaited(_refreshGit(f.id));
+      unawaited(git.refresh(f.id));
     }
 
     if (switched) await _activateProject(_selectedProjectId!);
@@ -4177,10 +3916,9 @@ class CockpitViewModel extends ChangeNotifier {
   @override
   void dispose() {
     unawaited(_statusServer.stop());
-    _gitWatch?.cancel();
-    _gitWatchDebounce?.cancel();
-    _fileTreeWatchDebounce?.cancel();
-    _gitPoll?.cancel();
+    // O GitController é dono dos próprios timers/watchers; o módulo o
+    // descarta junto com a rota. Aqui só desligamos o repasse de notify.
+    git.removeListener(notifyListeners);
     for (final t in _saveTimers.values) {
       t.cancel();
     }
