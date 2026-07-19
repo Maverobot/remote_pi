@@ -35,7 +35,6 @@ import 'package:cockpit/app/cockpit/domain/entities/file_node.dart';
 import 'package:cockpit/app/cockpit/domain/entities/file_view.dart';
 import 'package:cockpit/app/cockpit/domain/entities/git_file_status.dart';
 import 'package:cockpit/app/cockpit/domain/entities/git_info.dart';
-import 'package:cockpit/app/cockpit/domain/contracts/realm_repository.dart';
 import 'package:cockpit/app/cockpit/domain/entities/launchable_app.dart';
 import 'package:cockpit/app/cockpit/domain/entities/project.dart';
 import 'package:cockpit/app/cockpit/domain/entities/realm.dart';
@@ -63,6 +62,7 @@ import 'package:cockpit/app/cockpit/domain/contracts/terminal_scrollback_store.d
 import 'package:cockpit/app/cockpit/ui/session/terminal_session.dart';
 import 'package:cockpit/app/cockpit/ui/states/pane_node.dart';
 import 'package:cockpit/app/cockpit/ui/viewmodels/git_controller.dart';
+import 'package:cockpit/app/cockpit/ui/viewmodels/realm_controller.dart';
 import 'package:flutter/foundation.dart';
 import 'package:window_manager/window_manager.dart';
 
@@ -100,7 +100,7 @@ class CockpitViewModel extends ChangeNotifier {
     this._scrollback,
     this._gitRunner,
     this._gitDiff,
-    this._realmRepo,
+    this.realmCtrl,
     this._taskDiscovery,
     this._taskRunner,
     this._dbService,
@@ -113,6 +113,7 @@ class CockpitViewModel extends ChangeNotifier {
       ..pollTargets = _gitPollTargets
       ..onStructuralFsChange = _bumpFileTree;
     git.addListener(notifyListeners);
+    realmCtrl.addListener(notifyListeners);
   }
 
   /// Alvos do poll de git: a família visível na rail (raiz do projeto
@@ -128,7 +129,10 @@ class CockpitViewModel extends ChangeNotifier {
   }
 
   final ProjectRepository _projects;
-  final RealmRepository _realmRepo;
+
+  /// Coleção de realms + ativo, extraída (ver [RealmController]). O VM delega
+  /// o estado e mantém aqui só a orquestração de troca/exclusão.
+  final RealmController realmCtrl;
 
   /// Descoberta e estado de tasks — usados só pelo comando `list-tasks` da CLI
   /// interna (mesmos binds do painel Tasks → mesma lista que a UI mostra).
@@ -171,9 +175,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Realms (conjuntos de workspaces) e o recorte ativo. [_projectList] guarda
   /// os workspaces de TODOS os realms (sessões de realms ocultos seguem vivas);
-  /// só o filtro de exibição ([rootProjects]) muda com [_activeRealmId].
-  final List<Realm> _realmList = <Realm>[];
-  String _activeRealmId = Realm.defaultId;
+  /// só o filtro de exibição ([rootProjects]) muda com [realmCtrl.activeId].
 
   /// Espelha `AppSettings.showCockpit` (app-scoped, empurrado pela `CockpitPage`).
   /// Governa se o workspace de sistema "Cockpit" é injetado. Default `true`;
@@ -308,18 +310,11 @@ class CockpitViewModel extends ChangeNotifier {
   List<Project> get projects => List<Project>.unmodifiable(_projectList);
 
   /// Realms na ordem de exibição do dropdown do footer.
-  List<Realm> get realms => List<Realm>.unmodifiable(_realmList);
+  List<Realm> get realms => realmCtrl.realms;
 
-  String get activeRealmId => _activeRealmId;
+  String get activeRealmId => realmCtrl.activeId;
 
-  Realm get activeRealm => _realmList.firstWhere(
-    (r) => r.id == _activeRealmId,
-    orElse: () => Realm(
-      id: Realm.defaultId,
-      name: 'Default',
-      createdAt: DateTime.fromMillisecondsSinceEpoch(0),
-    ),
-  );
+  Realm get activeRealm => realmCtrl.active;
 
   /// Só os workspaces raiz **reais do realm ativo** (sem worktrees e sem o
   /// Cockpit sintético) — o nível de topo da lista de projetos do rail. O
@@ -332,7 +327,7 @@ class CockpitViewModel extends ChangeNotifier {
           (p) =>
               p.parentId == null &&
               !p.isSystemTerminal &&
-              p.realmId == _activeRealmId,
+              p.realmId == realmCtrl.activeId,
         )
         .toList();
     // Ordem manual do usuário (drag-drop); createdAt como desempate/fallback.
@@ -1324,11 +1319,7 @@ class CockpitViewModel extends ChangeNotifier {
     await _statusServer.start(_onClaudeStatus, onCommand: _onCockpitCommand);
     // Realms antes dos projetos: o filtro do rail e a seleção inicial dependem
     // do realm ativo. `all()` garante o Default.
-    _realmList.addAll(await _realmRepo.all());
-    _activeRealmId = await _realmRepo.loadActive();
-    if (!_realmList.any((r) => r.id == _activeRealmId)) {
-      _activeRealmId = Realm.defaultId; // realm ativo sumiu (dado corrompido)
-    }
+    await realmCtrl.load();
     _projectList.addAll(await _projects.all());
     // Carrega os layouts salvos (mas não reconstrói nada ainda — lazy).
     for (final project in _projectList) {
@@ -1372,7 +1363,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// 3. senão, o primeiro workspace do realm; `null` se não houver nenhum.
   Future<String?> _initialSelection() async {
     try {
-      final last = await _projects.loadLastSelected(_activeRealmId);
+      final last = await _projects.loadLastSelected(realmCtrl.activeId);
       if (last != null && _visibleInActiveRealm(last)) return last;
     } catch (_) {
       // erro ao ler a preferência → segue pro fallback.
@@ -1390,7 +1381,7 @@ class CockpitViewModel extends ChangeNotifier {
     if (p == null) return false;
     if (p.isSystemTerminal) return true;
     final root = p.parentId == null ? p : _projectById(p.parentId!);
-    return root != null && root.realmId == _activeRealmId;
+    return root != null && root.realmId == realmCtrl.activeId;
   }
 
   /// Adiciona o workspace de sistema "Cockpit" a [_projectList] (runtime, nunca
@@ -1454,9 +1445,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// lista exibida e a seleção mudam. Restaura a última seleção do realm novo
   /// (fallback: Cockpit → primeiro workspace → nenhum).
   Future<void> switchRealm(String id) async {
-    if (_activeRealmId == id || !_realmList.any((r) => r.id == id)) return;
-    _activeRealmId = id;
-    unawaited(_realmRepo.saveActive(id));
+    if (!realmCtrl.setActive(id)) return;
     String? next;
     try {
       final last = await _projects.loadLastSelected(id);
@@ -1486,46 +1475,21 @@ class CockpitViewModel extends ChangeNotifier {
   /// Troca pro realm vizinho na ordem do seletor (⌘` / ⌘⇧`): [delta] +1 avança,
   /// -1 volta, com wrap-around. No-op com 0–1 realms.
   Future<void> cycleRealm(int delta) async {
-    if (_realmList.length < 2) return;
-    final idx = _realmList.indexWhere((r) => r.id == _activeRealmId);
-    final next =
-        _realmList[(idx + delta + _realmList.length) % _realmList.length];
-    await switchRealm(next.id);
+    final next = realmCtrl.neighbor(delta);
+    if (next != null) await switchRealm(next.id);
   }
 
   /// Cria um realm novo (não troca o ativo — a UI decide se troca em seguida).
-  Future<Realm> createRealm(String name) async {
-    final nextOrder = _realmList.isEmpty
-        ? 0
-        : _realmList.map((r) => r.order).reduce(max) + 1;
-    final realm = Realm(
-      id: newUid(),
-      name: name.trim(),
-      createdAt: DateTime.now(),
-      order: nextOrder,
-    );
-    _realmList.add(realm);
-    await _realmRepo.save(realm);
-    notifyListeners();
-    return realm;
-  }
+  Future<Realm> createRealm(String name) => realmCtrl.create(name);
 
-  Future<void> renameRealm(String id, String name) async {
-    final idx = _realmList.indexWhere((r) => r.id == id);
-    if (idx < 0 || name.trim().isEmpty) return;
-    final renamed = _realmList[idx].copyWith(name: name.trim());
-    _realmList[idx] = renamed;
-    await _realmRepo.save(renamed);
-    notifyListeners();
-  }
+  Future<void> renameRealm(String id, String name) =>
+      realmCtrl.rename(id, name);
 
   /// Exclui o realm [id]. Workspaces dele **nunca são apagados**: migram pro
   /// Default. O Default em si é indelével. Se o realm ativo for o excluído,
   /// troca pro Default antes.
   Future<void> deleteRealm(String id) async {
-    if (id == Realm.defaultId) return;
-    final idx = _realmList.indexWhere((r) => r.id == id);
-    if (idx < 0) return;
+    if (id == Realm.defaultId || !realmCtrl.exists(id)) return;
     for (var i = 0; i < _projectList.length; i++) {
       final p = _projectList[i];
       if (p.realmId != id) continue;
@@ -1535,9 +1499,8 @@ class CockpitViewModel extends ChangeNotifier {
         await _projects.save(moved); // forks são runtime, não persistem
       }
     }
-    if (_activeRealmId == id) await switchRealm(Realm.defaultId);
-    _realmList.removeWhere((r) => r.id == id);
-    await _realmRepo.remove(id);
+    if (realmCtrl.activeId == id) await switchRealm(Realm.defaultId);
+    await realmCtrl.remove(id);
     await _projects.saveLastSelected(id, null); // limpa ponteiro órfão
     notifyListeners();
   }
@@ -1546,7 +1509,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// lá (invariante: um path por realm). Se o movido era o selecionado, a
   /// seleção cai pro fallback do realm atual.
   Future<void> moveWorkspaceToRealm(String workspaceId, String realmId) async {
-    if (!_realmList.any((r) => r.id == realmId)) return;
+    if (!realmCtrl.exists(realmId)) return;
     final idx = _projectList.indexWhere((p) => p.id == workspaceId);
     if (idx < 0) return;
     final p = _projectList[idx];
@@ -1565,7 +1528,7 @@ class CockpitViewModel extends ChangeNotifier {
     }
     // Sumiu do recorte atual e estava selecionado (ou um fork dele)?
     final sel = _selectedProjectId;
-    if (realmId != _activeRealmId &&
+    if (realmId != realmCtrl.activeId &&
         sel != null &&
         _rootOf(sel) == workspaceId) {
       final roots = rootProjects;
@@ -1614,9 +1577,9 @@ class CockpitViewModel extends ChangeNotifier {
     // Dedup **dentro do realm ativo** — o mesmo path pode existir como
     // workspaces distintos em realms diferentes (ids são UUIDs).
     for (final existing in _projectList) {
-      if (existing.path == path && existing.realmId == _activeRealmId) {
+      if (existing.path == path && existing.realmId == realmCtrl.activeId) {
         _selectedProjectId = existing.id;
-        unawaited(_projects.saveLastSelected(_activeRealmId, existing.id));
+        unawaited(_projects.saveLastSelected(realmCtrl.activeId, existing.id));
         notifyListeners();
         return existing;
       }
@@ -1643,12 +1606,12 @@ class CockpitViewModel extends ChangeNotifier {
       createdAt: DateTime.now(),
       order: nextOrder,
       imagePath: imagePath,
-      realmId: _activeRealmId,
+      realmId: realmCtrl.activeId,
     );
     _projectList.add(project);
     _selectedProjectId = project.id;
     await _projects.save(project);
-    unawaited(_projects.saveLastSelected(_activeRealmId, project.id));
+    unawaited(_projects.saveLastSelected(realmCtrl.activeId, project.id));
     await _activateProject(project.id); // sem layout salvo → pane vazia
     unawaited(git.refresh(project.id));
     unawaited(_refreshWorktrees(project.id)); // pode já ter worktrees no disco
@@ -2013,17 +1976,14 @@ class CockpitViewModel extends ChangeNotifier {
       final root = target.parentId == null
           ? target
           : _projectById(target.parentId!);
-      if (root != null &&
-          root.realmId != _activeRealmId &&
-          _realmList.any((r) => r.id == root.realmId)) {
-        _activeRealmId = root.realmId;
-        unawaited(_realmRepo.saveActive(root.realmId));
+      if (root != null && root.realmId != realmCtrl.activeId) {
+        realmCtrl.setActive(root.realmId);
       }
     }
     _selectedProjectId = id;
     // Persiste o workspace (raiz) pra pré-selecionar na próxima abertura —
     // por realm: cada realm lembra a própria última seleção.
-    unawaited(_projects.saveLastSelected(_activeRealmId, _rootOf(id)));
+    unawaited(_projects.saveLastSelected(realmCtrl.activeId, _rootOf(id)));
     _clearFocusedNotification();
     unawaited(_activateProject(id)); // reconstrói (lazy) se ainda não ativo
     git.watchProject(id); // segue o working tree do novo projeto ao vivo
@@ -3919,6 +3879,7 @@ class CockpitViewModel extends ChangeNotifier {
     // O GitController é dono dos próprios timers/watchers; o módulo o
     // descarta junto com a rota. Aqui só desligamos o repasse de notify.
     git.removeListener(notifyListeners);
+    realmCtrl.removeListener(notifyListeners);
     for (final t in _saveTimers.values) {
       t.cancel();
     }
