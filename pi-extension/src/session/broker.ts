@@ -114,6 +114,10 @@ export interface RemoteRouter {
   listRemotePeerInfos(): PeerInfo[];
 }
 
+export interface ConditionalRemoteRouterHost {
+  clearRemoteRouter(expected: RemoteRouter): void;
+}
+
 /** Local outcome of a cross-PC envelope injection. broker_remote uses this
  *  to construct the ACK envelope it sends back via the relay. plan/34: `busy`
  *  is gone — injection always delivers when the peer exists. */
@@ -194,6 +198,11 @@ export class Broker {
   /** Attach (or detach with null) a cross-PC router. Idempotent. */
   setRemoteRouter(router: RemoteRouter | null): void {
     this.remoteRouter = router;
+  }
+
+  /** Clear only when the caller still owns the active router slot. */
+  clearRemoteRouter(expected: RemoteRouter): void {
+    if (this.remoteRouter === expected) this.remoteRouter = null;
   }
 
   /**
@@ -444,7 +453,8 @@ export class Broker {
     // prefix and the envelope was packed onto the relay; on miss it falls
     // through so locally-named peers (including ones with literal `:` in
     // their names) still work.
-    if (this.remoteRouter && typeof env.to === "string") {
+    const isExactLocal = typeof env.to === "string" && this.peers.has(env.to);
+    if (!isExactLocal && this.remoteRouter && typeof env.to === "string") {
       if (this.remoteRouter.tryRouteOutbound(env)) return;
     }
 

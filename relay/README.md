@@ -1,8 +1,8 @@
 # Remote Pi — Relay
 
 A lightweight WebSocket relay server that connects the **Remote Pi** mobile app to
-`pi-extension` processes running on your Operational System. It handles peer routing and presence
-tracking without ever reading message content.
+`pi-extension` processes running on your operating system. It handles peer routing,
+presence, authorized Pi-to-Pi forwarding, and signed membership metadata.
 
 For a full overview of the project, see the
 [root README](../README.md).
@@ -21,8 +21,18 @@ for everything the relay enforces on the wire.
 ## How it works
 
 Every device authenticates with an Ed25519 keypair during the WebSocket handshake
-(challenge-response). After that, the relay routes opaque messages between peers
-identified by their public key. It never decrypts or inspects payload content.
+(challenge-response). The Relay then applies these content boundaries:
+
+- For App↔Pi traffic, the outer `ct` remains opaque and is never decoded.
+- Pi→Pi `pi_envelope` frames and signed membership blobs are parsed in memory only
+  as needed for routing and authorization.
+- No envelope body, key material, or signature is logged or persisted as a message
+  payload. SQLite persistence is limited to Owner-signed membership authorization
+  metadata, not message traffic.
+- `authorized(A, B)` is true if and only if one valid Owner blob directly contains
+  both A and B. Membership is not transitive across overlapping Owner blobs.
+- The positive authorization cache can retain a revoked permission for at most
+  60 seconds; negative authorization results are not cached.
 
 ---
 
@@ -42,13 +52,20 @@ trade-offs below.
 Messages are protected in two ways on the public relay:
 
 - **TLS (SSL)** — the WebSocket connection is encrypted in transit.
-- **Ed25519 pairing key** — only devices that completed the pairing flow can
-  exchange messages; the relay enforces this via challenge-response authentication.
+- **Ed25519 connection key** — challenge-response authenticates possession of the
+  announced connection key. It does not itself prove App pairing or authorize every
+  route.
 
-What the relay **cannot** protect against is the relay operator reading the content
-of your messages. The payload (`ct` field) is forwarded as opaque bytes and is not
-end-to-end encrypted in the current version. A compromised or malicious relay would
-be able to see the commands you send to your Mac and the agent responses.
+App↔Pi pairing and room addressing are client protocol responsibilities. Pi→Pi
+forwarding has separate Relay authorization: the two Pis must be direct co-members
+of one valid Owner blob.
+
+The shipped Relay never decodes the outer `ct` and does not log or persist message
+traffic. That implementation behavior is not an end-to-end trust boundary: the
+relay operator controls the TLS endpoint, executable, and host, and a compromised
+or malicious operator could replace or instrument the service to inspect or retain
+traffic. Pi→Pi envelope content is also parsed transiently in the Relay process for
+routing and authorization.
 
 **If you handle sensitive work — private code, credentials, proprietary data — we
 strongly recommend running your own relay.**
@@ -57,8 +74,8 @@ strongly recommend running your own relay.**
 
 ## Self-hosted relay (recommended for privacy)
 
-Running your own relay means only your devices ever touch the connection. No third
-party can observe your traffic.
+Running your own relay removes the shared Relay operator from the trust path and
+places the TLS endpoint, executable, and storage under infrastructure you control.
 
 ### Docker (quickest)
 
@@ -118,9 +135,14 @@ restoring the Owner Ed25519 key from iCloud Keychain / Block Store.
 
 The relay verifies every `POST` against the embedded `owner_pk` using Ed25519
 and only accepts versions strictly greater than the current one (monotonic).
-Bodies are capped at 500 KB. The relay never decides membership — it only
-stores what was signed by the Owner. A compromised relay can deny service but
-cannot forge membership without the Owner private key.
+Bodies are capped at 500 KB. The relay does not create membership: it stores the
+Owner-signed authorization metadata and authorizes Pi A↔B only when one valid
+Owner blob directly contains both, without transitive authorization across blobs.
+The shipped POST endpoint prevents an unprivileged caller from modifying a
+particular Owner slot without that Owner private key. This is not protection
+against Relay/operator compromise: an operator controls the executable and
+SQLite authorization state. A positive authorization cache entry can delay a
+revocation for at most 60 seconds.
 
 **Self-hosting note**: the SQLite database at `REMOTEPI_MESH_DB_PATH`
 (`/data/mesh.db` inside the official Docker image) is your operational
@@ -133,7 +155,12 @@ WAL), so only `mesh.db` persists. During a write transaction a transient
 `mesh.db-journal` may appear in the same directory and is deleted on commit.
 Both files live under `REMOTEPI_MESH_DB_PATH`'s parent directory — typically
 `/data/` in Docker or `data/` next to the binary on bare metal. The directory
-is created automatically on first boot.
+is created automatically on first boot. This database contains membership
+authorization metadata only, never message traffic.
+
+For upgrades, update the Extension fleet before deploying a Relay. The
+centralized rollout, backup, and rollback gates are in
+[Plan 48](../plan/48-cross-pc-mesh-routing-hardening.md).
 
 ### Behind a reverse proxy (HTTPS/WSS)
 
