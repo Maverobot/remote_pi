@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:cockpit/app/core/domain/entities/lsp_diagnostic.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
+import 'package:cockpit/app/core/ui/widgets/app_tooltip.dart';
 import 'package:cockpit/app/core/ui/widgets/code_editing_controller.dart';
 import 'package:flutter/material.dart'
     show
@@ -12,8 +13,7 @@ import 'package:flutter/material.dart'
         TextField,
         InputDecoration,
         InputBorder,
-        TextInputType,
-        Tooltip;
+        TextInputType;
 import 'package:flutter/gestures.dart' show PointerHoverEvent;
 import 'package:flutter/widgets.dart';
 
@@ -310,7 +310,7 @@ class _CodeEditorState extends State<CodeEditor> {
       final messages = widget.controller.messagesForLine(oneBased - 1);
       slot = SizedBox(
         width: _iconSlot,
-        child: Tooltip(
+        child: AppTooltip(
           message: messages.join('\n'),
           child: Icon(
             _severityIcon(severity),
