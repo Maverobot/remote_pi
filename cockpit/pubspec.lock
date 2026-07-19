@@ -4,51 +4,58 @@ packages:
   anaki_mongodb:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_mongodb"
-      relative: false
-    source: path
+      name: anaki_mongodb
+      sha256: "0fa811afe7fabf29d56ce8117083e082211798e2c5182ec1636585a102413e5f"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_mssql:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_mssql"
-      relative: false
-    source: path
+      name: anaki_mssql
+      sha256: b444008005fe085de25322071879c261682bac8a43ca8cb3b520b26386f75004
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_mysql:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_mysql"
-      relative: false
-    source: path
+      name: anaki_mysql
+      sha256: "0760d5acc9e7b1e1f50104455cb98b6873234e71595c2fb96d766c1b077a786d"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_orm:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_orm"
-      relative: false
-    source: path
+      name: anaki_orm
+      sha256: b6515fee8d7981f0cdcd3537c16b88775cc4034cc594d2a4a5e3d5e92e197648
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_postgres:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_postgres"
-      relative: false
-    source: path
+      name: anaki_postgres
+      sha256: "17ea91b4289e34d31cf8eb2af506c383f258de26339d207c3510b669c29200d9"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_redis:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_redis"
-      relative: false
-    source: path
+      name: anaki_redis
+      sha256: "7500d79b1b2899d34745906d20987fc419126a6e2b4adf0805a6f3ed21529a9d"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   anaki_sqlite:
     dependency: "direct main"
     description:
-      path: "/Users/jacob/Projects/anakiORM/packages/anaki_sqlite"
-      relative: false
-    source: path
+      name: anaki_sqlite
+      sha256: "59b950cb488d612c896cb33b0b2d4849d3c1af21f01e48aae23dfe4113c872a3"
+      url: "https://pub.dev"
+    source: hosted
     version: "0.1.1"
   animation_kit:
     dependency: transitive

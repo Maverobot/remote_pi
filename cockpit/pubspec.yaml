@@ -140,10 +140,8 @@ dependencies:
   # SQLite + Postgres + MySQL + MSSQL). A FFI bloqueia → roda em Isolate
   # (AnakiDbDriver). Binários vêm por native assets do próprio pacote.
   #
-  # 0.1.1 publicado no pub.dev com os fixes (#2/#4/#5/#6). Enquanto a
-  # propagação não completa, os `dependency_overrides` abaixo resolvem do repo
-  # LOCAL (mesma versão) — REMOVER os overrides quando o 0.1.1 estiver no
-  # pub.dev e o `pub get` resolver de lá.
+  # 0.1.1 publicado no pub.dev com os fixes (#2/#4/#5/#6): binários por native
+  # assets, loader via asset-id, colunas em ordem. Resolvido direto do pub.dev.
   anaki_orm: ^0.1.1
   anaki_sqlite: ^0.1.1
   anaki_postgres: ^0.1.1
@@ -154,24 +152,6 @@ dependencies:
   anaki_mongodb: ^0.1.1
 
 dependency_overrides:
-  # anakiORM (plano 51) — TEMPORÁRIO: rastreia os fixes em andamento do repo
-  # local (issues #4/#5) em vez das versões publicadas. Cobre a resolução
-  # transitiva (os sub-pacotes referenciam anaki_orm do pub.dev). Remover todo
-  # este bloco quando o anaki publicar as correções.
-  anaki_orm:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_orm
-  anaki_sqlite:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_sqlite
-  anaki_postgres:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_postgres
-  anaki_mysql:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_mysql
-  anaki_mssql:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_mssql
-  anaki_redis:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_redis
-  anaki_mongodb:
-    path: /Users/jacob/Projects/anakiORM/packages/anaki_mongodb
 
   # Fork do xterm, por dois motivos:
   #
