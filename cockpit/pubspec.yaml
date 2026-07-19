@@ -16,7 +16,7 @@ publish_to: "none" # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 1.11.0+26
+version: 1.12.0+27
 
 environment:
   sdk: ^3.11.5
@@ -138,20 +138,20 @@ dependencies:
 
   # Plano 51 — drivers de banco da DB tab via anakiORM (conectores Rust/FFI;
   # SQLite + Postgres + MySQL + MSSQL). A FFI bloqueia → roda em Isolate
-  # (AnakiDbDriver). Dylibs buildados do rust/ do repo e copiados pro bundle
-  # pelo macos/build_cli.sh (dev: ~/.cockpit/anaki).
+  # (AnakiDbDriver). Binários vêm por native assets do próprio pacote.
   #
-  # Enquanto acompanhamos os fixes em andamento do anaki (issues #4/#5), os
-  # pacotes são resolvidos do repo LOCAL via `dependency_overrides` abaixo —
-  # as versões aqui viram no-op. Remover os overrides quando publicarem.
-  anaki_orm: ^0.1.0
-  anaki_sqlite: ^0.1.0
-  anaki_postgres: ^0.1.0
-  anaki_mysql: ^0.1.0
-  anaki_mssql: ^0.1.0
+  # 0.1.1 publicado no pub.dev com os fixes (#2/#4/#5/#6). Enquanto a
+  # propagação não completa, os `dependency_overrides` abaixo resolvem do repo
+  # LOCAL (mesma versão) — REMOVER os overrides quando o 0.1.1 estiver no
+  # pub.dev e o `pub get` resolver de lá.
+  anaki_orm: ^0.1.1
+  anaki_sqlite: ^0.1.1
+  anaki_postgres: ^0.1.1
+  anaki_mysql: ^0.1.1
+  anaki_mssql: ^0.1.1
   # NoSQL/cache — acesso APENAS via CLI por enquanto (sem UI); ver plano 51.
-  anaki_redis: ^0.1.0
-  anaki_mongodb: ^0.1.0
+  anaki_redis: ^0.1.1
+  anaki_mongodb: ^0.1.1
 
 dependency_overrides:
   # anakiORM (plano 51) — TEMPORÁRIO: rastreia os fixes em andamento do repo

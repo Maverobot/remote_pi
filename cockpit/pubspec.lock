@@ -7,49 +7,49 @@ packages:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_mongodb"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_mssql:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_mssql"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_mysql:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_mysql"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_orm:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_orm"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_postgres:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_postgres"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_redis:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_redis"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   anaki_sqlite:
     dependency: "direct main"
     description:
       path: "/Users/jacob/Projects/anakiORM/packages/anaki_sqlite"
       relative: false
     source: path
-    version: "0.1.0"
+    version: "0.1.1"
   animation_kit:
     dependency: transitive
     description:

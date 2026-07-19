@@ -14,6 +14,24 @@ As versões seguem o `version:` do `pubspec.yaml` (SSOT). O campo `notes` do
   meio da frase).
 -->
 
+## [1.12.0] — 2026-07-19
+
+Novo: acesso a bancos de dados direto no Cockpit — painel de conexões, tab de
+query `.dbq` e a CLI `cockpit db` para os agentes.
+
+### Added
+- **Painel Database:** conexões por workspace (`.cockpit/databases.json`),
+  SQLite detectado automaticamente, senha no cofre do SO. Árvore de schema
+  (tabelas → colunas) e logos de marca por engine.
+- **Tab de query `.dbq`:** editor SQL com highlight + grid de resultado (split
+  arrastável), Run por statement sob o cursor, resultado como tabela ou JSON
+  (copiável), buffers *untitled* (o arquivo nasce só ao salvar).
+- **Engines:** SQLite, Postgres, MySQL e SQL Server (via anakiORM).
+- **CLI `cockpit db list|schema|query|execute|run`** — JSON de uma linha para
+  os agentes; execução no app, credenciais nunca passam pela CLI.
+- **Redis e MongoDB via CLI** (`cockpit redis` / `cockpit mongo`) — acesso do
+  agente sem UI por enquanto.
+
 ## [1.11.0] — 2026-07-18
 
 Melhorias na árvore de Files (criação e reveal), no multi-root e na CLI interna.
