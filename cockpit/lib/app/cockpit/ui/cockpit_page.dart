@@ -13,14 +13,11 @@ import 'package:cockpit/app/cockpit/domain/contracts/git_command_runner.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/git_process_dialog.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/widgets.dart';
 import 'package:cockpit/app/core/ui/themes/themes.dart';
-import 'package:cockpit/app/core/ui/widgets/app_menu.dart';
 import 'package:cockpit/app/core/ui/settings_controller.dart';
 import 'package:cockpit/app/core/ui/widgets/hover_tap.dart';
 import 'package:cockpit/app/core/utils/native_folder_picker.dart';
 import 'package:flutter/services.dart'
     show
-        Clipboard,
-        ClipboardData,
         HardwareKeyboard,
         KeyDownEvent,
         KeyEvent,
@@ -371,144 +368,6 @@ class _CockpitPageState extends State<CockpitPage> {
     }
   }
 
-  /// Menu de contexto do **cabeçalho de uma root** (workspace multi-root).
-  /// Git ops direcionadas — o alvo é a root clicada, sem perguntar (o outro
-  /// caminho, o kebab do workspace, pergunta a root via submenu).
-  Future<void> _showRootContextMenu(
-    WorkspaceRoot root,
-    Offset globalPosition,
-  ) async {
-    final vm = _vm;
-    final project = vm.selectedProject;
-    if (project == null) return;
-    final hasGit = root.git != null;
-    // "New agent here" só com agentes ligados (Settings → General → "Enable
-    // agents"); "New terminal here" segue sempre.
-    final agentsEnabled = context.read<SettingsController>().settings.enableAgent;
-    final action = await showAppMenu<_RootMenuAction>(
-      context,
-      globalPosition: globalPosition,
-      items: [
-        AppMenuItem(
-          value: _RootMenuAction.sync,
-          label: 'Sync',
-          icon: Icons.sync,
-          enabled: hasGit,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.pull,
-          label: 'Pull',
-          icon: Icons.arrow_downward,
-          enabled: hasGit,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.push,
-          label: 'Push',
-          icon: Icons.arrow_upward,
-          enabled: hasGit,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.worktree,
-          label: 'Create worktree',
-          icon: Icons.call_split,
-          enabled: hasGit,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.newTerminal,
-          label: 'New terminal here',
-          icon: Icons.terminal,
-        ),
-        if (agentsEnabled)
-          AppMenuItem(
-            value: _RootMenuAction.newAgent,
-            label: 'New agent here',
-            icon: Icons.smart_toy_outlined,
-          ),
-        AppMenuItem(
-          value: _RootMenuAction.reveal,
-          label: 'Open with…',
-          icon: Icons.folder_open,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.copyAbsolutePath,
-          label: 'Copy Absolute Path',
-          icon: Icons.content_copy_outlined,
-        ),
-        AppMenuItem(
-          value: _RootMenuAction.copyRelativePath,
-          label: 'Copy Relative Path',
-          icon: Icons.content_copy_outlined,
-        ),
-      ],
-    );
-    if (action == null || !mounted) return;
-    // Sub relativo da root dentro da pasta-mãe (pro cwd das abas novas).
-    final sub = root.path == project.path
-        ? ''
-        : root.path.startsWith('${project.path}/')
-        ? root.path.substring(project.path.length + 1)
-        : root.path;
-    switch (action) {
-      case _RootMenuAction.sync:
-        final run = vm.gitSync(root.path);
-        await showGitProcessDialog(
-          context,
-          title: 'Sync — ${root.name}',
-          output: run.output,
-          success: run.exitCode.then((c) => c == 0),
-        );
-      case _RootMenuAction.pull:
-        final run = vm.gitPull(root.path);
-        await showGitProcessDialog(
-          context,
-          title: 'Pull — ${root.name}',
-          output: run.output,
-          success: run.exitCode.then((c) => c == 0),
-        );
-      case _RootMenuAction.push:
-        final run = vm.gitPush(root.path);
-        await showGitProcessDialog(
-          context,
-          title: 'Push — ${root.name}',
-          output: run.output,
-          success: run.exitCode.then((c) => c == 0),
-        );
-      case _RootMenuAction.worktree:
-        final namespace = await vm.worktreeNamespace(
-          project.id,
-          rootPath: root.path,
-        );
-        if (!mounted) return;
-        await showWorktreeCreateDialog(
-          context,
-          rootName: root.name,
-          namespace: namespace,
-          onCreate: (name) async {
-            final res = await vm.createWorktree(
-              project.id,
-              name,
-              rootPath: root.path,
-            );
-            return res.fold((_) => null, (e) => e.message);
-          },
-        );
-      case _RootMenuAction.newTerminal:
-        vm.newTabIn(sub, terminal: true);
-      case _RootMenuAction.newAgent:
-        vm.newTabIn(sub, terminal: false);
-      case _RootMenuAction.reveal:
-        vm.openWithDefaultApp(root.path);
-      case _RootMenuAction.copyAbsolutePath:
-        await Clipboard.setData(ClipboardData(text: root.path));
-      case _RootMenuAction.copyRelativePath:
-        // Relativo à pasta-mãe do workspace (o `sub` já computado); numa root
-        // que É a própria raiz (single-root) cai no basename.
-        await Clipboard.setData(
-          ClipboardData(text: sub.isEmpty ? root.name : sub),
-        );
-    }
-  }
-
   /// Rótulo da operação git: nome do workspace em single-root; basename da
   /// root em multi-root (a root já veio escolhida do submenu do kebab).
   String _gitOpLabel(Project project, String rootPath) =>
@@ -847,7 +706,7 @@ class _CockpitPageState extends State<CockpitPage> {
                                 (
                                   path: r,
                                   name: r.split('/').last,
-                                  branch: vm.gitInfoForRoot(r)?.branch,
+                                  git: vm.gitInfoForRoot(r),
                                 ),
                             ],
                             onSelect: vm.selectProject,
@@ -944,7 +803,6 @@ class _CockpitPageState extends State<CockpitPage> {
                                   git: vm.gitInfoForRoot(r),
                                 ),
                             ],
-                            onRootContextMenu: _showRootContextMenu,
                             onUnstageFile: vm.unstageFile,
                             onDiscardFile: vm.discardFile,
                             onCommitFile: vm.commitFile,
@@ -1260,14 +1118,3 @@ class _LspStatusBarState extends State<_LspStatusBar> {
 }
 
 /// Ações do menu de contexto do cabeçalho de uma root (multi-root).
-enum _RootMenuAction {
-  sync,
-  pull,
-  push,
-  worktree,
-  newTerminal,
-  newAgent,
-  reveal,
-  copyAbsolutePath,
-  copyRelativePath,
-}

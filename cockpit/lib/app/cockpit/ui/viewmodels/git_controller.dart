@@ -139,6 +139,22 @@ class GitController extends ChangeNotifier {
     return info.files;
   }
 
+  /// Estado agregado de uma **root inteira** — o mais forte entre os arquivos
+  /// sujos dela (mesma regra de pasta, [GitFileStatus.strongest]). Colore a
+  /// própria pasta da root na árvore de arquivos em multi-root, onde o `.git`
+  /// mora dentro da pasta e o caminho relativo dela seria vazio. `null` =
+  /// limpa ou sem git.
+  GitFileStatus? statusForRoot(String rootPath) {
+    final info = _gitInfo[rootPath];
+    if (info == null) return null;
+    GitFileStatus? out;
+    for (final s in info.files.values) {
+      out = GitFileStatus.strongest(out, s);
+    }
+    return out ??
+        (info.untrackedDirs.isNotEmpty ? GitFileStatus.untracked : null);
+  }
+
   /// Status (cor) do caminho [rel] (relativo à [root]): mudança real do mapa
   /// agregado vence; senão herda untracked/ignored da raiz colapsada.
   GitFileStatus? statusForRelPath(String root, String rel) {

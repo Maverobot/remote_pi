@@ -445,6 +445,9 @@ class CockpitViewModel extends ChangeNotifier {
     if (pid == null) return null;
     final root = rootContaining(pid, absolutePath);
     if (root == null) return null;
+    // A própria pasta da root (multi-root): o rel seria vazio e sumiria — usa
+    // o agregado da root inteira pra pasta acender visto de fora.
+    if (absolutePath == root) return git.statusForRoot(root);
     return git.statusForRelPath(root, _subOf(absolutePath, root));
   }
 
