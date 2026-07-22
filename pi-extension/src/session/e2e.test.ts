@@ -337,6 +337,26 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
     await orq.leave(); await backend.leave();
   });
 
+  test("sendWithAck to a local POSIX cwd containing a colon accepts the local broker ACK", async () => {
+    const sock = tmpSock();
+    const orq = await makePeer(sock, "orq");
+    const local = new SessionPeer({
+      sockPath: sock,
+      name: "agent",
+      cwd: "/tmp/a:b",
+      defaultTimeoutMs: 3000,
+    });
+    await local.start();
+
+    const ack = await orq.sendWithAck(local.address(), { task: "ping" });
+
+    expect(local.address()).toBe("/tmp/a:b@agent");
+    expect(ack).toMatchObject({ status: "received", target: local.address() });
+
+    await orq.leave();
+    await local.leave();
+  });
+
   test("sendWithAck resolves on cross-PC ACK (from=<pc>:broker)", async () => {
     const sock = tmpSock();
     const orq = await makePeer(sock, "orq");
@@ -348,7 +368,7 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
       const pendingAck = orq.sendWithAck("trab:agent-1", { task: "ping" }, null, 1500);
       const outbound = await capture.nextOutbound();
       const crossPcAck: Envelope = {
-        from: "casa:broker",
+        from: "trab:broker",
         to: orq.address(),
         id: "01976000-0000-7000-8000-aaaaaaaaaaab",
         re: outbound.id,
@@ -364,6 +384,33 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
     } finally {
       broker.setRemoteRouter(null);
       await orq.leave();
+    }
+  });
+
+  test("wrong remote ACK alias with the correct correlation id times out", async () => {
+    const sock = tmpSock();
+    const peer = await makePeer(sock, "orq");
+    const broker = peer.localBroker()!;
+    const capture = capturingRemoteRouter();
+    broker.setRemoteRouter(capture.router);
+
+    try {
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      const pending = peer.sendWithAck("trab:agent-1", { task: "ping" }, null, 1_000);
+      const outbound = await capture.nextOutbound();
+      expect(broker.injectFromRemote(envelope(
+        "casa:broker",
+        peer.address(),
+        { type: "ack", status: "received", target: "agent-1" },
+        outbound.id,
+      ))).toBe("received");
+      await flushUds();
+      await vi.advanceTimersByTimeAsync(1_000);
+      await expect(pending).resolves.toEqual({ status: "timeout", id: outbound.id });
+    } finally {
+      broker.setRemoteRouter(null);
+      await peer.leave();
+      vi.useRealTimers();
     }
   });
 
@@ -519,7 +566,7 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
           const target = "agent-1";
 
           expect(broker.injectFromRemote(envelope(
-            "casa:broker",
+            "trab:broker",
             peer.address(),
             { type: "ack", status, target },
             outbound.id,
@@ -737,7 +784,12 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
         .then((outcome) => { requestSettled = true; return outcome; });
       const requestOutbound = await capture.nextOutbound();
 
-      await sibling.send(orq.address(), { type: "transport_error", reason: "offline" }, ackOutbound.id);
+      expect(broker.injectFromRemote(envelope(
+        sibling.address(),
+        orq.address(),
+        { type: "transport_error", reason: "offline" },
+        ackOutbound.id,
+      ))).toBe("received");
       expect(broker.injectFromRemote({
         from: "casa:broker",
         to: orq.address(),
@@ -778,10 +830,10 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
 
 
   test.each([
-    { compatibility: "old 32-hex envelope id", malformed: "id" as const },
-    { compatibility: "old 32-hex correlation id", malformed: "re" as const },
+    { compatibility: "malformed 32-hex envelope id", malformed: "id" as const },
+    { compatibility: "malformed 32-hex correlation id", malformed: "re" as const },
     { compatibility: "genuine silence", malformed: null },
-  ])("$compatibility transport error falls back to the normal timeout", async ({ malformed }) => {
+  ])("$compatibility transport error cannot bypass the strict Broker boundary", async ({ malformed }) => {
     const sock = tmpSock();
     const orq = await makePeer(sock, "orq");
     const broker = orq.localBroker()!;
@@ -804,7 +856,7 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
             ? "01976000000070008000000000000109"
             : outbound.id,
           body: { type: "transport_error", reason: "offline" },
-        })).toBe("received");
+        })).toBe("denied");
         await flushUds();
       }
 
@@ -818,7 +870,7 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
     }
   });
 
-  test("Relay offline errors cross BrokerRemote and real UDS while old or missing frames time out", async () => {
+  test("Relay offline errors cross BrokerRemote and real UDS with trusted legacy id normalization", async () => {
     const sock = uniqueSock();
     const peer = await makePeer(sock, "orq");
     const broker = peer.localBroker()!;
@@ -832,8 +884,8 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
         broker,
         pi: fakePi as never,
         topology: {
-          self: { pcLabel: "Mac", pcPubkey: selfKey },
-          siblings: [{ pcLabel: "RTX4090", pcPubkey: siblingKey }],
+          self: { pcLabel: "Mac", pcPubkey: selfKey, legacyPcLabel: "Mac" },
+          siblings: [{ pcLabel: "RTX4090", pcPubkey: siblingKey, legacyPcLabel: "RTX4090" }],
         },
         reannounceIntervalMs: 0,
         log: () => undefined,
@@ -881,8 +933,8 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
       }
 
       const valid = await startSend("valid offline");
-      // An old Extension with a new Relay may treat this as unsolicited and
-      // time out, so rollout remains Extension-first.
+      // Relay-first rollout: the Extension accepts the established Relay UUID
+      // form and injects it through the normal strict broker boundary.
       fakePi.emit("envelope", {
         from: "_relay",
         to: `old-mac:${peer.address()}`,
@@ -909,11 +961,17 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
         body: { type: "transport_error", reason: "offline" },
       } satisfies Envelope, "_relay");
       await flushUds();
-      expect(malformed.result()).toBeUndefined();
-      await vi.advanceTimersByTimeAsync(1_000);
+      expect(malformed.result()).toEqual({
+        status: "timeout",
+        id: malformed.outbound.env.id,
+        error: "transport_error: offline",
+        reason: "offline",
+      });
       await expect(malformed.pending).resolves.toEqual({
         status: "timeout",
         id: malformed.outbound.env.id,
+        error: "transport_error: offline",
+        reason: "offline",
       });
 
       const silent = await startSend("genuine silence");
@@ -975,6 +1033,21 @@ describe("ACK protocol (plan/25 Wave 0)", () => {
     expect(backendInbox.length).toBe(2);
 
     await orq.leave(); await backend.leave();
+  });
+
+  test("injectFromRemote rejects malformed envelopes before claiming received", async () => {
+    const sock = tmpSock();
+    const peer = await makePeer(sock, "orq");
+    const broker = peer.localBroker()!;
+    const malformed = {
+      from: "casa:sender",
+      to: peer.address(),
+      id: "not-a-uuid",
+      re: null,
+      body: { task: "must not arrive" },
+    } as unknown as Envelope;
+    expect(broker.injectFromRemote(malformed)).toBe("denied");
+    await peer.leave();
   });
 
   test("injectFromRemote: unknown local peer → denied", async () => {
@@ -1256,12 +1329,83 @@ describe("plan/38 — (cwd, name) mesh addressing (e2e)", () => {
     return peer;
   }
 
-  test("register with cwd → clean name() + address() = <cwd>@<name>", async () => {
+  test("register accepts absolute POSIX, Windows drive, and UNC cwd values", async () => {
     const sock = tmpSock();
-    const p = await makePeerCwd(sock, "backend", "/a/backend");
-    expect(p.name()).toBe("backend");
-    expect(p.address()).toBe("/a/backend@backend");
-    await p.leave();
+    const posixPeer = await makePeerCwd(sock, "posix", "/a/backend");
+    const windowsPeer = await makePeerCwd(sock, "windows", "C:\\work\\backend");
+    const uncPeer = await makePeerCwd(sock, "unc", "\\\\server\\share\\backend");
+    expect(posixPeer.address()).toBe("/a/backend@posix");
+    expect(windowsPeer.address()).toBe("C:\\work\\backend@windows");
+    expect(uncPeer.address()).toBe("\\\\server\\share\\backend@unc");
+    await posixPeer.leave();
+    await windowsPeer.leave();
+    await uncPeer.leave();
+  });
+
+  test("registration rejects relative, control-character, and oversized cwd atomically", async () => {
+    const sock = tmpSock();
+    const leader = await makePeer(sock, "leader");
+    const rejected = async (cwd: unknown): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        const client = createConnection({ path: sock });
+        const timer = setTimeout(() => {
+          client.destroy();
+          reject(new Error("invalid cwd registration was not rejected"));
+        }, 1_000);
+        client.on("error", () => undefined);
+        client.on("connect", () => client.write(JSON.stringify({ type: "register", name: "bad", cwd }) + "\n"));
+        client.on("close", () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    };
+    await rejected("relative/path");
+    await rejected("casa:/shadow");
+    await rejected("/bad\npath");
+    await rejected("/bad\0path");
+    await rejected(`/${"x".repeat(4096)}`);
+    expect(leader.localBroker()!.peerNames()).toEqual(["leader"]);
+    await leader.leave();
+  });
+
+  test("registration enforces shared code-unit roster limits before mutating peers", async () => {
+    const sock = tmpSock();
+    const cwd = `/${"c".repeat(4095)}`;
+    const name = "n".repeat(255);
+    const exact = await makePeerCwd(sock, name, cwd);
+    expect(exact.address()).toHaveLength(4352);
+    await exact.leave();
+
+    const leader = await makePeerCwd(sock, "leader", "/workspace");
+    const rejected = async (name: string, rejectedCwd: string, takeover = false): Promise<void> => {
+      await new Promise<void>((resolve, reject) => {
+        const client = createConnection({ path: sock });
+        const timer = setTimeout(() => {
+          client.destroy();
+          reject(new Error("out-of-bounds registration was not rejected"));
+        }, 1_000);
+        client.on("error", () => undefined);
+        client.on("connect", () => client.write(JSON.stringify({
+          type: "register", name, cwd: rejectedCwd, takeover,
+        }) + "\n"));
+        client.on("close", () => { clearTimeout(timer); resolve(); });
+      });
+    };
+    await rejected("x", `/${"c".repeat(4096)}`); // cwd 4097
+    await rejected("n".repeat(257), "/workspace"); // name 257
+    await rejected("n".repeat(256), cwd); // composed address 4353
+
+    const multibyte = await makePeerCwd(sock, "😀".repeat(128), "/emoji");
+    expect(multibyte.name()).toHaveLength(256);
+    await multibyte.leave();
+
+    const original = await makePeerCwd(sock, "stable", "/takeover");
+    await rejected("x".repeat(257), "/takeover", true);
+    const roster = await leader.request("broker", { type: "list_peers" });
+    expect((roster.body as { peers?: string[] }).peers).toContain(original.address());
+    await original.leave();
+    await leader.leave();
   });
 
   test("legacy peer (no cwd) → address() == name() (mixed-mesh compat)", async () => {
@@ -1356,7 +1500,7 @@ describe("plan/38 — (cwd, name) mesh addressing (e2e)", () => {
     await p.leave();
   });
 
-  test("exact local address beats colliding remote alias", async () => {
+  test("Windows drive local address beats RemoteRouter alias handling", async () => {
     const sock = tmpSock();
     const sender = await makePeerCwd(sock, "sender", "/proj/sender");
     const localTarget = await makePeerCwd(sock, "agent", "C:\\proj\\app");
@@ -1374,11 +1518,12 @@ describe("plan/38 — (cwd, name) mesh addressing (e2e)", () => {
       if (env.from !== "broker") inbox.push(env);
     });
 
-    await sender.send(localTarget.address(), { local: true });
+    const ack = await sender.sendWithAck(localTarget.address(), { local: true });
     await wait(50);
 
     expect(localTarget.address()).toBe("C:\\proj\\app@agent");
     expect(tryRouteOutbound).not.toHaveBeenCalled();
+    expect(ack.status).toBe("received");
     expect(inbox).toHaveLength(1);
     expect(inbox[0]?.to).toBe(localTarget.address());
 

@@ -39,17 +39,23 @@ pelo Owner em SQLite.
   persistido como payload de mensagem.
 - A persistência SQLite é limitada a metadados de autorização de membership
   assinados pelo Owner; tráfego de mensagens nunca é persistido.
-- `authorized(A, B)` é verdadeiro se, e somente se, um único blob Owner válido
-  contém diretamente A e B. Não há transitividade entre blobs sobrepostos.
+- Uma rota é elegível quando qualquer blob Owner corretamente assinado lista
+  diretamente as duas chaves Pi canônicas. Isso não prova que o Owner pareou ou
+  controla qualquer Pi, nem oferece uma garantia de confiança mais forte. Não
+  há transitividade entre blobs sobrepostos.
 - O cache positivo de autorização pode reter uma permissão revogada por no
-  máximo 60 segundos; resultados negativos não são cacheados.
+  máximo 60 segundos; misses negativos de remetente são cacheados por 1 segundo
+  e o cache é limitado.
 - Rate limit por `peer_id` e por IP de origem.
 
 ## Upgrade
 
-- Atualize toda a frota de Extensions antes de implantar um Relay novo.
-- Os procedimentos de rollout, backup e rollback ficam centralizados no
-  [Plano 48](../plan/48-cross-pc-mesh-routing-hardening.md).
+- Implante primeiro o Relay 0.3: Extensions antigas consomem seus erros UUID.
+  Depois coordene a Extension 0.6 e minimize Extensions mistas, pois labels de
+  wire mistos continuam adiados. O shim da 0.6 cobre Relay antigo ou rollback,
+  não é a razão de Relay-first ser seguro.
+- Os procedimentos de rollout ficam centralizados no
+  [Plano 51](../plan/51-cross-pc-mesh-routing-hardening.md).
 
 ## NÃO fazer
 

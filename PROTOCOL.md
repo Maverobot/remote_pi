@@ -12,7 +12,7 @@ Atualizada em 2026-07-18.
 - **Celular** é o **autenticador inicial** (estilo WhatsApp Web QR) — depois do pareamento, PCs operam autonomamente entre si
 - **Owner-key** Ed25519 vive no Keychain do celular (iOS Keychain / Android Block Store), sincroniza entre devices do mesmo Apple ID / Google Account
 - **Relay** WebSocket roteia e armazena/verifica `mesh_versions` assinadas pelo Owner; autoriza co-membership direta
-- **Cross-PC routing** via prefix de alias local `<alias>:<peer>` no envelope; broker UDS local em cada PC, relay forward Pi-to-Pi via WS
+- **Cross-PC routing** por Pi-key canônica no Relay; a Extension `0.6` mantém por uma release o prefixo wire legado para interoperar com Extensions antigas, sem substituir aliases receiver-local públicos
 
 ---
 
@@ -73,8 +73,9 @@ Naming:
 - **Endereço público**: `[<alias-local-do-receptor>:]<cwd>@<agent>`; o alias é apresentação/roteamento local ao receptor, não identidade estável nem alegação do remetente.
 - Cada byte UTF-8 fora de `[A-Za-z0-9._-]` no nickname vira `%HH` literal em maiúsculas. Assim `:`, `%`, `~`, espaços, controles e Unicode nunca aparecem crus; `~<prefixo-base64url-da-chave>` é reservado para resolver colisões.
 - Para cada chave canônica, coletam-se candidatos de nickname não vazios das contribuições Owner diretas e escolhe-se o menor já codificado em ASCII; em empate, vence o menor UTF-8 bruto. Ausente/vazio usa `pc-<prefixo-base64url-da-chave-canônica>` com prefixo inicial de 8 caracteres. Reservam-se todas as bases e, em colisões, cada candidato recebe `~<prefixo-da-chave-base64url>`, expandido adaptativamente dos 8 caracteres até a chave completa de 43 caracteres para não colidir; assim chave→alias e alias→chave são bijetivos.
-- Ao enviar, um endereço unicast local **exatamente registrado** sempre vence antes de alias remoto — inclusive `C:\...@agent` no Windows, cujo `:` de drive não pode ser capturado por alias. Caso contrário, o alias remoto resolve para a Pi-key canônica e o `to_pc` canônico é o alvo técnico.
-- Ao receber pelo relay, o broker renderiza `envelope.from` com seu próprio alias local para `from_pc` e remove apenas o prefixo de apresentação/compatibilidade de destino: o relay já entregou ao PC autenticado selecionado por `to_pc`.
+- Ao enviar, um alias remoto conhecido vence primeiro. A exceção é um endereço Windows de drive absoluto (`C:\...@agent`) exatamente registrado, que permanece local; outros endereços locais exatos são fallback quando não resolvem para alias remoto. O alias remoto resolve para a Pi-key canônica e o `to_pc` canônico é o alvo técnico.
+- Durante a compatibilidade de uma release da Extension `0.6`, o prefixo cross-PC no wire é o nickname assinado bruto selecionado deterministicamente ou, sem nickname, os primeiros 8 caracteres da Pi-key canônica Base64 padrão com padding. Esse label legado nunca vira identidade, autorização ou endereço público.
+- Ao receber pelo relay, o broker renderiza `envelope.from` com seu próprio alias local para `from_pc` e remove apenas o prefixo de apresentação/compatibilidade de destino: o relay já entregou ao PC autenticado selecionado por `to_pc`. ACKs retornam ao `from` wire exato recebido.
 
 UUID v7 garante ordenação temporal sem coordenação para envelopes normais gerados pela Extension.
 
@@ -101,6 +102,14 @@ Os motivos fechados do relay são `offline`, `not_authorized` e `bad_envelope`: 
 
 Hoje cross-PC é mediado pelo relay (não P2P direto — fica pra futuro).
 
+A Extension `0.6` inclui por uma release um label wire legado para a janela
+mixed-version. Nova↔antiga funciona quando os dois lados selecionam o mesmo
+nickname assinado, único e sem `:`, ou quando nenhum tem nickname e ambos usam o
+prefixo de 8 caracteres da chave Base64 padrão canônica. Nicknames com delimitador
+ou colisão e visões divergentes de nickname não são cobertos; o receptor antigo
+pode descartá-los silenciosamente. Por isso todos os participantes Extension/MCP
+devem ser atualizados na mesma janela de manutenção, não gradualmente.
+
 ### Frame wire WS (Pi-A → Relay)
 
 ```jsonc
@@ -108,8 +117,8 @@ Hoje cross-PC é mediado pelo relay (não P2P direto — fica pra futuro).
   "type": "pi_envelope",
   "to_pc": "<Pi-B-key Base64 RFC 4648 padrão com padding>",
   "envelope": {
-    "from": "casa:/Users/alice/projeto@frontend",
-    "to": "trabalho:/home/bob/projeto@backend",
+    "from": "<label-wire-legado-de-A>:/Users/alice/projeto@frontend",
+    "to": "<label-wire-legado-de-B>:/home/bob/projeto@backend",
     // demais campos do envelope
   }
 }
@@ -127,7 +136,7 @@ Hoje cross-PC é mediado pelo relay (não P2P direto — fica pra futuro).
 
 ### Autorização e anti-spoof
 
-Antes de consultar presença do destino, o relay autoriza `A → B` somente se existir **um** blob Owner válido e assinado que contenha diretamente ambas as Pis. Não há fechamento transitivo: `{A,B}` e `{B,C}` não autoriza `A → C`. Um membro malformado invalida toda a contribuição daquele Owner; o cache positivo é limitado a 60 segundos.
+Antes de consultar presença do destino, o Relay permite `A → B` somente se encontrar **um** blob corretamente assinado por um Owner que liste diretamente ambas as Pi-keys. Essa checagem valida assinatura e conteúdo, mas não prova que o Owner pareou ou controla qualquer Pi. Não há fechamento transitivo: `{A,B}` e `{B,C}` não autoriza `A → C`. Um membro malformado invalida toda a contribuição daquele Owner. O cache por remetente é limitado a 1.024 entradas; grants positivos expiram em até 60 segundos e misses negativos em 1 segundo.
 
 No receptor, `from_pc` canônico e autenticado é a única identidade técnica: ele deve pertencer ao snapshot de irmãos diretos, ou o frame é rejeitado. O receptor substitui o prefixo de `envelope.from` pelo seu alias local para essa chave e remove só o prefixo de apresentação/compatibilidade de `envelope.to`, pois `to_pc` já selecionou o destino técnico. Texto de nickname/prefixo enviado pelo remetente nunca é identidade nem regra anti-spoof.
 
@@ -156,7 +165,7 @@ Somente esse outer autenticado, com essa gramática interna exata, reason fechad
 
 ### Compatibilidade e rollout
 
-A frota Extension vem primeiro: todo participante Extension/MCP/wrapper capaz de liderar a malha local deve ser atualizado/reiniciado ou intencionalmente parado antes da substituição do Relay. Builds antigos podem tratar o novo erro parseável como mensagem não solicitada e ainda expirar.
+Implante o Relay `0.3` primeiro: uma Extension antiga pode consumir os erros UUID do Relay novo. Depois coordene a atualização para Extension `0.6` e minimize o período com Extensions antigas e novas, pois a interoperabilidade de wire labels mistos fora dos casos limitados descritos acima permanece adiada. A Extension `0.6` aceita o ID legado lowercase de 32 hex apenas no caminho autenticado e fechado de erro `_relay`, para Relay antigo ou rollback do Relay; esse shim não é o motivo de Relay-first ser seguro. Envelopes comuns continuam exigindo UUID.
 
 ---
 
@@ -377,9 +386,9 @@ Detalhes em `plan/04-pairing.md`.
 
 - **Pareamento autenticado**: pair_request assinado pela Owner-sk; spoofing requer Owner-sk
 - **WS pro relay sobre TLS**: ninguém na rota (ISP, NAT, MITM clássico) vê o tráfego em claro
-- **Cross-PC autorização cripto**: relay só forwarda co-membership direta de Pis no mesmo blob Owner válido (verificado via Owner-sig em `mesh_versions`), sem transitividade
+- **Cross-PC checagem assinada**: o Relay só encaminha quando encontra um blob corretamente assinado que liste diretamente ambas as Pi-keys, sem transitividade. Isso não prova pareamento ou controle pelo Owner
 - **Anti-spoof entre Pis**: broker aceita somente `from_pc` canônico autenticado que exista entre irmãos diretos e renderiza seu alias local
-- **Anti-rollback de membership**: version monotônica + assinatura impede relay/atacante de regredir mesh
+- **Anti-rollback de membership em processo**: versão monotônica + assinatura rejeita regressão durante a vida da instância. O floor da Extension reinicia com o processo; `issued_at` é informativo e memberships não expiram. Persistência anti-rollback entre reinícios não é implementada
 - **Pi-secret protegida**: Keychain do sistema (macOS Keychain / libsecret Linux desktop / Credential Manager Windows). Atacante precisa contexto do user logado E unlock do Keychain
 - **Owner-secret protegida**: iOS Keychain / Android Block Store, sincroniza via iCloud/Google account; recuperável trocando de device
 
@@ -411,7 +420,7 @@ Detalhes em `plan/04-pairing.md`.
 |---|---|
 | Relay desconecta | pi-extension reconnect com backoff; agentes locais continuam falando entre si via UDS broker |
 | Pi-B offline durante envio cross-PC | Sender recebe `timeout` com `transport_error: offline` imediatamente. Sem queue offline no relay |
-| Pi-B sem co-membership direta autorizada | Sender recebe `denied` com `transport_error: not_authorized`; a checagem ocorre antes de presença |
+| Nenhum blob corretamente assinado lista Pi-A e Pi-B diretamente | Sender recebe `denied` com `transport_error: not_authorized`; a checagem ocorre antes de presença |
 | Owner revoga Pi-A da mesh | Pi-A detecta na próxima poll de mesh_versions, faz self-revoke, sai gracefully |
 | WS Pi reconecta frequente (NAT timeout) | Relay dedupa peer_online emit (transição offline→online apenas); cliente dedupa snapshots idênticos |
 | Relay crash | Tudo cross-PC para; agentes locais continuam funcionando (UDS) |

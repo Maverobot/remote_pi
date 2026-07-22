@@ -111,12 +111,15 @@ function topologyEquals(
   if (
     left.self.pcPubkey !== right.self.pcPubkey ||
     left.self.pcLabel !== right.self.pcLabel ||
+    left.self.legacyPcLabel !== right.self.legacyPcLabel ||
     left.siblings.length !== right.siblings.length
   ) return false;
   return left.siblings.every((identity, index) => {
     const other = right.siblings[index];
     return other !== undefined &&
-      identity.pcPubkey === other.pcPubkey && identity.pcLabel === other.pcLabel;
+      identity.pcPubkey === other.pcPubkey &&
+      identity.pcLabel === other.pcLabel &&
+      identity.legacyPcLabel === other.legacyPcLabel;
   });
 }
 
@@ -129,7 +132,11 @@ export class SelfRevoke {
   private readonly onAuthoritativeOwners?: SelfRevokeOptions["onAuthoritativeOwners"];
   private readonly onTopologyChanged?: SelfRevokeOptions["onTopologyChanged"];
   private readonly log: NonNullable<SelfRevokeOptions["log"]>;
-  /** Accepted anti-rollback floor, deliberately independent from pending I/O. */
+  /**
+   * Accepted anti-rollback floor, deliberately independent from pending I/O.
+   * https://github.com/jacobaraujo7/remote_pi/issues/73: this in-memory floor
+   * resets on process restart, allowing pre-revocation membership replay.
+   */
   private readonly lastSeenVersion = new Map<string, number>();
   private readonly pendingRevocations = new Map<string, PendingRevocation>();
   private readonly membershipByOwner = new Map<string, BoundOwnerMembership>();

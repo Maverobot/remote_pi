@@ -411,6 +411,40 @@ describe("SelfRevoke retention and invalid-response transitions", () => {
 
 });
 
+describe("SelfRevoke anti-rollback", () => {
+  test("same instance retains a higher signed version when a lower signed version follows", async () => {
+    const owner = generateEd25519Keypair();
+    const self = generateEd25519Keypair();
+    const sibling = generateEd25519Keypair();
+    const get = vi.fn()
+      .mockResolvedValueOnce(makeEnvelope(owner, 2, [
+        { remoteEpk: standardKey(self) },
+        { remoteEpk: standardKey(sibling) },
+      ]))
+      .mockResolvedValueOnce(makeEnvelope(owner, 1, [
+        { remoteEpk: standardKey(self) },
+      ]));
+    const onTopologyChanged = vi.fn();
+    const log = defaultLog();
+    const revoker = new SelfRevoke({
+      client: client(get),
+      storage: storage(vi.fn().mockResolvedValue([standardKey(owner)])),
+      myPubkey: self.publicKey,
+      onTopologyChanged,
+      log,
+    });
+
+    await revoker.checkOnce();
+    await revoker.checkOnce();
+
+    expect(get).toHaveBeenNthCalledWith(1, ownerHash(owner), undefined);
+    expect(get).toHaveBeenNthCalledWith(2, ownerHash(owner), 2);
+    expect(onTopologyChanged).toHaveBeenCalledTimes(1);
+    expect(siblingKeys(onTopologyChanged.mock.calls[0]![0])).toEqual([standardKey(sibling)]);
+    expect(log.warn).toHaveBeenCalledWith(expect.stringMatching(/event=owner_rollback.*received_version=1.*retained_version=2/));
+  });
+});
+
 describe("SelfRevoke atomic topology publication", () => {
   test("publishes alias-only changes once and suppresses a material no-op", async () => {
     const owner = generateEd25519Keypair();
@@ -452,8 +486,14 @@ describe("SelfRevoke atomic topology publication", () => {
     await revoker.checkOnce();
 
     expect(onTopologyChanged).toHaveBeenCalledTimes(2);
-    expect(onTopologyChanged.mock.calls[0]![0].siblings[0].pcLabel).toBe("Zulu");
-    expect(onTopologyChanged.mock.calls[1]![0].siblings[0].pcLabel).toBe("%3A");
+    expect(onTopologyChanged.mock.calls[0]![0].siblings[0]).toMatchObject({
+      pcLabel: "Zulu",
+      legacyPcLabel: "Zulu",
+    });
+    expect(onTopologyChanged.mock.calls[1]![0].siblings[0]).toMatchObject({
+      pcLabel: "%3A",
+      legacyPcLabel: ":",
+    });
   });
 
   test("publishes at most once after a complete multi-Owner sweep", async () => {
@@ -606,6 +646,7 @@ describe("SelfRevoke failure isolation", () => {
       self: {
         pcPubkey: standardKey(self),
         pcLabel: fallbackLabel(standardKey(self)),
+        legacyPcLabel: standardKey(self).slice(0, 8),
       },
       siblings: [],
     });

@@ -295,7 +295,7 @@ fn normalize_generated_transport_error_id(mut frame: Value) -> Value {
 /// online. Envelope from A arrives at B verbatim, wrapped as `pi_envelope_in`
 /// with `from_pc = peer_a_pk`.
 #[tokio::test]
-async fn happy_path_same_owner_envelope_delivered_verbatim() {
+async fn direct_owner_blob_co_membership_envelope_delivered_verbatim() {
     let port = start_relay().await;
     let base_http = format!("http://127.0.0.1:{port}");
 
@@ -332,7 +332,7 @@ async fn happy_path_same_owner_envelope_delivered_verbatim() {
 }
 
 #[tokio::test]
-async fn overlapping_owners_forward_in_both_directions() {
+async fn each_direct_owner_blob_pair_forwards_in_both_directions() {
     let port = start_relay().await;
     let base_http = format!("http://127.0.0.1:{port}");
 
@@ -498,7 +498,7 @@ async fn pi_b_offline_returns_transport_error_offline() {
 /// Pi-A and Pi-B belong to DIFFERENT Owners. The relay's mesh authorization
 /// rejects the forward; A gets `transport_error: not_authorized`.
 #[tokio::test]
-async fn cross_owner_returns_transport_error_not_authorized() {
+async fn no_owner_blob_lists_both_pis_returns_not_authorized() {
     let port = start_relay().await;
     let base_http = format!("http://127.0.0.1:{port}");
 
@@ -645,7 +645,14 @@ async fn stored_malformed_member_shape_invalidates_whole_owner() {
         });
 
         let error = transport_error_frame(
-            handle_pi_envelope(&a, &frame, &registry, &store, &MeshAuthCache::new()).await,
+            handle_pi_envelope(
+                &a,
+                &frame,
+                &registry,
+                Arc::new(store),
+                Arc::new(MeshAuthCache::new()),
+            )
+            .await,
         );
         assert_eq!(
             error["envelope"]["body"]["reason"], "not_authorized",

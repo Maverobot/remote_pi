@@ -59,6 +59,13 @@ function validateAlias(alias: unknown, field: string): string {
   return alias;
 }
 
+function validateLegacyPcLabel(label: unknown, field: string): string {
+  if (typeof label !== "string" || label.length === 0) {
+    throw new Error(`mesh: ${field} is not a valid legacy PC label`);
+  }
+  return label;
+}
+
 function ownTopology(
   snapshot: MeshTopologySnapshot,
   expectedSelfPubkey: string,
@@ -71,10 +78,22 @@ function ownTopology(
     throw new Error("mesh: topology self public key does not match relay identity");
   }
   const selfLabel = validateAlias(snapshot.self.pcLabel, "self.pcLabel");
-  const self = Object.freeze({ pcLabel: selfLabel, pcPubkey: selfPubkey });
+  const selfLegacyPcLabel = validateLegacyPcLabel(
+    snapshot.self.legacyPcLabel,
+    "self.legacyPcLabel",
+  );
+  const self = Object.freeze({
+    pcLabel: selfLabel,
+    pcPubkey: selfPubkey,
+    legacyPcLabel: selfLegacyPcLabel,
+  });
   const siblingKeys = new Set<string>();
   const siblingAliases = new Set<string>();
-  const normalizedSiblings: Array<Readonly<{ pcLabel: string; pcPubkey: string }>> = [];
+  const normalizedSiblings: Array<Readonly<{
+    pcLabel: string;
+    pcPubkey: string;
+    legacyPcLabel: string;
+  }>> = [];
   for (const [index, sibling] of snapshot.siblings.entries()) {
     const pcPubkey = canonicalizeEd25519PublicKey(
       sibling.pcPubkey,
@@ -82,6 +101,10 @@ function ownTopology(
     );
     if (pcPubkey === selfPubkey) continue;
     const pcLabel = validateAlias(sibling.pcLabel, `siblings[${index}].pcLabel`);
+    const legacyPcLabel = validateLegacyPcLabel(
+      sibling.legacyPcLabel,
+      `siblings[${index}].legacyPcLabel`,
+    );
     if (pcLabel === selfLabel || siblingAliases.has(pcLabel)) {
       throw new Error("mesh: duplicate sibling routing alias");
     }
@@ -90,7 +113,7 @@ function ownTopology(
     }
     siblingAliases.add(pcLabel);
     siblingKeys.add(pcPubkey);
-    normalizedSiblings.push(Object.freeze({ pcLabel, pcPubkey }));
+    normalizedSiblings.push(Object.freeze({ pcLabel, pcPubkey, legacyPcLabel }));
   }
   normalizedSiblings.sort((left, right) => compareAscii(left.pcPubkey, right.pcPubkey));
   return Object.freeze({ self, siblings: Object.freeze(normalizedSiblings) });

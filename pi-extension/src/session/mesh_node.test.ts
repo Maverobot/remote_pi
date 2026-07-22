@@ -30,11 +30,21 @@ function standardKey(bytes: Uint8Array): string {
 function topology(
   selfAlias = "self",
   siblingAlias = "sibling",
+  selfLegacyPcLabel = selfAlias,
+  siblingLegacyPcLabel = siblingAlias,
 ): MeshTopologySnapshot {
   return {
-    self: { pcLabel: selfAlias, pcPubkey: standardKey(SELF_PUBLIC) },
+    self: {
+      pcLabel: selfAlias,
+      pcPubkey: standardKey(SELF_PUBLIC),
+      legacyPcLabel: selfLegacyPcLabel,
+    },
     siblings: [
-      { pcLabel: siblingAlias, pcPubkey: standardKey(SIBLING_PUBLIC) },
+      {
+        pcLabel: siblingAlias,
+        pcPubkey: standardKey(SIBLING_PUBLIC),
+        legacyPcLabel: siblingLegacyPcLabel,
+      },
     ],
   };
 }
@@ -268,6 +278,24 @@ describe("MeshNode retained topology", () => {
     expect(attachSpy).toHaveBeenCalledWith(expect.objectContaining({
       topology: retained,
     }));
+  });
+
+  test("retains and forwards a wire-label-only topology change", async () => {
+    const first = topology("self", "sibling", "self-wire", "sibling-wire");
+    const updated = topology("self", "sibling", "self-wire-next", "sibling-wire");
+    const attached = bridge(first);
+    attachSpy.mockResolvedValue(attached as never);
+    const { node } = testNode();
+
+    node.setTopology(first);
+    await node.attachBridge({
+      relay: injectedRelay() as never,
+      relayUrl: "https://relay.test",
+      keypair: KEYPAIR,
+    });
+    node.setTopology(updated);
+
+    expect(attached.brokerRemote.setTopology).toHaveBeenCalledWith(updated);
   });
 
   test("failover uses the latest retained topology", async () => {

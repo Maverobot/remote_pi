@@ -29,10 +29,13 @@ Every device authenticates with an Ed25519 keypair during the WebSocket handshak
 - No envelope body, key material, or signature is logged or persisted as a message
   payload. SQLite persistence is limited to Owner-signed membership authorization
   metadata, not message traffic.
-- `authorized(A, B)` is true if and only if one valid Owner blob directly contains
-  both A and B. Membership is not transitive across overlapping Owner blobs.
+- A route is eligible when any correctly signed Owner blob directly lists both
+  canonical Pi keys. This does not prove that the Owner paired with or controls
+  either Pi, and is not a stronger trust guarantee. Membership is not transitive
+  across overlapping Owner blobs.
 - The positive authorization cache can retain a revoked permission for at most
-  60 seconds; negative authorization results are not cached.
+  60 seconds. Negative sender misses are cached for 1 second, and the cache is
+  bounded.
 
 ---
 
@@ -57,8 +60,9 @@ Messages are protected in two ways on the public relay:
   route.
 
 App↔Pi pairing and room addressing are client protocol responsibilities. Pi→Pi
-forwarding has separate Relay authorization: the two Pis must be direct co-members
-of one valid Owner blob.
+forwarding has separate Relay route eligibility: any correctly signed Owner blob
+must directly list both Pi keys. This does not prove that the Owner paired with
+or controls either Pi, and is not a stronger trust guarantee.
 
 The shipped Relay never decodes the outer `ct` and does not log or persist message
 traffic. That implementation behavior is not an end-to-end trust boundary: the
@@ -128,7 +132,7 @@ docker run -d \
 
 ### Mesh membership endpoint
 
-The `/mesh/<owner_pk_hash>` endpoint stores **Owner-signed** lists of paired Pis,
+The `/mesh/<owner_pk_hash>` endpoint stores **Owner-signed** lists of Pi keys,
 keyed by `sha256(owner_pk)` in lowercase hex. It enables an app on a new device
 (same Apple ID / Google account) to recover its peer list automatically after
 restoring the Owner Ed25519 key from iCloud Keychain / Block Store.
@@ -136,13 +140,15 @@ restoring the Owner Ed25519 key from iCloud Keychain / Block Store.
 The relay verifies every `POST` against the embedded `owner_pk` using Ed25519
 and only accepts versions strictly greater than the current one (monotonic).
 Bodies are capped at 500 KB. The relay does not create membership: it stores the
-Owner-signed authorization metadata and authorizes Pi A↔B only when one valid
-Owner blob directly contains both, without transitive authorization across blobs.
-The shipped POST endpoint prevents an unprivileged caller from modifying a
-particular Owner slot without that Owner private key. This is not protection
-against Relay/operator compromise: an operator controls the executable and
-SQLite authorization state. A positive authorization cache entry can delay a
-revocation for at most 60 seconds.
+Owner-signed authorization metadata and treats Pi A↔B as route-eligible when any
+correctly signed Owner blob directly lists both keys, without transitive
+authorization across blobs. This does not prove that the Owner paired with or
+controls either Pi, and is not a stronger trust guarantee. The shipped POST
+endpoint prevents an unprivileged caller from modifying a particular Owner slot
+without that Owner private key. This is not protection against Relay/operator
+compromise: an operator controls the executable and SQLite authorization state.
+A positive authorization cache entry can delay a revocation for at most 60
+seconds; negative sender misses are cached for 1 second, and the cache is bounded.
 
 **Self-hosting note**: the SQLite database at `REMOTEPI_MESH_DB_PATH`
 (`/data/mesh.db` inside the official Docker image) is your operational
@@ -158,9 +164,12 @@ Both files live under `REMOTEPI_MESH_DB_PATH`'s parent directory — typically
 is created automatically on first boot. This database contains membership
 authorization metadata only, never message traffic.
 
-For upgrades, update the Extension fleet before deploying a Relay. The
-centralized rollout, backup, and rollback gates are in
-[Plan 48](../plan/48-cross-pc-mesh-routing-hardening.md).
+For upgrades, deploy Relay 0.3 first: old Extensions can consume its UUID
+errors. Then coordinate the Extension 0.6 rollout and minimize mixed old/new
+Extensions because mixed wire-label interoperability is deferred. Extension
+0.6's old-Relay error shim is for an old Relay or Relay rollback, not the reason
+Relay-first is safe. The centralized rollout gates are in
+[Plan 51](../plan/51-cross-pc-mesh-routing-hardening.md).
 
 ### Behind a reverse proxy (HTTPS/WSS)
 

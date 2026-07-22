@@ -3642,6 +3642,7 @@ describe("bye on teardown", () => {
           self: {
             pcLabel: "stale-self",
             pcPubkey: Buffer.alloc(32).toString("base64"),
+            legacyPcLabel: "stale-self",
           },
           siblings: [],
         })).then(() => undefined);

@@ -14,7 +14,10 @@ import { verifyEnvelope } from "./verify.js";
 
 export interface PiRoutingIdentity {
   readonly pcPubkey: string;
+  /** Receiver-local display and routing alias. */
   readonly pcLabel: string;
+  /** Raw legacy cross-PC wire prefix; distinct from the receiver-local alias. */
+  readonly legacyPcLabel: string;
 }
 
 export interface MeshTopologySnapshot {
@@ -61,8 +64,9 @@ function compareAscii(left: string, right: string): number {
 function freezeIdentity(
   pcPubkey: string,
   pcLabel: string,
+  legacyPcLabel: string,
 ): PiRoutingIdentity {
-  return Object.freeze({ pcPubkey, pcLabel });
+  return Object.freeze({ pcPubkey, pcLabel, legacyPcLabel });
 }
 
 /**
@@ -109,14 +113,17 @@ export function buildTopologySnapshot(
     }
   }
 
+  const selectedNicknames = new Map(
+    [...nicknamesByKey.entries()].map(([pcPubkey, candidates]) => [
+      pcPubkey,
+      selectRoutingNickname(candidates),
+    ]),
+  );
   const aliases = allocateRoutingAliases(
-    [...nicknamesByKey.entries()].map(([pcPubkey, candidates]) => {
-      const nickname = selectRoutingNickname(candidates);
-      return {
-        pcPubkey,
-        ...(nickname !== undefined ? { nickname } : {}),
-      };
-    }),
+    [...selectedNicknames.entries()].map(([pcPubkey, nickname]) => ({
+      pcPubkey,
+      ...(nickname !== undefined ? { nickname } : {}),
+    })),
   );
   const selfLabel = aliases.get(selfPubkey);
   if (!selfLabel) {
@@ -126,10 +133,18 @@ export function buildTopologySnapshot(
   const siblings = [...aliases.entries()]
     .filter(([pcPubkey]) => pcPubkey !== selfPubkey)
     .sort(([left], [right]) => compareAscii(left, right))
-    .map(([pcPubkey, pcLabel]) => freezeIdentity(pcPubkey, pcLabel));
+    .map(([pcPubkey, pcLabel]) => freezeIdentity(
+      pcPubkey,
+      pcLabel,
+      selectedNicknames.get(pcPubkey) ?? pcPubkey.slice(0, 8),
+    ));
 
   return Object.freeze({
-    self: freezeIdentity(selfPubkey, selfLabel),
+    self: freezeIdentity(
+      selfPubkey,
+      selfLabel,
+      selectedNicknames.get(selfPubkey) ?? selfPubkey.slice(0, 8),
+    ),
     siblings: Object.freeze(siblings),
   });
 }

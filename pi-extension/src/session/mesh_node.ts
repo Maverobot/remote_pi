@@ -74,16 +74,35 @@ function validateAlias(alias: unknown, field: string): string {
   return alias;
 }
 
+function validateLegacyPcLabel(label: unknown, field: string): string {
+  if (typeof label !== "string" || label.length === 0) {
+    throw new Error(`mesh: ${field} is not a valid legacy PC label`);
+  }
+  return label;
+}
+
 function ownTopology(snapshot: MeshTopologySnapshot): MeshTopologySnapshot {
   const selfPubkey = canonicalizeEd25519PublicKey(
     snapshot.self?.pcPubkey,
     "self public key",
   );
   const selfLabel = validateAlias(snapshot.self?.pcLabel, "self.pcLabel");
-  const self = Object.freeze({ pcLabel: selfLabel, pcPubkey: selfPubkey });
+  const selfLegacyPcLabel = validateLegacyPcLabel(
+    snapshot.self?.legacyPcLabel,
+    "self.legacyPcLabel",
+  );
+  const self = Object.freeze({
+    pcLabel: selfLabel,
+    pcPubkey: selfPubkey,
+    legacyPcLabel: selfLegacyPcLabel,
+  });
   const siblingKeys = new Set<string>();
   const siblingAliases = new Set<string>();
-  const siblings: Array<Readonly<{ pcLabel: string; pcPubkey: string }>> = [];
+  const siblings: Array<Readonly<{
+    pcLabel: string;
+    pcPubkey: string;
+    legacyPcLabel: string;
+  }>> = [];
   for (const [index, sibling] of snapshot.siblings.entries()) {
     const pcPubkey = canonicalizeEd25519PublicKey(
       sibling?.pcPubkey,
@@ -91,6 +110,10 @@ function ownTopology(snapshot: MeshTopologySnapshot): MeshTopologySnapshot {
     );
     if (pcPubkey === selfPubkey) continue;
     const pcLabel = validateAlias(sibling?.pcLabel, `siblings[${index}].pcLabel`);
+    const legacyPcLabel = validateLegacyPcLabel(
+      sibling?.legacyPcLabel,
+      `siblings[${index}].legacyPcLabel`,
+    );
     if (pcLabel === selfLabel || siblingAliases.has(pcLabel)) {
       throw new Error("mesh: duplicate sibling routing alias");
     }
@@ -99,7 +122,7 @@ function ownTopology(snapshot: MeshTopologySnapshot): MeshTopologySnapshot {
     }
     siblingAliases.add(pcLabel);
     siblingKeys.add(pcPubkey);
-    siblings.push(Object.freeze({ pcLabel, pcPubkey }));
+    siblings.push(Object.freeze({ pcLabel, pcPubkey, legacyPcLabel }));
   }
   siblings.sort((left, right) => compareAscii(left.pcPubkey, right.pcPubkey));
   return Object.freeze({ self, siblings: Object.freeze(siblings) });
@@ -113,6 +136,7 @@ function topologyEquals(
   if (
     left.self.pcPubkey !== right.self.pcPubkey ||
     left.self.pcLabel !== right.self.pcLabel ||
+    left.self.legacyPcLabel !== right.self.legacyPcLabel ||
     left.siblings.length !== right.siblings.length
   ) {
     return false;
@@ -121,7 +145,8 @@ function topologyEquals(
     const other = right.siblings[index];
     return other !== undefined &&
       identity.pcPubkey === other.pcPubkey &&
-      identity.pcLabel === other.pcLabel;
+      identity.pcLabel === other.pcLabel &&
+      identity.legacyPcLabel === other.legacyPcLabel;
   });
 }
 

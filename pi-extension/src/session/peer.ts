@@ -84,6 +84,21 @@ function hasExactAckType(body: unknown): body is { type: "ack" } {
     && (body as { type: unknown }).type === "ack";
 }
 
+function expectedAckSender(destination: string): string {
+  // Local absolute paths may contain colons; only non-path aliases are remote.
+  if (
+    destination === "" ||
+    !destination.includes(":") ||
+    destination.startsWith("/") ||
+    /^[A-Za-z]:[\\/]/.test(destination) ||
+    destination.startsWith("\\\\")
+  ) {
+    return "broker";
+  }
+  const remote = /^([^:]+):.+$/.exec(destination);
+  return remote ? `${remote[1]}:broker` : "broker";
+}
+
 function asAckBody(body: unknown): AckBody | null {
   if (!hasExactAckType(body)
     || !Object.prototype.hasOwnProperty.call(body, "status")
@@ -125,6 +140,7 @@ export class SessionPeer {
   }>();
   /** Map of in-flight send ids → ACK resolver. Used by `sendWithAck()`. */
   private readonly ackPending = new Map<string, {
+    expectedFrom: string;
     resolve: (result: AckResult) => void;
     timer: ReturnType<typeof setTimeout>;
   }>();
@@ -210,7 +226,11 @@ export class SessionPeer {
         this.ackPending.delete(env.id);
         resolve({ status: "timeout", id: env.id });
       }, timeoutMs);
-      this.ackPending.set(env.id, { resolve, timer });
+      this.ackPending.set(env.id, {
+        expectedFrom: expectedAckSender(to),
+        resolve,
+        timer,
+      });
       this._writeEnvelope(env).catch(() => {
         const slot = this.ackPending.get(env.id);
         if (!slot) return;
@@ -415,15 +435,14 @@ export class SessionPeer {
     }
 
     // Reserve exact broker ACKs before generic correlation or handler dispatch.
-    // Cross-PC ACKs use a prefixed `<pcLabel>:broker` sender. Only a valid
-    // body with a correlation id may settle `sendWithAck`; all other exact
-    // broker ACKs are swallowed at this wire boundary.
+    // The sender is bound when the send begins: local sends accept only
+    // `broker`, while remote alias sends accept only `<alias>:broker`.
     const fromBroker = env.from === "broker" || env.from.endsWith(":broker");
     if (fromBroker && hasExactAckType(env.body)) {
       const ackBody = asAckBody(env.body);
       if (env.re !== null && ackBody) {
         const slot = this.ackPending.get(env.re);
-        if (slot) {
+        if (slot && slot.expectedFrom === env.from) {
           clearTimeout(slot.timer);
           this.ackPending.delete(env.re);
           slot.resolve({ status: ackBody.status, id: env.re, target: ackBody.target });

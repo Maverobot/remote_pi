@@ -29,9 +29,6 @@ pub(crate) fn decode_ed25519_public_key(encoded: &str) -> Result<[u8; 32], Publi
         .map_err(|_| PublicKeyDecodeError::BadLength { actual })
 }
 
-// Task 3 wires the canonical string into cache and routing lookups; Task 2
-// establishes and tests the shared boundary first.
-#[allow(dead_code)]
 pub(crate) fn canonical_ed25519_public_key(encoded: &str) -> Result<String, PublicKeyDecodeError> {
     Ok(STANDARD.encode(decode_ed25519_public_key(encoded)?))
 }

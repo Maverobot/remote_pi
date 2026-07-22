@@ -255,12 +255,26 @@ The shortid is the first 8 chars shown by `devices`.
 
 The relay is the network boundary. TLS protects transit, but the Relay can see
 routed plaintext protocol content and metadata; use a relay you trust or
-self-host. There is no systemwide or PC-mesh E2E guarantee.
+self-host. There is no systemwide or PC-mesh E2E guarantee. For Pi-to-Pi
+forwarding, the Relay currently permits a route when any correctly signed Owner
+blob lists both canonical Pi keys. That does not prove the Owner paired with or
+controls either Pi.
 
-### Upgrade order (Extension first)
+### Upgrade order (Relay 0.3 first, then Extension 0.6)
 
-Upgrade **every leader-capable Extension/MCP participant before the Relay**.
-Older Extensions can time out on newer trusted Relay transport errors.
+Upgrade the **Relay to 0.3 first**: an old Extension can consume the new
+Relay's UUID errors. Extension 0.6 carries a one-release legacy wire-label
+shim, so mixed new/old Extensions interoperate when both select the same unique
+colon-free signed nickname label, or when neither has one and both use the
+canonical standard-padded key prefix. Delimiter or collision cases, like
+divergent nickname views, are unsupported and may be silently dropped by the
+old receiver. Upgrade all Extension/MCP participants in one maintenance window.
+The shim does not replace the receiver-local aliases returned by `list_peers`;
+addresses remain opaque.
+
+Extension 0.6 accepts an old Relay's lowercase 32-hex trusted error ID only as
+a narrow shim for an old Relay or Relay rollback; that shim is not why
+Relay-first is safe.
 
 You have two options:
 

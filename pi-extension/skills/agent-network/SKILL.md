@@ -85,11 +85,12 @@ received in `from`. Parsing or rebuilding an address is unsafe for routing and
 must never be used for a security decision.
 
 The technical identity of a PC is its canonical 32-byte Ed25519 Pi public key.
-PC aliases are presentation and routing labels only: each receiving PC
-allocates aliases for its siblings independently, so two PCs can list the same
-sibling under different aliases. Never use an alias as proof of identity or
-for authorization; only the authenticated canonical public key has identity
-meaning.
+PC aliases are receiver-local presentation and routing labels only: each
+receiving PC allocates aliases for its siblings independently, so two PCs can
+list the same sibling under different aliases. Never use an alias as proof of
+identity or for authorization. The Relay currently permits a route when any
+correctly signed Owner blob lists both canonical Pi keys; that does not prove
+the Owner paired with or controls either Pi.
 
 You are excluded from the result — no need to filter yourself out.
 

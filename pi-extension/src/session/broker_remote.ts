@@ -9,6 +9,8 @@ import {
   type Envelope,
   envelope,
   isUuid,
+  parse,
+  serialize,
   uuidv7,
 } from "./envelope.js";
 import type { PiForwardClient } from "../transport/pi_forward_client.js";
@@ -22,11 +24,16 @@ import type {
   MeshTopologySnapshot,
   PiRoutingIdentity,
 } from "../mesh/siblings.js";
+import {
+  isBoundedPeerAddresses,
+  isBoundedPeerRoster,
+} from "./peer_limits.js";
 
 const CACHE_TTL_MS = 5 * 60_000;
 const PEERS_REQUEST_TIMEOUT_MS = 2_000;
 const REANNOUNCE_INTERVAL_MS = 2 * 60_000;
 const BROKER_NAME = "broker";
+const LEGACY_RELAY_ID_RE = /^[0-9a-f]{32}$/;
 
 export interface WirePeerInfo {
   cwd: string;
@@ -58,9 +65,12 @@ export interface BrokerRemoteLifecycle {
 
 interface RoutingState {
   readonly self: PiRoutingIdentity;
+  /** Receiver-local alias → canonical standard-padded pubkey. */
   readonly siblingByLabel: ReadonlyMap<string, string>;
   /** Canonical standard-padded pubkey → receiver-local alias. */
   readonly siblingByPubkey: ReadonlyMap<string, string>;
+  /** Canonical standard-padded pubkey → raw legacy cross-PC wire prefix. */
+  readonly siblingLegacyLabelByPubkey: ReadonlyMap<string, string>;
 }
 
 interface PeersUpdateBody {
@@ -90,6 +100,8 @@ type DropReason =
   | "unknown_from_pc"
   | "invalid_to"
   | "invalid_cross_pc_address"
+  | "invalid_envelope"
+  | "invalid_peers_update"
   | "invalid_relay_error";
 
 function compareAscii(left: string, right: string): number {
@@ -107,11 +119,22 @@ function validateAlias(alias: unknown, field: string): string {
   return alias;
 }
 
+function validateLegacyPcLabel(label: unknown, field: string): string {
+  if (typeof label !== "string" || label.length === 0) {
+    throw new Error(`mesh: ${field} is not a valid legacy PC label`);
+  }
+  return label;
+}
+
 function buildRoutingState(
   topology: MeshTopologySnapshot,
   expectedSelfPubkey?: string,
 ): RoutingState {
   const selfLabel = validateAlias(topology.self?.pcLabel, "self.pcLabel");
+  const selfLegacyPcLabel = validateLegacyPcLabel(
+    topology.self?.legacyPcLabel,
+    "self.legacyPcLabel",
+  );
   const selfPubkey = canonicalizeEd25519PublicKey(
     topology.self?.pcPubkey,
     "self public key",
@@ -126,6 +149,10 @@ function buildRoutingState(
         sibling?.pcLabel,
         `siblings[${index}].pcLabel`,
       ),
+      legacyPcLabel: validateLegacyPcLabel(
+        sibling?.legacyPcLabel,
+        `siblings[${index}].legacyPcLabel`,
+      ),
       pcPubkey: canonicalizeEd25519PublicKey(
         sibling?.pcPubkey,
         `siblings[${index}].pcPubkey`,
@@ -136,6 +163,7 @@ function buildRoutingState(
 
   const siblingByLabel = new Map<string, string>();
   const siblingByPubkey = new Map<string, string>();
+  const siblingLegacyLabelByPubkey = new Map<string, string>();
   for (const sibling of normalizedSiblings) {
     if (sibling.pcLabel === selfLabel) {
       throw new Error("mesh: sibling routing alias conflicts with self");
@@ -148,15 +176,18 @@ function buildRoutingState(
     }
     siblingByLabel.set(sibling.pcLabel, sibling.pcPubkey);
     siblingByPubkey.set(sibling.pcPubkey, sibling.pcLabel);
+    siblingLegacyLabelByPubkey.set(sibling.pcPubkey, sibling.legacyPcLabel);
   }
 
   return {
     self: Object.freeze({
       pcLabel: selfLabel,
       pcPubkey: selfPubkey,
+      legacyPcLabel: selfLegacyPcLabel,
     }),
     siblingByLabel,
     siblingByPubkey,
+    siblingLegacyLabelByPubkey,
   };
 }
 
@@ -287,11 +318,18 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     if (this.lifecycle !== "active") return;
     const refreshKeys = new Set(this.topologyRefreshNeeded);
     for (const [pcPubkey, alias] of replacement.siblingByPubkey) {
-      if (previous.siblingByPubkey.get(pcPubkey) !== alias) {
+      if (
+        previous.siblingByPubkey.get(pcPubkey) !== alias ||
+        previous.siblingLegacyLabelByPubkey.get(pcPubkey) !==
+          replacement.siblingLegacyLabelByPubkey.get(pcPubkey)
+      ) {
         refreshKeys.add(pcPubkey);
       }
     }
-    if (previous.self.pcLabel !== replacement.self.pcLabel) {
+    if (
+      previous.self.pcLabel !== replacement.self.pcLabel ||
+      previous.self.legacyPcLabel !== replacement.self.legacyPcLabel
+    ) {
       for (const pcPubkey of replacement.siblingByPubkey.keys()) {
         refreshKeys.add(pcPubkey);
       }
@@ -343,9 +381,16 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
 
   private _localPeersBody(): PeersUpdateBody {
     const detailed = this.broker.localPeerInfos();
+    if (!isBoundedPeerRoster(detailed)) {
+      throw new Error("mesh: local peer roster exceeds wire limits");
+    }
+    const peers = detailed.map((peer) => peer.address);
+    if (!isBoundedPeerAddresses(peers)) {
+      throw new Error("mesh: local peer addresses exceed wire limits");
+    }
     return {
       type: "peers_update",
-      peers: detailed.map((peer) => peer.address),
+      peers,
       peers_detailed: detailed.map((peer) => ({
         cwd: peer.cwd,
         name: peer.name,
@@ -357,7 +402,10 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
   private _remoteInfosByPubkey(pcPubkey: string): WirePeerInfo[] {
     const entry = this.remotePeers.get(pcPubkey);
     if (!entry) return [];
-    if (Date.now() - entry.ts > this.cacheTtlMs) return [];
+    if (Date.now() - entry.ts > this.cacheTtlMs) {
+      this.remotePeers.delete(pcPubkey);
+      return [];
+    }
     return entry.infos;
   }
 
@@ -411,7 +459,15 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     ) {
       return;
     }
-    const body = this._localPeersBody();
+    let body: PeersUpdateBody;
+    try {
+      body = this._localPeersBody();
+    } catch {
+      this._logMetadataOnly(
+        "[broker_remote] event=local_roster_dropped reason=wire_limits",
+      );
+      return;
+    }
     for (const pcPubkey of this.routing.siblingByPubkey.keys()) {
       this._sendControlEnvelope(pcPubkey, body);
     }
@@ -425,7 +481,6 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     if (!parsed) return false;
     const siblingKey = this.routing.siblingByLabel.get(parsed.pcLabel);
     if (siblingKey) return this._routeToCanonicalSibling(siblingKey, env);
-    if (parsed.pcLabel === this.routing.self.pcLabel) return false;
     return false;
   }
 
@@ -433,9 +488,13 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     siblingKey: string,
     env: Envelope,
   ): boolean {
+    const destination = parseAddress(env.to as string);
+    const legacyDestinationLabel = this.routing.siblingLegacyLabelByPubkey.get(siblingKey);
+    if (!destination || !legacyDestinationLabel) return false;
     const rewritten: Envelope = {
       ...env,
-      from: `${this.routing.self.pcLabel}:${env.from}`,
+      from: `${this.routing.self.legacyPcLabel}:${env.from}`,
+      to: `${legacyDestinationLabel}:${destination.peerName}`,
     };
     this.pi.sendEnvelopeToPi(siblingKey, rewritten);
     if (!this.remotePeers.has(siblingKey)) {
@@ -473,30 +532,61 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
       this._dropMetadataOnly("invalid_to");
       return;
     }
-    const senderLocalAddress = stripRequiredPcPrefix(env.from);
-    const targetLocalAddress = stripRequiredPcPrefix(env.to);
+    const senderLegacyLabel = this.routing.siblingLegacyLabelByPubkey.get(
+      canonicalFromPc,
+    );
+    const senderLocalAddress = stripKnownPcPrefix(
+      env.from,
+      senderLegacyLabel,
+    );
+    const targetLocalAddress = stripKnownPcPrefix(
+      env.to,
+      this.routing.self.legacyPcLabel,
+    );
     if (!senderLocalAddress || !targetLocalAddress) {
       this._dropMetadataOnly("invalid_cross_pc_address");
       return;
     }
 
-    const normalized: Envelope = {
-      ...env,
-      from: `${localAlias}:${senderLocalAddress}`,
-      to: targetLocalAddress,
-    };
-    const body = normalized.body as { type?: unknown } | null;
-    const bodyType = body && typeof body === "object" ? body.type : undefined;
-
-    if (bodyType === "peers_update") {
-      this._setRemoteCache(
-        canonicalFromPc,
-        _parsePeersUpdate(body as PeersUpdateBody),
-      );
+    let normalized: Envelope;
+    try {
+      // Cross-PC frames bypass the UDS parser. Round-trip their rewritten
+      // envelope before inspecting a body or mutating control/cache state.
+      normalized = parse(serialize({
+        ...env,
+        from: `${localAlias}:${senderLocalAddress}`,
+        to: targetLocalAddress,
+      }));
+    } catch {
+      this._dropMetadataOnly("invalid_envelope");
       return;
     }
-    if (bodyType === "peers_request") {
-      this._sendControlEnvelope(canonicalFromPc, this._localPeersBody());
+    if (typeof normalized.to !== "string") {
+      this._dropMetadataOnly("invalid_envelope");
+      return;
+    }
+    const body = normalized.body as { type?: unknown } | null;
+    const bodyType = body && typeof body === "object" ? body.type : undefined;
+    const isControlEndpoint = senderLocalAddress === "_broker_remote" &&
+      targetLocalAddress === "_broker_remote";
+
+    if (isControlEndpoint && bodyType === "peers_update") {
+      const infos = _parsePeersUpdate(body as PeersUpdateBody);
+      if (!infos) {
+        this._dropMetadataOnly("invalid_peers_update");
+        return;
+      }
+      this._setRemoteCache(canonicalFromPc, infos);
+      return;
+    }
+    if (isControlEndpoint && bodyType === "peers_request") {
+      try {
+        this._sendControlEnvelope(canonicalFromPc, this._localPeersBody());
+      } catch {
+        this._logMetadataOnly(
+          "[broker_remote] event=control_reply_failed reason=inventory_failure",
+        );
+      }
       return;
     }
 
@@ -506,11 +596,11 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     const ackBody: AckBody = {
       type: "ack",
       status,
-      target: normalized.to as string,
+      target: normalized.to,
     };
     const ackEnv: Envelope = {
-      from: `${this.routing.self.pcLabel}:${BROKER_NAME}`,
-      to: normalized.from,
+      from: `${this.routing.self.legacyPcLabel}:${BROKER_NAME}`,
+      to: env.from,
       id: uuidv7(),
       re: normalized.id,
       body: ackBody,
@@ -569,11 +659,19 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
   private _propagateTransportError(env: Envelope): void {
     const body = asTransportErrorBody(env.body);
     const target = typeof env.to === "string"
-      ? stripRequiredPcPrefix(env.to)
+      ? stripKnownPcPrefix(env.to, this.routing.self.legacyPcLabel)
       : null;
+    // Relay-first compatibility: only the authenticated Relay sentinel may
+    // carry its former lowercase 32-hex id shape. Normalize it locally before
+    // it reaches Broker's normal strict envelope boundary.
+    const normalizedId = LEGACY_RELAY_ID_RE.test(env.id)
+      ? `${env.id.slice(0, 8)}-${env.id.slice(8, 12)}-${env.id.slice(12, 16)}-${env.id.slice(16, 20)}-${env.id.slice(20)}`
+      : isUuid(env.id)
+        ? env.id
+        : null;
     if (
       env.from !== "_relay" ||
-      !isUuid(env.id) ||
+      !normalizedId ||
       !isUuid(env.re) ||
       !target ||
       target === "broadcast" ||
@@ -584,6 +682,7 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     }
     this.broker.injectFromRemote({
       ...env,
+      id: normalizedId,
       from: BROKER_NAME,
       to: target,
       body,
@@ -595,16 +694,16 @@ export class BrokerRemote implements RemoteRouter, BrokerRemoteLifecycle {
     body: PeersUpdateBody | PeersRequestBody,
   ): void {
     const env: Envelope = envelope(
-      `${this.routing.self.pcLabel}:_broker_remote`,
-      `${this._labelForPubkey(toPc) ?? "?"}:_broker_remote`,
+      `${this.routing.self.legacyPcLabel}:_broker_remote`,
+      `${this._legacyLabelForPubkey(toPc) ?? "?"}:_broker_remote`,
       body,
       null,
     );
     this.pi.sendEnvelopeToPi(toPc, env);
   }
 
-  private _labelForPubkey(pcPubkey: string): string | undefined {
-    return this.routing.siblingByPubkey.get(pcPubkey);
+  private _legacyLabelForPubkey(pcPubkey: string): string | undefined {
+    return this.routing.siblingLegacyLabelByPubkey.get(pcPubkey);
   }
 
   private _dropMetadataOnly(
@@ -637,27 +736,41 @@ export function parseAddress(
   };
 }
 
-function stripRequiredPcPrefix(value: unknown): string | null {
+function stripKnownPcPrefix(
+  value: unknown,
+  legacyPcLabel: string | undefined,
+): string | null {
   if (typeof value !== "string") return null;
+  const exactPrefix = legacyPcLabel === undefined ? undefined : `${legacyPcLabel}:`;
+  if (exactPrefix && value.startsWith(exactPrefix)) {
+    const remainder = value.slice(exactPrefix.length);
+    return remainder.length > 0 ? remainder : null;
+  }
+  // Legacy labels are display-only after Relay authentication. Preserve the
+  // old first-colon behavior for a divergent receiver view rather than using
+  // text as an additional authorization gate.
+  return stripRequiredPcPrefix(value);
+}
+
+function stripRequiredPcPrefix(value: string): string | null {
   const separator = value.indexOf(":");
   if (separator <= 0 || separator === value.length - 1) return null;
   return value.slice(separator + 1);
 }
 
-function _parsePeersUpdate(body: PeersUpdateBody): WirePeerInfo[] {
+function _parsePeersUpdate(body: PeersUpdateBody): WirePeerInfo[] | null {
+  const peers = body.peers;
+  if (!Array.isArray(peers) || !isBoundedPeerAddresses(peers)) return null;
+
   const detailed = body.peers_detailed;
   if (Array.isArray(detailed)) {
-    return detailed.filter(
-      (entry): entry is WirePeerInfo =>
-        !!entry &&
-        typeof entry === "object" &&
-        typeof (entry as WirePeerInfo).cwd === "string" &&
-        typeof (entry as WirePeerInfo).name === "string" &&
-        typeof (entry as WirePeerInfo).address === "string",
-    );
+    if (!isBoundedPeerRoster(detailed)) return null;
+    return detailed.map((entry) => ({
+      cwd: entry.cwd,
+      name: entry.name,
+      address: entry.address,
+    }));
   }
-  const peers = Array.isArray(body.peers) ? body.peers : [];
-  return peers
-    .filter((peer): peer is string => typeof peer === "string")
-    .map((address) => ({ cwd: "", name: address, address }));
+
+  return peers.map((address) => ({ cwd: "", name: address, address }));
 }
