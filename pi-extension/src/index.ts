@@ -1081,10 +1081,6 @@ export function _getPendingSteerIdsForTest(text: string): string[] {
   return _pendingSteers.filter((item) => item.text === key).map((item) => item.id);
 }
 
-export function _setAutoInitedForTest(value: boolean): void {
-  _autoInited = value;
-}
-
 export function _isPiSubagentChildForTest(): boolean {
   return _isPiSubagentChildProcess();
 }

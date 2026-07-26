@@ -242,7 +242,6 @@ const {
   _restartSupervisorCommand,
   _setDisposedForTest,
   _resetAutoInitedForTest,
-  _setAutoInitedForTest,
   _hasMeshNodeForTest,
   _getLockedNameForTest,
   _resetCwdLockForTest,
