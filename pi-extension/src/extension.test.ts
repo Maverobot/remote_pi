@@ -229,6 +229,7 @@ const {
   _getMessageBufferForTest,
   _setCurrentModelForTest,
   _setPiForTest,
+  _resetMeshMessageDrainForTest,
   _getCurrentTurnIdForTest,
   _getPendingSteerIdsForTest,
   _setAutoInitedForTest,
@@ -1013,64 +1014,244 @@ void _getActivePeerCountForTest;
 // ── agent-network mesh delivery ──────────────────────────────────────────────
 
 describe("agent-network mesh delivery", () => {
-  test("holds messages until agent_end listeners finish and starts one turn for the batch", async () => {
+  const envelope = (id: string): { id: string; from: string; re: null; body: { id: string } } => ({
+    id,
+    from: "/work/repo@worker",
+    re: null,
+    body: { id },
+  });
+  const meshAppends = (sendMessage: ReturnType<typeof vi.fn>) => sendMessage.mock.calls.filter(
+    ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-message"
+      && (options as { triggerTurn?: boolean }).triggerTurn === false,
+  );
+  const meshWakes = (sendMessage: ReturnType<typeof vi.fn>) => sendMessage.mock.calls.filter(
+    ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-wake"
+      && (options as { triggerTurn?: boolean }).triggerTurn === true,
+  );
+  const liveContext = (isIdle: () => boolean) => ({ isIdle });
+  const startSession = (harness: ReturnType<typeof captureEventHarness>, isIdle: () => boolean) => {
+    harness.handler("session_start")({ type: "session_start" }, liveContext(isIdle));
+  };
+
+  beforeEach(() => {
+    _setDisposedForTest(false);
+    _resetMeshMessageDrainForTest();
+    _setPiForTest(null);
+  });
+  afterEach(() => {
+    _resetMeshMessageDrainForTest();
+    _setPiForTest(null);
+    _setDisposedForTest(false);
+    vi.useRealTimers();
+  });
+
+  test("appends an idle FIFO batch once before one separate hidden follow-up wake", async () => {
     const harness = captureEventHarness();
     const sendMessage = vi.fn();
     _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
-    harness.handler("agent_start")({ type: "agent_start" });
+    startSession(harness, () => true);
 
-    _deliverMeshMessageToAgentForTest({
-      id: "mesh-message-1",
-      from: "/work/repo@reviewer",
-      re: null,
-      body: { status: "first" },
-    });
-    _deliverMeshMessageToAgentForTest({
-      id: "mesh-message-2",
-      from: "/work/repo@worker",
-      re: "mesh-message-1",
-      body: { status: "second" },
-    });
+    _deliverMeshMessageToAgentForTest(envelope("mesh-message-1"));
+    _deliverMeshMessageToAgentForTest(envelope("mesh-message-2"));
     await Promise.resolve();
 
-    expect(sendMessage).not.toHaveBeenCalled();
-
-    harness.handler("agent_end")({ type: "agent_end" });
-    expect(sendMessage).not.toHaveBeenCalled();
-
-    harness.handler("agent_start")({ type: "agent_start" });
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    expect(sendMessage).not.toHaveBeenCalled();
-
-    harness.handler("agent_end")({ type: "agent_end" });
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
-    expect(sendMessage).toHaveBeenCalledTimes(2);
-    expect(sendMessage.mock.calls[0]).toEqual([
-      expect.objectContaining({
-        customType: "remote-pi:mesh-message",
-        display: true,
-        content: expect.stringContaining("mesh-message-1"),
-      }),
-      { triggerTurn: false },
+    expect(meshAppends(sendMessage)).toHaveLength(2);
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("mesh-message-1"),
+      expect.stringContaining("mesh-message-2"),
     ]);
-    expect(sendMessage.mock.calls[1]).toEqual([
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+    expect(meshWakes(sendMessage)[0]).toEqual([
       expect.objectContaining({
-        customType: "remote-pi:mesh-message",
-        display: true,
-        content: expect.stringContaining("mesh-message-2"),
+        customType: "remote-pi:mesh-wake",
+        display: false,
       }),
       { triggerTurn: true, deliverAs: "followUp" },
     ]);
+    expect(sendMessage.mock.calls.map(([message]) => (message as { customType: string }).customType)).toEqual([
+      "remote-pi:mesh-message",
+      "remote-pi:mesh-message",
+      "remote-pi:mesh-wake",
+    ]);
+  });
 
-    harness.handler("agent_end")({ type: "agent_end" });
-    await new Promise<void>((resolve) => setTimeout(resolve, 5));
+  test("waits for live idle after agent_end before appending a FIFO batch", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    let idle = false;
+    const ctx = liveContext(() => idle);
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => idle);
+    harness.handler("agent_start")({ type: "agent_start" }, ctx);
+    _deliverMeshMessageToAgentForTest(envelope("deferred-1"));
+    _deliverMeshMessageToAgentForTest(envelope("deferred-2"));
+    await Promise.resolve();
+
+    harness.handler("agent_end")({ type: "agent_end" }, ctx);
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshAppends(sendMessage)).toHaveLength(0);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+
+    idle = true;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("deferred-1"),
+      expect.stringContaining("deferred-2"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+  });
+
+  test("does not drain after an unconfirmed wake timeout until the live session is idle", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    let idle = true;
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => idle);
+
+    _deliverMeshMessageToAgentForTest(envelope("first"));
+    await Promise.resolve();
+    idle = false; // Pi accepted the wake but has not delivered agent_start yet.
+    await vi.advanceTimersByTimeAsync(1_000);
+
+    _deliverMeshMessageToAgentForTest(envelope("second"));
+    await Promise.resolve();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("first"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+
+    idle = true;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("first"),
+      expect.stringContaining("second"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(2);
+  });
+
+  test("a synchronous wake rejection neither fabricates activity nor re-appends content on recovery", async () => {
+    const harness = captureEventHarness();
+    let rejectWake = true;
+    const sendMessage = vi.fn((message: { customType: string }) => {
+      if (message.customType === "remote-pi:mesh-wake" && rejectWake) {
+        throw new Error("prompt still active");
+      }
+    });
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => true);
+
+    _deliverMeshMessageToAgentForTest(envelope("first"));
+    await Promise.resolve();
+    expect(meshAppends(sendMessage)).toHaveLength(1);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+
+    rejectWake = false;
+    _deliverMeshMessageToAgentForTest(envelope("second"));
+    await Promise.resolve();
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("first"),
+      expect.stringContaining("second"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(2);
+  });
+
+  test("preserves an unsubmitted FIFO suffix after a synchronous partial append failure", async () => {
+    const harness = captureEventHarness();
+    let failSecondAppend = true;
+    const acceptedAppendContents: string[] = [];
+    const sendMessage = vi.fn((message: { customType: string; content?: string }) => {
+      if (message.customType === "remote-pi:mesh-message" && message.content?.includes("second") && failSecondAppend) {
+        throw new Error("append failed");
+      }
+      if (message.customType === "remote-pi:mesh-message") acceptedAppendContents.push(message.content ?? "");
+    });
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => true);
+
+    _deliverMeshMessageToAgentForTest(envelope("first"));
+    _deliverMeshMessageToAgentForTest(envelope("second"));
+    await Promise.resolve();
+    expect(acceptedAppendContents).toEqual([expect.stringContaining("first")]);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+
+    failSecondAppend = false;
+    _deliverMeshMessageToAgentForTest(envelope("third"));
+    await Promise.resolve();
+    expect(acceptedAppendContents).toEqual([
+      expect.stringContaining("first"),
+      expect.stringContaining("second"),
+      expect.stringContaining("third"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+  });
+
+  test("confirmed wakes release their token so the next post-end batch drains before the old timeout", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    let idle = true;
+    const ctx = liveContext(() => idle);
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => idle);
+
+    _deliverMeshMessageToAgentForTest(envelope("confirmed"));
+    await Promise.resolve();
+    idle = false;
+    harness.handler("agent_start")({ type: "agent_start" }, ctx);
+    _deliverMeshMessageToAgentForTest(envelope("after-confirmation"));
+    await Promise.resolve();
+    expect(meshAppends(sendMessage)).toHaveLength(1);
+
+    harness.handler("agent_end")({ type: "agent_end" }, ctx);
+    idle = true;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("confirmed"),
+      expect.stringContaining("after-confirmation"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(2);
+  });
+
+  test("shutdown invalidates stale settle work and a replacement drains new mesh work", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    let oldIdle = false;
+    const oldCtx = liveContext(() => oldIdle);
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => oldIdle);
+    harness.handler("agent_start")({ type: "agent_start" }, oldCtx);
+    _deliverMeshMessageToAgentForTest(envelope("old-session"));
+    await Promise.resolve();
+    harness.handler("agent_end")({ type: "agent_end" }, oldCtx);
+
+    await harness.handler("session_shutdown")({ type: "session_shutdown" });
+    oldIdle = true;
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(meshAppends(sendMessage)).toHaveLength(0);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+
+    // Model a fresh/rearmed replacement extension without exercising its root startup.
+    _setDisposedForTest(false);
+    let replacementIdle = true;
+    startSession(harness, () => replacementIdle);
+    _deliverMeshMessageToAgentForTest(envelope("replacement-session"));
+    await Promise.resolve();
+    expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
+      expect.stringContaining("replacement-session"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+    await harness.handler("session_shutdown")({ type: "session_shutdown" });
   });
 });
 
 // ── user_input mirroring (local terminal / RPC) ───────────────────────────────
 
 type AnyEvent = { type: string; [k: string]: unknown };
-type EventHandler = (event: AnyEvent) => unknown;
+type EventHandler = (event: AnyEvent, ctx?: unknown) => unknown;
 
 function captureEventHandler(eventName: string): EventHandler {
   let captured: EventHandler | undefined;

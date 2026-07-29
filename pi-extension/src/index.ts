@@ -877,9 +877,28 @@ let _queuedItems: AndroidQueuedItem[] = [];
 
 type MeshEnvelope = { id: string; from: string; re: string | null; body: unknown };
 let _pendingMeshMessages: MeshEnvelope[] = [];
+// This reflects Pi lifecycle events only. Mesh delivery must never infer that a
+// fire-and-forget wake started a run: Pi may reject that wake asynchronously.
 let _agentRunActive = false;
 let _agentRunGeneration = 0;
 let _meshDrainScheduled = false;
+let _meshDrainLifecycleGeneration = 0;
+let _meshAgentEndSettling = false;
+let _meshAgentEndSettleTimer: ReturnType<typeof setTimeout> | null = null;
+let _meshIdleRecheckTimer: ReturnType<typeof setTimeout> | null = null;
+type MeshDrainContext = Pick<ExtensionContext, "isIdle">;
+let _meshDrainContext: MeshDrainContext | null = null;
+let _meshDrainContextGeneration = 0;
+
+const MESH_WAKE_START_TIMEOUT_MS = 1_000;
+const MESH_IDLE_RECHECK_MS = 10;
+type MeshWakeRequest = {
+  token: number;
+  lifecycleGeneration: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+let _meshWakeRequest: MeshWakeRequest | null = null;
+let _meshWakeToken = 0;
 
 function _queuedStateMessage(): ServerMessage {
   const first = _queuedItems[0];
@@ -1016,6 +1035,11 @@ export function _resetAutoInitedForTest(): void { _autoInited = false; }
 
 /** Test-only: set the auto-init gate for lifecycle replacement tests. */
 export function _setAutoInitedForTest(value: boolean): void { _autoInited = value; }
+
+/** Test-only: discard mesh-drain work without allowing stale callbacks through. */
+export function _resetMeshMessageDrainForTest(): void {
+  _resetMeshMessageDrainState();
+}
 
 /** Test-only: true when this instance holds a live local-mesh node. */
 export function _hasMeshNodeForTest(): boolean { return _meshNode !== null; }
@@ -2248,9 +2272,16 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     });
   });
 
-  pi.on("agent_start", () => {
+  pi.on("agent_start", (_event, ctx) => {
+    _captureMeshDrainContext(ctx);
     _agentRunActive = true;
     _agentRunGeneration += 1;
+    _meshAgentEndSettling = false;
+    if (_meshAgentEndSettleTimer) {
+      clearTimeout(_meshAgentEndSettleTimer);
+      _meshAgentEndSettleTimer = null;
+    }
+    _clearMeshWakeRequest();
   });
 
   pi.on("message_start", (event) => {
@@ -2353,7 +2384,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     }
   });
 
-  pi.on("agent_end", () => {
+  pi.on("agent_end", (_event, ctx) => {
+    _captureMeshDrainContext(ctx);
     // Buffer is fed by `message_end`; here we only finalize the outbound
     // turn signal to every connected owner. No buffer mutation.
     if (_anyPeerActive() && _currentTurnId) {
@@ -2364,17 +2396,16 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     _lastConsumedSteerText = null;
     _maybeDrainQueuedItem();
 
-    // agent_end listeners finish before pi-agent-core clears its active run.
-    // Defer mesh delivery to the next event-loop turn so triggerTurn cannot
-    // collide with the prompt that emitted this event. A queued continuation
-    // may start first; its generation keeps the older timer from clearing the
-    // new run's busy flag.
+    // Pi remains internally active until its agent_end listeners return. Keep a
+    // distinct settling gate for that gap; activity itself is event-derived and
+    // becomes false immediately here. A continuation agent_start invalidates
+    // this callback before it can inject into the next active run.
+    _agentRunActive = false;
+    _meshAgentEndSettling = true;
+    if (_meshAgentEndSettleTimer) clearTimeout(_meshAgentEndSettleTimer);
+    const lifecycleGeneration = _meshDrainLifecycleGeneration;
     const endedGeneration = _agentRunGeneration;
-    setTimeout(() => {
-      if (_agentRunGeneration !== endedGeneration) return;
-      _agentRunActive = false;
-      _scheduleMeshMessageDrain();
-    }, 0);
+    _scheduleMeshAgentEndSettle(lifecycleGeneration, endedGeneration, 0);
   });
 
   // plan/34: the broker no longer gates delivery on busy state, so we no
@@ -2451,6 +2482,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     if (!_extensionUiBridge) {
       _extensionUiBridge = createExtensionUiBridge(pi, _broadcastToActive);
     }
+    _captureMeshDrainContext(ctx);
+    _scheduleMeshMessageDrain();
     // Rearm a reused-but-disposed instance. The session_shutdown teardown (below)
     // sets _disposed=true assuming the host re-evaluates THIS module fresh for the
     // replacement session, yielding a new instance with _disposed=false. Some hosts
@@ -2554,6 +2587,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     // module instances create their bridge in the factory.
     _extensionUiBridge?.dispose();
     _extensionUiBridge = null;
+    _resetMeshMessageDrainState();
     // Drop captured ctxs immediately. On module-reuse hosts the same instance
     // survives session replacement; leaving `_lastCtx` pointing at the now-
     // stale command ctx is what crashed pi in _refreshFooter on peer reconnect
@@ -4202,12 +4236,14 @@ function _wakeAgent(
  * Wake: we inject a CUSTOM message (role:"custom"), not a user message. The
  * SDK's `convertToLlm` maps custom → a user-role LLM message, so the agent
  * still sees + replies to it, but `message_end` does NOT buffer role:"custom",
- * so it never replays as `user_input` on session_sync. Mesh messages are held
- * until the current `agent_end` listeners finish, then appended as one batch
- * before a single turn starts. This avoids calling `prompt()` during the gap
- * where Pi has stopped streaming but the current agent run is still active.
- * `id` lets the LLM echo it via
- * `agent_send(..., re=<id>)`.
+ * so it never replays as `user_input` on session_sync. Idle envelopes can drain
+ * immediately; active envelopes wait through `agent_end` until a live session
+ * context reports idle, then append as one batch before a single turn starts.
+ *
+ * Pi #6744 residual TOCTOU: `ctx.isIdle()` and append/wake are not atomic. Pi
+ * can become active after the idle check; after an unconfirmed wake, already
+ * appended content is not replayed and may wait for a later envelope or ordinary
+ * turn. `id` lets the LLM echo it via `agent_send(..., re=<id>)`.
  */
 function _meshMessageForAgent(env: MeshEnvelope) {
   const bodyText = typeof env.body === "string" ? env.body : JSON.stringify(env.body);
@@ -4222,35 +4258,197 @@ function _meshMessageForAgent(env: MeshEnvelope) {
   };
 }
 
+function _clearMeshWakeRequest(): void {
+  const request = _meshWakeRequest;
+  if (!request) return;
+  if (request.timer) clearTimeout(request.timer);
+  _meshWakeRequest = null;
+}
+
+function _captureMeshDrainContext(ctx: MeshDrainContext): void {
+  _meshDrainContext = ctx;
+  _meshDrainContextGeneration += 1;
+  if (_meshIdleRecheckTimer) {
+    clearTimeout(_meshIdleRecheckTimer);
+    _meshIdleRecheckTimer = null;
+  }
+}
+
+/** Returns null when the captured session context is stale or unavailable. */
+function _readMeshContextIdle(
+  context: MeshDrainContext,
+  contextGeneration: number,
+): boolean | null {
+  if (_meshDrainContext !== context || _meshDrainContextGeneration !== contextGeneration) return null;
+  try {
+    return context.isIdle();
+  } catch {
+    // Extension runner contexts throw after session replacement. Do not let an
+    // old callback re-arm itself against a new session.
+    if (_meshDrainContext === context && _meshDrainContextGeneration === contextGeneration) {
+      _meshDrainContext = null;
+      _meshDrainContextGeneration += 1;
+    }
+    return null;
+  }
+}
+
+function _scheduleMeshAgentEndSettle(
+  lifecycleGeneration: number,
+  endedGeneration: number,
+  delay: number,
+): void {
+  if (_meshAgentEndSettleTimer) clearTimeout(_meshAgentEndSettleTimer);
+  const context = _meshDrainContext;
+  const contextGeneration = _meshDrainContextGeneration;
+  _meshAgentEndSettleTimer = setTimeout(() => {
+    _meshAgentEndSettleTimer = null;
+    if (
+      _meshDrainLifecycleGeneration !== lifecycleGeneration
+      || _agentRunGeneration !== endedGeneration
+      || !_meshAgentEndSettling
+      || !context
+    ) return;
+    const isIdle = _readMeshContextIdle(context, contextGeneration);
+    if (isIdle !== true) {
+      if (isIdle === false) _scheduleMeshAgentEndSettle(
+        lifecycleGeneration,
+        endedGeneration,
+        MESH_IDLE_RECHECK_MS,
+      );
+      return;
+    }
+    _meshAgentEndSettling = false;
+    _scheduleMeshMessageDrain();
+  }, delay);
+}
+
+function _scheduleMeshIdleRecheck(
+  lifecycleGeneration: number,
+  context: MeshDrainContext,
+  contextGeneration: number,
+): void {
+  if (_meshIdleRecheckTimer) return;
+  _meshIdleRecheckTimer = setTimeout(() => {
+    _meshIdleRecheckTimer = null;
+    if (_meshDrainLifecycleGeneration !== lifecycleGeneration) return;
+    const isIdle = _readMeshContextIdle(context, contextGeneration);
+    if (isIdle !== true) {
+      if (isIdle === false && _pendingMeshMessages.length > 0) {
+        _scheduleMeshIdleRecheck(lifecycleGeneration, context, contextGeneration);
+      }
+      return;
+    }
+    _scheduleMeshMessageDrain();
+  }, MESH_IDLE_RECHECK_MS);
+}
+
+function _resetMeshMessageDrainState(): void {
+  _meshDrainLifecycleGeneration += 1;
+  _meshDrainScheduled = false;
+  _meshAgentEndSettling = false;
+  if (_meshAgentEndSettleTimer) {
+    clearTimeout(_meshAgentEndSettleTimer);
+    _meshAgentEndSettleTimer = null;
+  }
+  if (_meshIdleRecheckTimer) {
+    clearTimeout(_meshIdleRecheckTimer);
+    _meshIdleRecheckTimer = null;
+  }
+  _clearMeshWakeRequest();
+  _pendingMeshMessages = [];
+  _agentRunActive = false;
+  _meshDrainContext = null;
+  _meshDrainContextGeneration += 1;
+}
+
+function _meshWakeMessageForAgent() {
+  return {
+    customType: "remote-pi:mesh-wake",
+    content: "Process any already-appended agent-network messages.",
+    display: false,
+  };
+}
+
+function _requestMeshWake(pi: ExtensionAPI, lifecycleGeneration: number): void {
+  const request: MeshWakeRequest = {
+    token: ++_meshWakeToken,
+    lifecycleGeneration,
+    timer: null,
+  };
+  // Install before sending because a test/runtime bridge can synchronously emit
+  // agent_start while sendMessage is on the stack.
+  _meshWakeRequest = request;
+  try {
+    pi.sendMessage(_meshWakeMessageForAgent(), { triggerTurn: true, deliverAs: "followUp" });
+  } catch (err) {
+    if (_meshWakeRequest?.token === request.token) _meshWakeRequest = null;
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`[remote-pi] queued mesh wake failed: ${detail}`);
+    _safeNotify(`[remote-pi] failed to wake for queued mesh messages: ${detail}`, "error");
+    return;
+  }
+
+  // A re-entrant agent_start already confirmed this wake and cleared its record.
+  if (_meshWakeRequest?.token !== request.token) return;
+  request.timer = setTimeout(() => {
+    if (
+      _meshWakeRequest?.token !== request.token
+      || _meshDrainLifecycleGeneration !== request.lifecycleGeneration
+    ) return;
+    _meshWakeRequest = null;
+    // Do not replay already-appended content: no agent_start is ambiguous. A
+    // later envelope, ordinary turn, or independently started turn recovers it.
+    _scheduleMeshMessageDrain();
+  }, MESH_WAKE_START_TIMEOUT_MS);
+}
+
 function _scheduleMeshMessageDrain(): void {
   if (_meshDrainScheduled || _pendingMeshMessages.length === 0) return;
   _meshDrainScheduled = true;
+  const lifecycleGeneration = _meshDrainLifecycleGeneration;
   queueMicrotask(() => {
     _meshDrainScheduled = false;
     const pi = _pi;
-    if (_agentRunActive || !pi || _pendingMeshMessages.length === 0) return;
+    if (
+      _meshDrainLifecycleGeneration !== lifecycleGeneration
+      || _agentRunActive
+      || _meshAgentEndSettling
+      || _meshWakeRequest
+      || !pi
+      || _pendingMeshMessages.length === 0
+    ) return;
+
+    const context = _meshDrainContext;
+    const contextGeneration = _meshDrainContextGeneration;
+    if (!context) return;
+    const isIdle = _readMeshContextIdle(context, contextGeneration);
+    if (isIdle !== true) {
+      if (isIdle === false) {
+        _scheduleMeshIdleRecheck(lifecycleGeneration, context, contextGeneration);
+      }
+      return;
+    }
 
     const batch = _pendingMeshMessages.splice(0);
-    let delivered = 0;
-    _agentRunActive = true;
+    let submitted = 0;
     try {
-      batch.forEach((env, index) => {
-        const isLast = index === batch.length - 1;
-        pi.sendMessage(
-          _meshMessageForAgent(env),
-          isLast
-            ? { triggerTurn: true, deliverAs: "followUp" }
-            : { triggerTurn: false },
-        );
-        delivered += 1;
-      });
+      for (const env of batch) {
+        pi.sendMessage(_meshMessageForAgent(env), { triggerTurn: false });
+        submitted += 1;
+      }
     } catch (err) {
-      _agentRunActive = false;
-      _pendingMeshMessages = [...batch.slice(delivered), ..._pendingMeshMessages];
+      // Only the unsubmitted suffix is still ours to retry; preserve its FIFO
+      // position ahead of messages that arrived while this batch was submitted.
+      _pendingMeshMessages = [...batch.slice(submitted), ..._pendingMeshMessages];
       const detail = err instanceof Error ? err.message : String(err);
       console.error(`[remote-pi] queued mesh delivery failed: ${detail}`);
       _safeNotify(`[remote-pi] failed to process queued mesh messages: ${detail}`, "error");
+      return;
     }
+
+    if (submitted === 0 || _meshDrainLifecycleGeneration !== lifecycleGeneration) return;
+    _requestMeshWake(pi, lifecycleGeneration);
   });
 }
 
@@ -4267,8 +4465,9 @@ function _deliverMeshMessageToAgent(env: MeshEnvelope): void {
   });
   _broadcastToActive({ type: "tool_result", tool_call_id: toolCallId, result: { from: env.from, message: bodyText } });
 
-  if (!_pi) {
-    console.error(`[remote-pi] agent-network message from "${env.from}": agent session not bound yet — message dropped`);
+  if (!_pi || _disposed) {
+    const unavailableReason = !_pi ? "agent session not bound yet" : "agent session is shutting down";
+    console.error(`[remote-pi] agent-network message from "${env.from}": ${unavailableReason} — message dropped`);
     return;
   }
   _pendingMeshMessages.push(env);
