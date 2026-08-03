@@ -148,8 +148,9 @@ class _InputBarState extends State<InputBar> {
   }
 
   void _submit() {
+    if (widget.attachment?.state is AttachmentPicking) return;
     final text = _controller.text.trim();
-    // Plan/30 — an attached image makes an empty-caption send valid.
+    // An attached image makes an empty-caption send valid.
     final hasImage = widget.attachment?.hasImage ?? false;
     if (text.isEmpty && !hasImage) return;
     _controller.clear();
@@ -299,17 +300,19 @@ class _InputBarState extends State<InputBar> {
         voiceState is VoiceUnavailable &&
         voiceState.reason == VoiceUnavailableReason.unsupported;
 
-    // Plan/30 — attachment.
-    final hasImage = attachState is AttachmentAttached;
+    // Ordered image attachments. Picking preserves the current preview list.
+    final attachedImages = attachState?.images ?? const <PickedImage>[];
+    final pickingImages = attachState is AttachmentPicking;
+    final hasImage = attachedImages.isNotEmpty;
     final visionBlocked = attachState?.attachBlockedByVision ?? false;
     final hasContent = !_empty || hasImage;
     final attachEnabled =
         widget.onOpenAttach != null &&
         canInteract &&
-        !widget.streaming &&
         !showStrip &&
         !visionBlocked &&
-        !hasImage;
+        !pickingImages &&
+        attachedImages.length < AttachmentViewModel.maxImages;
 
     final showQuickActions =
         _empty &&
@@ -341,9 +344,10 @@ class _InputBarState extends State<InputBar> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (hasImage)
-                _AttachmentPreview(
-                  image: attachState.image,
-                  onRemove: widget.attachment!.removeImage,
+                _AttachmentPreviewStrip(
+                  images: attachedImages,
+                  removalEnabled: !pickingImages,
+                  onRemove: widget.attachment!.removeImageAt,
                 ),
               for (final item in widget.queuedMessages)
                 _QueuedMessagePreview(
@@ -436,7 +440,7 @@ class _InputBarState extends State<InputBar> {
                   _ComposerActionButton(
                     streaming: widget.streaming,
                     hasContent: hasContent,
-                    disabled: widget.disabled,
+                    disabled: widget.disabled || pickingImages,
                     onSendText: _submit,
                     onCancel: widget.onCancel,
                     onStartAudio: widget.onStartAudio,
@@ -612,9 +616,8 @@ class _InlineStopButton extends StatelessWidget {
   }
 }
 
-/// Plan/30 — the attach (paperclip) button. Always visible; greyed + inert
-/// when [enabled] is false (offline/streaming, a text-only model #9, or an
-/// image is already attached).
+/// The attach button stays available during a working turn and while the
+/// current ordered image set remains below its cap.
 class _AttachButton extends StatelessWidget {
   const _AttachButton({required this.enabled, required this.onTap});
 
@@ -644,41 +647,95 @@ class _AttachButton extends StatelessWidget {
   }
 }
 
-/// Plan/30 — the composer image preview: a rounded thumbnail with an "X" to
-/// discard before sending (decision #4).
-class _AttachmentPreview extends StatelessWidget {
-  const _AttachmentPreview({required this.image, required this.onRemove});
+class _AttachmentPreviewStrip extends StatelessWidget {
+  const _AttachmentPreviewStrip({
+    required this.images,
+    required this.removalEnabled,
+    required this.onRemove,
+  });
 
-  final PickedImage image;
-  final VoidCallback onRemove;
+  final List<PickedImage> images;
+  final bool removalEnabled;
+  final void Function(int index) onRemove;
 
   @override
   Widget build(BuildContext context) {
+    final atLimit = images.length >= AttachmentViewModel.maxImages;
     return Padding(
-      key: const Key('attach-preview'),
+      key: const Key('attach-preview-strip'),
       padding: const EdgeInsets.only(left: 4, bottom: 10),
-      child: SizedBox(
-        width: 84,
-        height: 84,
-        child: Stack(
-          clipBehavior: Clip.none,
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.memory(
-                image.bytes,
-                width: 72,
-                height: 72,
-                fit: BoxFit.cover,
-                gaplessPlayback: true,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            height: 78,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: images.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (context, index) => _AttachmentPreview(
+                key: Key('attach-preview-$index'),
+                image: images[index],
+                removeKey: Key('attach-remove-$index'),
+                onRemove: removalEnabled ? () => onRemove(index) : null,
               ),
             ),
-            Positioned(
-              top: -4,
-              right: 8,
-              child: GestureDetector(
-                key: const Key('attach-remove'),
-                onTap: onRemove,
+          ),
+          const SizedBox(height: 2),
+          Text(
+            atLimit
+                ? '${images.length}/10 images · limit reached'
+                : '${images.length}/10 images',
+            key: const Key('attach-image-count'),
+            style: context.typo.sansBody.copyWith(
+              color: atLimit ? context.colors.warning : context.colors.muted,
+              fontSize: 11,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AttachmentPreview extends StatelessWidget {
+  const _AttachmentPreview({
+    super.key,
+    required this.image,
+    required this.removeKey,
+    required this.onRemove,
+  });
+
+  final PickedImage image;
+  final Key removeKey;
+  final VoidCallback? onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: 78,
+      height: 78,
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: Image.memory(
+              image.bytes,
+              width: 72,
+              height: 72,
+              fit: BoxFit.cover,
+              gaplessPlayback: true,
+            ),
+          ),
+          Positioned(
+            top: -4,
+            right: 0,
+            child: GestureDetector(
+              key: removeKey,
+              onTap: onRemove,
+              child: Opacity(
+                opacity: onRemove == null ? 0.35 : 1,
                 child: Container(
                   decoration: BoxDecoration(
                     color: Colors.black.withValues(alpha: 0.75),
@@ -694,8 +751,8 @@ class _AttachmentPreview extends StatelessWidget {
                 ),
               ),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }

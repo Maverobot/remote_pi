@@ -187,6 +187,59 @@ void main() {
     },
   );
 
+  test(
+    'multi-image steer keeps image order and preserves the active turn target',
+    () async {
+      final s = await setup();
+      s.ch.push(UserInput(id: 'u1', text: 'primary'));
+      await _settle();
+      final activeStreaming = s.sync.streaming;
+
+      await s.sync.sendMessage(
+        '',
+        images: const [
+          MessageImage(data: 'FIRST', mime: 'image/jpeg'),
+          MessageImage(data: 'SECOND', mime: 'image/png'),
+        ],
+        streamingBehavior: UserMessageStreamingBehavior.steer,
+      );
+      await _settle();
+
+      final sent = s.ch.sent.whereType<UserMessage>().last;
+      expect(sent.images?.map((image) => image.data), ['FIRST', 'SECOND']);
+      final row = messages(s.epk).singleWhere((record) => record.id == sent.id);
+      expect(row.images.map((image) => image.data), ['FIRST', 'SECOND']);
+      expect(s.sync.workingReplyTo, 'u1');
+      expect(s.sync.streaming, same(activeStreaming));
+      expect(s.sync.isWorking, isTrue);
+
+      s.ch.push(
+        UserInput(
+          id: sent.id,
+          text: '',
+          images: const [
+            WireImage(data: 'FIRST', mime: 'image/jpeg'),
+            WireImage(data: 'SECOND', mime: 'image/png'),
+          ],
+          streamingBehavior: UserMessageStreamingBehavior.steer,
+        ),
+      );
+      await _settle();
+
+      final confirmed = messages(
+        s.epk,
+      ).singleWhere((record) => record.id == sent.id);
+      expect(confirmed.pending, isFalse);
+      expect(confirmed.images.map((image) => image.data), ['FIRST', 'SECOND']);
+      expect(s.sync.workingReplyTo, 'u1');
+      expect(s.sync.streaming, same(activeStreaming));
+      expect(s.sync.isWorking, isTrue);
+
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
   test('steer echo confirms row without replacing working turn', () async {
     final s = await setup();
     s.ch.push(UserInput(id: 'u1', text: 'primary'));
@@ -1033,6 +1086,36 @@ void main() {
     );
 
     await sub.cancel();
+    s.conn.dispose();
+    s.sync.dispose();
+  });
+
+  test('session_history retains every user image in stable order', () async {
+    final s = await setup();
+    s.ch.push(
+      SessionHistory(
+        inReplyTo: 'images-history',
+        sessionStartedAt: 0,
+        eos: true,
+        events: const [
+          UserInputEvt(
+            ts: 1,
+            id: 'u-images',
+            text: 'album',
+            images: [
+              WireImage(data: 'FIRST', mime: 'image/jpeg'),
+              WireImage(data: 'SECOND', mime: 'image/png'),
+            ],
+          ),
+        ],
+      ),
+    );
+    await _settle();
+
+    expect(messages(s.epk).single.images.map((image) => image.data), [
+      'FIRST',
+      'SECOND',
+    ]);
     s.conn.dispose();
     s.sync.dispose();
   });

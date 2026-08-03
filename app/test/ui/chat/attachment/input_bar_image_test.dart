@@ -8,6 +8,7 @@ import 'package:app/data/actions/actions_repository.dart';
 import 'package:app/data/images/image_picker_service.dart';
 import 'package:app/domain/session_state.dart';
 import 'package:app/protocol/protocol.dart';
+import 'package:app/ui/chat/attachment/states/attachment_state.dart';
 import 'package:app/ui/chat/attachment/viewmodels/attachment_viewmodel.dart';
 import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:flutter/material.dart';
@@ -21,10 +22,16 @@ final _pngBytes = base64Decode(
 
 class _FakePicker implements IImagePickerService {
   PickedImage next = PickedImage(bytes: _pngBytes, mime: 'image/jpeg');
+  List<PickedImage>? gallery;
+  Completer<List<PickedImage>>? delayedGallery;
   @override
   Future<PickedImage?> pickFromCamera() async => next;
   @override
-  Future<PickedImage?> pickFromGallery() async => next;
+  Future<List<PickedImage>> pickFromGallery({int limit = 10}) async {
+    final delayed = delayedGallery;
+    if (delayed != null) return delayed.future;
+    return (gallery ?? [next]).take(limit).toList();
+  }
 }
 
 class _FakeActions implements IActionsRepository {
@@ -65,7 +72,12 @@ void main() {
 
   tearDown(() => vm.dispose());
 
-  Future<void> pumpBar(WidgetTester tester, {bool channelOpen = true}) {
+  Future<void> pumpBar(
+    WidgetTester tester, {
+    bool channelOpen = true,
+    bool streaming = false,
+    VoidCallback? onCancel,
+  }) {
     return tester.pumpWidget(
       MaterialApp(
         home: Scaffold(
@@ -75,6 +87,8 @@ void main() {
               onSend: (text) {},
               attachment: vm,
               onOpenAttach: channelOpen ? () {} : null,
+              streaming: streaming,
+              onCancel: onCancel,
             ),
           ),
         ),
@@ -119,34 +133,115 @@ void main() {
     expect(btn.onPressed, isNull);
   });
 
-  testWidgets('picking shows the preview + send icon; X removes it', (
+  testWidgets('multi-preview strip preserves order and removes one image', (
     tester,
   ) async {
+    picker.gallery = [
+      PickedImage(bytes: _pngBytes, mime: 'image/jpeg'),
+      PickedImage(bytes: _pngBytes, mime: 'image/jpeg'),
+    ];
     await pumpBar(tester);
     await tester.pump();
 
     await vm.pickFromGallery();
     await tester.pump();
 
-    expect(find.byKey(const Key('attach-preview')), findsOneWidget);
-    expect(find.byIcon(LucideIcons.send600), findsOneWidget); // send-mode (#6)
-    // Attach button greys out while an image is attached (one max, #4).
+    expect(find.byKey(const Key('attach-preview-strip')), findsOneWidget);
+    expect(find.byKey(const Key('attach-preview-0')), findsOneWidget);
+    expect(find.byKey(const Key('attach-preview-1')), findsOneWidget);
+    expect(find.byIcon(LucideIcons.send600), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('input-bar-attach')))
+          .onPressed,
+      isNotNull,
+      reason: 'more images can be appended below the cap',
+    );
+
+    await tester.tap(find.byKey(const Key('attach-remove-0')));
+    await tester.pump();
+    expect(find.byKey(const Key('attach-preview-0')), findsOneWidget);
+    expect(find.byKey(const Key('attach-preview-1')), findsNothing);
+  });
+
+  testWidgets('preview removal and attach are disabled while picking', (
+    tester,
+  ) async {
+    await pumpBar(tester);
+    await tester.pump();
+    await vm.pickFromGallery();
+    await tester.pump();
+
+    final delayed = Completer<List<PickedImage>>();
+    picker.delayedGallery = delayed;
+    final inFlight = vm.pickFromGallery();
+    await tester.pump();
+
+    expect(vm.state, isA<AttachmentPicking>());
     expect(
       tester
           .widget<IconButton>(find.byKey(const Key('input-bar-attach')))
           .onPressed,
       isNull,
     );
+    expect(
+      tester
+          .widget<GestureDetector>(find.byKey(const Key('attach-remove-0')))
+          .onTap,
+      isNull,
+    );
 
-    await tester.tap(find.byKey(const Key('attach-remove')));
+    delayed.complete([picker.next]);
+    await inFlight;
     await tester.pump();
-    expect(find.byKey(const Key('attach-preview')), findsNothing);
+    expect(vm.imageCount, 2);
+  });
+
+  testWidgets(
+    'attach stays enabled while streaming and image content keeps Stop',
+    (tester) async {
+      await pumpBar(tester, streaming: true, onCancel: () {});
+      await tester.pump();
+      expect(
+        tester
+            .widget<IconButton>(find.byKey(const Key('input-bar-attach')))
+            .onPressed,
+        isNotNull,
+      );
+
+      await vm.pickFromGallery();
+      await tester.pumpAndSettle();
+      expect(find.byIcon(LucideIcons.send600), findsOneWidget);
+      expect(find.byKey(const Key('input-bar-inline-stop')), findsOneWidget);
+    },
+  );
+
+  testWidgets('the ten-image cap is visible and disables further attachment', (
+    tester,
+  ) async {
+    picker.gallery = List.filled(
+      AttachmentViewModel.maxImages,
+      PickedImage(bytes: _pngBytes, mime: 'image/jpeg'),
+    );
+    await pumpBar(tester);
+    await tester.pump();
+
+    await vm.pickFromGallery();
+    await tester.pump();
+
+    expect(find.text('10/10 images · limit reached'), findsOneWidget);
+    expect(
+      tester
+          .widget<IconButton>(find.byKey(const Key('input-bar-attach')))
+          .onPressed,
+      isNull,
+    );
   });
 
   testWidgets(
     'send with an attached image + empty caption dispatches the image',
     (tester) async {
-      MessageImage? sent;
+      List<MessageImage>? sent;
       String? sentText;
       await tester.pumpWidget(
         MaterialApp(
@@ -158,7 +253,7 @@ void main() {
                 onOpenAttach: () {},
                 onSend: (text) {
                   sentText = text;
-                  sent = vm.takeImageForSend(); // mirrors chat_page wiring
+                  sent = vm.takeImagesForSend(); // mirrors chat_page wiring
                 },
               ),
             ),
@@ -174,8 +269,8 @@ void main() {
       await tester.pump();
 
       expect(sentText, '');
-      expect(sent, isNotNull);
-      expect(sent!.mime, 'image/jpeg');
+      expect(sent, hasLength(1));
+      expect(sent!.single.mime, 'image/jpeg');
     },
   );
 }

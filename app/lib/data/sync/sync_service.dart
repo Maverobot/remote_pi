@@ -178,9 +178,13 @@ class SyncService extends Service {
 
   Future<void> sendMessage(
     String text, {
-    MessageImage? image,
+    List<MessageImage> images = const [],
     UserMessageStreamingBehavior? streamingBehavior,
   }) async {
+    if (images.length > 10) {
+      throw ArgumentError.value(images.length, 'images', 'maximum is 10');
+    }
+    final immutableImages = List<MessageImage>.unmodifiable(images);
     final epk = _activeEpk;
     final id = _newId();
     final now = DateTime.now();
@@ -195,14 +199,18 @@ class SyncService extends Service {
           seq: seq,
           role: MsgRole.user,
           text: text,
-          image: image,
+          images: immutableImages,
           ts: now,
           pending: true,
           steering: isSteer,
         ),
       );
       if (!isSteer) {
-        _setWorking(true, preview: _preview(text, image), replyTo: id);
+        _setWorking(
+          true,
+          preview: _preview(text, immutableImages),
+          replyTo: id,
+        );
       }
       // Arm the no-echo backstop for this row. The timeout is keyed off the
       // row's `ts`, NOT online-ness: an offline "held pending" send is reaped
@@ -228,15 +236,18 @@ class SyncService extends Service {
     if (!isSteer) {
       _emitStreaming(StreamingMessage(inReplyTo: id));
     }
-    debugPrint('[msg-send] id=$id text=${_preview(text, image)}');
+    debugPrint('[msg-send] id=$id text=${_preview(text, immutableImages)}');
     await ch.send(
       UserMessage(
         id: id,
         text: text,
         streamingBehavior: streamingBehavior,
-        images: image == null
+        images: immutableImages.isEmpty
             ? null
-            : [WireImage(data: image.data, mime: image.mime)],
+            : [
+                for (final image in immutableImages)
+                  WireImage(data: image.data, mime: image.mime),
+              ],
       ),
     );
   }
@@ -565,7 +576,7 @@ class SyncService extends Service {
       case UserInput(
         :final id,
         :final text,
-        :final image,
+        :final images,
         :final streamingBehavior,
       ):
         // Echo dedupes against the optimistic row (same id): confirm it
@@ -590,9 +601,10 @@ class SyncService extends Service {
                   seq: seq,
                   role: MsgRole.user,
                   text: text,
-                  image: image == null
-                      ? null
-                      : MessageImage(data: image.data, mime: image.mime),
+                  images: [
+                    for (final image in images)
+                      MessageImage(data: image.data, mime: image.mime),
+                  ],
                   ts: DateTime.now(),
                 ),
         );
@@ -924,16 +936,17 @@ class SyncService extends Service {
     var seq = 0;
     for (final e in events) {
       switch (e) {
-        case UserInputEvt(:final id, :final text, :final image):
+        case UserInputEvt(:final id, :final text, :final images):
           out.add(
             MessageRecord(
               id: id,
               seq: seq++,
               role: MsgRole.user,
               text: text,
-              image: image == null
-                  ? null
-                  : MessageImage(data: image.data, mime: image.mime),
+              images: [
+                for (final image in images)
+                  MessageImage(data: image.data, mime: image.mime),
+              ],
               ts: DateTime.fromMillisecondsSinceEpoch(e.ts),
             ),
           );
@@ -1391,8 +1404,10 @@ class SyncService extends Service {
     return <String, dynamic>{};
   }
 
-  static String _preview(String text, MessageImage? image) {
-    if (text.isEmpty && image != null) return '📷 Image';
+  static String _preview(String text, List<MessageImage> images) {
+    if (text.isEmpty && images.isNotEmpty) {
+      return images.length == 1 ? '📷 Image' : '📷 ${images.length} images';
+    }
     return text.length <= 80 ? text : '${text.substring(0, 80)}…';
   }
 

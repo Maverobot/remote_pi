@@ -363,13 +363,20 @@ void main() {
       final originalTarget = vm.cancelTargetId;
       expect(originalTarget, 'u1');
 
-      await vm.sendMessage('steer follow-up');
+      await vm.sendMessage(
+        'steer follow-up',
+        images: const [
+          MessageImage(data: 'FIRST', mime: 'image/jpeg'),
+          MessageImage(data: 'SECOND', mime: 'image/png'),
+        ],
+      );
       await Future<void>.delayed(const Duration(milliseconds: 20));
 
       final sent = ch.sent.whereType<UserMessage>().lastWhere(
         (m) => m.text == 'steer follow-up',
       );
       expect(sent.streamingBehavior, UserMessageStreamingBehavior.steer);
+      expect(sent.images?.map((image) => image.data), ['FIRST', 'SECOND']);
       expect(vm.cancelTargetId, equals(originalTarget));
 
       vm.dispose();

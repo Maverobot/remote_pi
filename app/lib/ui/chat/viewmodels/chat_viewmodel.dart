@@ -313,14 +313,14 @@ class ChatViewModel extends ViewModel<ChatState> {
 
   // --- Commands (writer = SyncService; lifecycle = ConnectionManager) ---
 
-  Future<void> sendMessage(String text, {MessageImage? image}) =>
-      _sync.sendMessage(
-        text,
-        image: image,
-        streamingBehavior: isWorking
-            ? UserMessageStreamingBehavior.steer
-            : null,
-      );
+  Future<void> sendMessage(
+    String text, {
+    List<MessageImage> images = const [],
+  }) => _sync.sendMessage(
+    text,
+    images: images,
+    streamingBehavior: isWorking ? UserMessageStreamingBehavior.steer : null,
+  );
 
   Future<void> cancel(String targetId) => _sync.cancel(targetId);
 

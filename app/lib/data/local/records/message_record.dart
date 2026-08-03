@@ -14,8 +14,8 @@ class MessageRecord {
   final MsgRole role;
   final String text;
 
-  /// Plan/30 — attached image (user messages only).
-  final MessageImage? image;
+  /// Ordered attached images (user messages only).
+  final List<MessageImage> images;
 
   /// Tool request+result collapsed into one row (tool messages only).
   final ToolEventData? tool;
@@ -33,24 +33,24 @@ class MessageRecord {
   /// Plan/32 — tokens reclaimed by a compaction (compaction rows only).
   final int? tokensBefore;
 
-  const MessageRecord({
+  MessageRecord({
     required this.id,
     required this.seq,
     required this.role,
     this.text = '',
-    this.image,
+    List<MessageImage> images = const [],
     this.tool,
     this.askUser,
     required this.ts,
     this.pending = false,
     this.steering = false,
     this.tokensBefore,
-  });
+  }) : images = List.unmodifiable(images);
 
   MessageRecord copyWith({
     int? seq,
     String? text,
-    MessageImage? image,
+    List<MessageImage>? images,
     ToolEventData? tool,
     AskUserPromptData? askUser,
     bool? pending,
@@ -60,7 +60,7 @@ class MessageRecord {
     seq: seq ?? this.seq,
     role: role,
     text: text ?? this.text,
-    image: image ?? this.image,
+    images: images ?? this.images,
     tool: tool ?? this.tool,
     askUser: askUser ?? this.askUser,
     ts: ts,
@@ -74,7 +74,10 @@ class MessageRecord {
     'seq': seq,
     'role': role.name,
     'text': text,
-    if (image != null) 'image': {'data': image!.data, 'mime': image!.mime},
+    if (images.isNotEmpty)
+      'images': [
+        for (final image in images) {'data': image.data, 'mime': image.mime},
+      ],
     if (tool != null) 'tool': tool!.toJson(),
     if (askUser != null) 'ask_user': askUser!.toJson(),
     'ts': ts.millisecondsSinceEpoch,
@@ -84,7 +87,6 @@ class MessageRecord {
   };
 
   factory MessageRecord.fromJson(Map<String, dynamic> j) {
-    final imageRaw = j['image'];
     final toolRaw = j['tool'];
     final askUserRaw = j['ask_user'];
     return MessageRecord(
@@ -95,12 +97,7 @@ class MessageRecord {
         orElse: () => MsgRole.assistant,
       ),
       text: (j['text'] as String?) ?? '',
-      image: imageRaw is Map
-          ? MessageImage(
-              data: imageRaw['data'] as String,
-              mime: imageRaw['mime'] as String,
-            )
-          : null,
+      images: _imagesFromJson(j),
       tool: toolRaw is Map
           ? ToolEventData.fromJson(toolRaw.cast<String, dynamic>())
           : null,
@@ -123,7 +120,7 @@ class MessageRecord {
           text: text,
           status: pending ? UserMsgStatus.pending : UserMsgStatus.confirmed,
           steering: steering,
-          image: image,
+          images: images,
         );
       case MsgRole.assistant:
         return AssistantMsg(id: id, text: text);
@@ -156,6 +153,30 @@ class MessageRecord {
         );
     }
   }
+}
+
+List<MessageImage> _imagesFromJson(Map<String, dynamic> json) {
+  final plural = json['images'];
+  if (plural is List) {
+    return List.unmodifiable(
+      plural
+          .whereType<Map>()
+          .map(_messageImageFromJson)
+          .whereType<MessageImage>(),
+    );
+  }
+
+  // Pre-multi-image records wrote one object under `image`.
+  final legacy = json['image'];
+  final image = legacy is Map ? _messageImageFromJson(legacy) : null;
+  return image == null ? const [] : [image];
+}
+
+MessageImage? _messageImageFromJson(Map<dynamic, dynamic> json) {
+  final data = json['data'];
+  final mime = json['mime'];
+  if (data is! String || mime is! String) return null;
+  return MessageImage(data: data, mime: mime);
 }
 
 /// Tool request + result collapsed into a single persisted shape.

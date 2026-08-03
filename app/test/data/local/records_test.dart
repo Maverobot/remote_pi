@@ -12,31 +12,60 @@ import 'package:hive/hive.dart';
 
 void main() {
   group('record roundtrips', () {
-    test('MessageRecord (user + image) survives toJson/fromJson', () {
+    test('MessageRecord (user + images) survives toJson/fromJson in order', () {
       final r = MessageRecord(
         id: 'u1',
         seq: 3,
         role: MsgRole.user,
         text: 'hello',
-        image: const MessageImage(data: 'QUJD', mime: 'image/jpeg'),
+        images: const [
+          MessageImage(data: 'FIRST', mime: 'image/jpeg'),
+          MessageImage(data: 'SECOND', mime: 'image/png'),
+        ],
         ts: DateTime.fromMillisecondsSinceEpoch(1700),
         pending: true,
         steering: true,
       );
-      final back = MessageRecord.fromJson(r.toJson());
+      final json = r.toJson();
+      final back = MessageRecord.fromJson(json);
       expect(back.id, 'u1');
       expect(back.seq, 3);
       expect(back.role, MsgRole.user);
       expect(back.text, 'hello');
-      expect(back.image?.data, 'QUJD');
+      expect(back.images.map((image) => image.data), ['FIRST', 'SECOND']);
+      expect(
+        json.containsKey('image'),
+        isFalse,
+        reason: 'new writes are plural only',
+      );
       expect(back.pending, isTrue);
       expect(back.steering, isTrue);
-      // Projects to the domain UserMsg the UI renders.
       final msg = back.toChatMessage() as UserMsg;
       expect(msg.status, UserMsgStatus.pending);
       expect(msg.steering, isTrue);
-      expect(msg.image, isNotNull);
+      expect(msg.images.map((image) => image.data), ['FIRST', 'SECOND']);
     });
+
+    test(
+      'MessageRecord migrates a legacy singular image to a one-item list',
+      () {
+        final back = MessageRecord.fromJson({
+          'id': 'legacy',
+          'seq': 0,
+          'role': 'user',
+          'text': '',
+          'image': {'data': 'OLD', 'mime': 'image/jpeg'},
+          'ts': 1,
+          'pending': false,
+        });
+
+        expect(back.images, const [
+          MessageImage(data: 'OLD', mime: 'image/jpeg'),
+        ]);
+        expect(back.toJson().containsKey('image'), isFalse);
+        expect(back.toJson()['images'], hasLength(1));
+      },
+    );
 
     test('MessageRecord (tool) survives roundtrip', () {
       final r = MessageRecord(

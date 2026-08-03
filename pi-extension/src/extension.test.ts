@@ -1799,6 +1799,58 @@ describe("multi-channel broadcast (W2D)", () => {
     });
   });
 
+  test("active multi-image steer preserves ordered SDK content, echo, and current turn id", async () => {
+    await _pairForTest("ownerA__1234567890");
+    const onInput = captureEventHandler("input");
+    onInput({ type: "input", text: "primary request", source: "interactive" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    const originalTurnId = _getCurrentTurnIdForTest();
+    expect(originalTurnId).toMatch(/^local_/);
+
+    const sendUserMessage = vi.fn();
+    _setPiForTest({
+      sendUserMessage,
+      sendMessage: () => undefined,
+    });
+    const sendsBefore = relayRef.current!.send.mock.calls.length;
+    const images = [
+      { data: "RklSU1Q=", mime: "image/png" },
+      { data: "U0VDT05E", mime: "image/jpeg" },
+    ];
+
+    relayRef.current!.emit("message", JSON.stringify({
+      peer: "ownerA__1234567890",
+      ct: Buffer.from(JSON.stringify({
+        type: "user_message",
+        id: "multi-image-steer",
+        text: "compare these",
+        streaming_behavior: "steer",
+        images,
+      })).toString("base64"),
+    }));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+
+    expect(sendUserMessage).toHaveBeenCalledTimes(1);
+    expect(sendUserMessage).toHaveBeenCalledWith([
+      { type: "image", data: "RklSU1Q=", mimeType: "image/png" },
+      { type: "image", data: "U0VDT05E", mimeType: "image/jpeg" },
+      { type: "text", text: "compare these" },
+    ], { deliverAs: "steer" });
+    expect(_getCurrentTurnIdForTest()).toBe(originalTurnId);
+
+    const sent = relayRef.current!.send.mock.calls.slice(sendsBefore)
+      .map((call) => call[0] as string).map(decodeSentCt);
+    const echo = sent.find((message) => message.inner.type === "user_message");
+    expect(echo?.inner).toMatchObject({
+      type: "user_message",
+      id: "multi-image-steer",
+      text: "compare these",
+      streaming_behavior: "steer",
+    });
+    expect(echo?.inner["images"]).toEqual(images);
+  });
+
   test("JPEG user_message generates optional private PNG preview when converter is available", async () => {
     _convertToPngMock.mockResolvedValueOnce({ data: "iVBORw0KGgo=", mimeType: "image/png" });
 

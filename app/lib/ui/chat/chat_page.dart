@@ -461,17 +461,16 @@ class ChatPage extends StatelessWidget {
       // so a read() is enough here.
       voice: context.read<VoiceInputViewModel>(),
       onVoiceHint: (hint) => _handleVoiceHint(context, hint),
-      // Plan/30 — image attachments. takeImageForSend() reads + clears the
-      // attached image so the inline image rides along with the (optionally
-      // empty) caption. Attach-button gating by vision / already-attached is
-      // internal to InputBar; the host only gates by channel availability.
+      // Image attachments are captured and cleared atomically so the ordered
+      // list rides along with the optional caption. InputBar owns vision,
+      // picking, and ten-image cap gating.
       attachment: context.read<AttachmentViewModel>(),
       onOpenAttach: actionsEnabled
           ? () => _openAttach(context, context.read<AttachmentViewModel>())
           : null,
       onSend: (text) {
-        final image = context.read<AttachmentViewModel>().takeImageForSend();
-        vm.sendMessage(text, image: image);
+        final images = context.read<AttachmentViewModel>().takeImagesForSend();
+        vm.sendMessage(text, images: images);
       },
     );
   }
@@ -523,6 +522,14 @@ class ChatPage extends StatelessWidget {
         messenger.showSnackBar(
           const SnackBar(
             content: Text("Couldn't attach that image."),
+            duration: Duration(seconds: 3),
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      case AttachHint.imageLimitReached:
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('You can attach up to 10 images.'),
             duration: Duration(seconds: 3),
             behavior: SnackBarBehavior.floating,
           ),

@@ -541,34 +541,41 @@ void main() {
       expect(decoded.containsKey('images'), isFalse);
     });
 
-    test('UserMessage with one image encodes an images array', () {
+    test('UserMessage encodes every image in stable order', () {
       final msg = UserMessage(
         id: 'u2',
         text: 'look',
-        images: const [WireImage(data: 'QUJD', mime: 'image/jpeg')],
+        images: const [
+          WireImage(data: 'FIRST', mime: 'image/jpeg'),
+          WireImage(data: 'SECOND', mime: 'image/png'),
+        ],
       );
       final decoded =
           jsonDecode(encodeClient(msg).trim()) as Map<String, dynamic>;
       final images = decoded['images'] as List<dynamic>;
-      expect(images, hasLength(1));
-      expect((images.first as Map)['data'], 'QUJD');
-      expect((images.first as Map)['mime'], 'image/jpeg');
+      expect(images, hasLength(2));
+      expect(images.map((image) => (image as Map)['data']), [
+        'FIRST',
+        'SECOND',
+      ]);
+      expect((images.last as Map)['mime'], 'image/png');
     });
 
-    test('user_message echo decodes images → UserInput.image', () {
+    test('user_message echo decodes every valid image in stable order', () {
       final msg =
           ServerMessage.fromJson({
                 'type': 'user_message',
                 'id': 'u3',
                 'text': 'caption',
                 'images': [
-                  {'data': 'QUJD', 'mime': 'image/jpeg'},
+                  {'data': 'FIRST', 'mime': 'image/jpeg'},
+                  {'invalid': true},
+                  {'data': 'SECOND', 'mime': 'image/png'},
                 ],
               })
               as UserInput;
-      expect(msg.image, isNotNull);
-      expect(msg.image!.data, 'QUJD');
-      expect(msg.image!.mime, 'image/jpeg');
+      expect(msg.images.map((image) => image.data), ['FIRST', 'SECOND']);
+      expect(msg.images.last.mime, 'image/png');
     });
 
     test('user_message echo with steer behavior parses on UserInput', () {
@@ -595,7 +602,7 @@ void main() {
       expect(msg.streamingBehavior, isNull);
     });
 
-    test('user_message without images → UserInput.image is null', () {
+    test('user_message without images → UserInput.images is empty', () {
       final msg =
           ServerMessage.fromJson({
                 'type': 'user_message',
@@ -603,10 +610,10 @@ void main() {
                 'text': 'plain',
               })
               as UserInput;
-      expect(msg.image, isNull);
+      expect(msg.images, isEmpty);
     });
 
-    test('session_history user_input event carries the image', () {
+    test('session_history user_input event carries every image in order', () {
       final hist =
           ServerMessage.fromJson({
                 'type': 'session_history',
@@ -620,14 +627,15 @@ void main() {
                     'id': 'u5',
                     'text': 'replayed',
                     'images': [
-                      {'data': 'QUJD', 'mime': 'image/jpeg'},
+                      {'data': 'FIRST', 'mime': 'image/jpeg'},
+                      {'data': 'SECOND', 'mime': 'image/png'},
                     ],
                   },
                 ],
               })
               as SessionHistory;
       final evt = hist.events.single as UserInputEvt;
-      expect(evt.image?.data, 'QUJD');
+      expect(evt.images.map((image) => image.data), ['FIRST', 'SECOND']);
     });
 
     test('WireModel.vision roundtrips and defaults to false', () {

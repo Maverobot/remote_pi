@@ -22,9 +22,9 @@ class UserBubble extends StatelessWidget {
     final isPending = message.status == UserMsgStatus.pending;
     final isFailed = message.status == UserMsgStatus.failed;
     final isSteering = message.steering;
-    // Plan/30 — when an image is attached the bubble becomes an ImageBubble
-    // (thumbnail + caption); otherwise the existing text card.
-    final image = message.image;
+    // When images are attached the bubble renders every thumbnail in order;
+    // otherwise it uses the existing text card.
+    final images = message.images;
     final colors = context.colors;
     final typo = context.typo;
     return Align(
@@ -36,9 +36,9 @@ class UserBubble extends StatelessWidget {
           children: [
             Opacity(
               opacity: isPending ? 0.6 : 1.0,
-              child: image != null
+              child: images.isNotEmpty
                   ? ImageBubble(
-                      image: image,
+                      images: images,
                       caption: message.text,
                       isFailed: isFailed,
                     )

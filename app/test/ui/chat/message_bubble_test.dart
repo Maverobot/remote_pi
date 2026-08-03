@@ -52,7 +52,7 @@ void main() {
 
   testWidgets('UserBubble text is selectable (copyable)', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
           body: UserBubble(UserMsg(id: 'u1', text: 'my message')),
         ),
@@ -65,7 +65,7 @@ void main() {
 
   testWidgets('pending steer bubble shows steering label', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
           body: UserBubble(
             UserMsg(
@@ -85,7 +85,7 @@ void main() {
 
   testWidgets('confirmed steer bubble keeps steering label', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
           body: UserBubble(
             UserMsg(id: 'u1', text: 'accepted follow-up', steering: true),
@@ -99,7 +99,7 @@ void main() {
 
   testWidgets('pending normal bubble keeps sending label', (tester) async {
     await tester.pumpWidget(
-      const MaterialApp(
+      MaterialApp(
         home: Scaffold(
           body: UserBubble(
             UserMsg(

@@ -7,12 +7,7 @@ import 'package:app/domain/session_state.dart';
 import 'package:app/ui/chat/attachment/states/attachment_state.dart';
 import 'package:app/ui/core/viewmodel/viewmodel.dart';
 
-/// Plan/30 — drives image attachment for the composer.
-///
-/// Owns the picked-image preview state and tracks whether the active model
-/// accepts images (`vision`). Vision is resolved from the model catalogue the
-/// app already fetches for the quick-actions picker (plan 28): cached in
-/// [IActionsRepository], re-resolved whenever the active model changes.
+/// Drives the composer's ordered image attachment collection.
 class AttachmentViewModel extends ViewModel<AttachmentState> {
   AttachmentViewModel(this._picker, this._actions)
     : super(const AttachmentEmpty()) {
@@ -20,6 +15,8 @@ class AttachmentViewModel extends ViewModel<AttachmentState> {
     // ignore: discarded_futures
     _refreshVision();
   }
+
+  static const int maxImages = 10;
 
   final IImagePickerService _picker;
   final IActionsRepository _actions;
@@ -30,63 +27,111 @@ class AttachmentViewModel extends ViewModel<AttachmentState> {
   final StreamController<AttachHint> _hints =
       StreamController<AttachHint>.broadcast();
 
-  /// One-shot hints (permission denied / pick failed) for the host page.
+  /// One-shot hints (permission denied / pick failed / image cap).
   Stream<AttachHint> get hints => _hints.stream;
 
-  bool get hasImage => state is AttachmentAttached;
+  bool get hasImage => state.images.isNotEmpty;
+  int get imageCount => state.images.length;
+  bool get canAddImages =>
+      state is! AttachmentPicking && imageCount < maxImages;
 
   // ---------------------------------------------------------------------------
   // Picking
   // ---------------------------------------------------------------------------
 
-  Future<void> pickFromCamera() => _pick(_picker.pickFromCamera);
-  Future<void> pickFromGallery() => _pick(_picker.pickFromGallery);
+  Future<void> pickFromCamera() => _pick(() async {
+    final image = await _picker.pickFromCamera();
+    return image == null ? const [] : [image];
+  });
 
-  Future<void> _pick(Future<PickedImage?> Function() pick) async {
+  Future<void> pickFromGallery() {
+    final remaining = maxImages - imageCount;
+    return _pick(() => _picker.pickFromGallery(limit: remaining));
+  }
+
+  Future<void> _pick(Future<List<PickedImage>> Function() pick) async {
     if (state is AttachmentPicking) return;
-    final vision = state.visionSupported;
-    emit(AttachmentPicking(visionSupported: vision));
+    final existing = state.images;
+    if (existing.length >= maxImages) {
+      _emitHint(AttachHint.imageLimitReached);
+      return;
+    }
+
+    emit(
+      AttachmentPicking(
+        images: existing,
+        visionSupported: state.visionSupported,
+      ),
+    );
     try {
-      final img = await pick();
-      if (img == null) {
-        emit(AttachmentEmpty(visionSupported: vision)); // cancelled
-        return;
+      final picked = await pick();
+      final remaining = maxImages - existing.length;
+      final additions = picked.take(remaining).toList(growable: false);
+      final combined = [...existing, ...additions];
+      _emitImages(combined, state.visionSupported);
+      if (combined.length >= maxImages || picked.length > additions.length) {
+        _emitHint(AttachHint.imageLimitReached);
       }
-      emit(AttachmentAttached(image: img, visionSupported: vision));
     } on ImagePermissionDeniedException {
-      emit(AttachmentEmpty(visionSupported: vision));
-      if (!_hints.isClosed) _hints.add(AttachHint.cameraPermissionDenied);
+      _emitImages(existing, state.visionSupported);
+      _emitHint(AttachHint.cameraPermissionDenied);
     } catch (_) {
-      emit(AttachmentEmpty(visionSupported: vision));
-      if (!_hints.isClosed) _hints.add(AttachHint.pickFailed);
+      _emitImages(existing, state.visionSupported);
+      _emitHint(AttachHint.pickFailed);
     }
   }
 
-  /// Discard the attached image (the "X" on the preview, #4).
-  void removeImage() {
-    if (state is! AttachmentAttached) return;
-    emit(AttachmentEmpty(visionSupported: state.visionSupported));
+  /// Remove one preview without disturbing the order of remaining images.
+  void removeImageAt(int index) {
+    if (state is AttachmentPicking) return;
+    final images = state.images;
+    if (index < 0 || index >= images.length) return;
+    final remaining = [
+      for (var current = 0; current < images.length; current++)
+        if (current != index) images[current],
+    ];
+    _emitImages(remaining, state.visionSupported);
   }
 
-  /// Hand the attached image to the send path as a base64 [MessageImage] and
-  /// reset to empty. Returns null when nothing is attached.
-  MessageImage? takeImageForSend() {
-    final s = state;
-    if (s is! AttachmentAttached) return null;
-    emit(AttachmentEmpty(visionSupported: s.visionSupported));
-    return MessageImage(data: base64Encode(s.image.bytes), mime: s.image.mime);
+  /// Capture every attached image for dispatch and clear the composer in one
+  /// state transition. Returns an empty list when nothing is attached.
+  List<MessageImage> takeImagesForSend() {
+    if (state is AttachmentPicking) return const [];
+    final attached = state.images;
+    if (attached.isEmpty) return const [];
+    final images = List<MessageImage>.unmodifiable(
+      attached.map(
+        (image) =>
+            MessageImage(data: base64Encode(image.bytes), mime: image.mime),
+      ),
+    );
+    emit(AttachmentEmpty(visionSupported: state.visionSupported));
+    return images;
+  }
+
+  void _emitImages(List<PickedImage> images, bool? visionSupported) {
+    emit(
+      images.isEmpty
+          ? AttachmentEmpty(visionSupported: visionSupported)
+          : AttachmentAttached(
+              images: images,
+              visionSupported: visionSupported,
+            ),
+    );
+  }
+
+  void _emitHint(AttachHint hint) {
+    if (!_hints.isClosed) _hints.add(hint);
   }
 
   // ---------------------------------------------------------------------------
-  // Vision tracking (#9)
+  // Vision tracking
   // ---------------------------------------------------------------------------
 
   Future<void> _refreshVision() async {
     if (_resolvingVision) return;
     _resolvingVision = true;
     try {
-      // Cached per (peer, room) by the repo; only the round-trip after a real
-      // model change actually hits the Pi.
       final catalogue = await _actions.listModels();
       _setVision(_resolveVision(catalogue));
     } catch (_) {
@@ -99,11 +144,10 @@ class AttachmentViewModel extends ViewModel<AttachmentState> {
   bool? _resolveVision(ModelsCatalogue catalogue) {
     final current = catalogue.current;
     if (current != null) return current.vision;
-    // No explicit current — match the active room's model name.
     final name = _actions.activeRoomMeta.model;
     if (name != null) {
-      for (final m in catalogue.models) {
-        if (m.name == name) return m.vision;
+      for (final model in catalogue.models) {
+        if (model.name == name) return model.vision;
       }
     }
     return null;
@@ -113,9 +157,12 @@ class AttachmentViewModel extends ViewModel<AttachmentState> {
     if (vision == state.visionSupported) return;
     emit(switch (state) {
       AttachmentEmpty() => AttachmentEmpty(visionSupported: vision),
-      AttachmentPicking() => AttachmentPicking(visionSupported: vision),
-      AttachmentAttached(:final image) => AttachmentAttached(
-        image: image,
+      AttachmentPicking(:final images) => AttachmentPicking(
+        images: images,
+        visionSupported: vision,
+      ),
+      AttachmentAttached(:final images) => AttachmentAttached(
+        images: images,
         visionSupported: vision,
       ),
     });

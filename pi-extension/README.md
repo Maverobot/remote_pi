@@ -150,12 +150,17 @@ follows the same pattern.
 
 ### Images
 
-The app can attach **one image** (camera or gallery) to a message. It's
-compressed on the device and rides **inline** in the `user_message` — the
-optional `images` field carries `{ data: <base64>, mime }`. The pi-extension
-turns it into the SDK's multimodal content (an `ImageContent` followed by the
-caption `TextContent`) and calls `sendUserMessage(content)`, so the model sees
-the picture plus your text.
+The Android app can attach **up to 10 images** (camera or gallery) to one
+message. Each image is compressed on the device and rides **inline** in the
+`user_message` — the optional `images` array carries ordered
+`{ data: <base64>, mime }` items. The pi-extension preserves that order when it
+turns them into the SDK's multimodal content (`ImageContent` items followed by
+the caption `TextContent`) and calls `sendUserMessage(content)`, so the model
+sees every picture plus your text.
+
+Images can also be attached and sent while Pi is working. The message uses the
+existing steer delivery path, so it augments the active turn without replacing
+the response or its Stop target.
 
 Whether a model accepts images is surfaced as a `vision` flag on each
 `WireModel` (derived from the SDK's `Model.input` including `"image"`); the app

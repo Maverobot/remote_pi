@@ -4,9 +4,9 @@ import 'package:flutter/services.dart' show PlatformException;
 import 'package:flutter_image_compress/flutter_image_compress.dart';
 import 'package:image_picker/image_picker.dart';
 
-/// Plan/30 — pick one image from the camera or the gallery and compress it
-/// (JPEG, longest side ≤1568px, q80) entirely on-device before it travels
-/// inline on a `user_message`. No file is uploaded out-of-band.
+/// Pick camera/gallery images and compress each one (JPEG, longest side
+/// ≤1568px, q80) entirely on-device before it travels inline on a
+/// `user_message`. No file is uploaded out-of-band.
 ///
 /// The plugin calls go through the [ImagePickerBackend] seam so the
 /// pick + iterative size-ceiling logic is unit-testable without a device.
@@ -15,9 +15,9 @@ abstract class IImagePickerService {
   /// [ImagePermissionDeniedException] when camera permission is denied (#10).
   Future<PickedImage?> pickFromCamera();
 
-  /// Pick from the gallery (system PHPicker / Photo Picker — no permission).
-  /// Returns null if the user cancelled.
-  Future<PickedImage?> pickFromGallery();
+  /// Pick up to [limit] images from the gallery (system PHPicker / Photo
+  /// Picker — no permission). Returns an empty list if the user cancelled.
+  Future<List<PickedImage>> pickFromGallery({int limit = 10});
 }
 
 /// A picked + compressed image ready for preview and sending. Bytes are raw
@@ -37,6 +37,14 @@ class ImagePermissionDeniedException implements Exception {
   String toString() => 'ImagePermissionDeniedException';
 }
 
+/// Compression exhausted its bounded retries without meeting the transport
+/// size ceiling. The attachment ViewModel surfaces this through pickFailed.
+class ImageTooLargeException implements Exception {
+  const ImageTooLargeException();
+  @override
+  String toString() => 'ImageTooLargeException';
+}
+
 class ImagePickerService implements IImagePickerService {
   ImagePickerService([ImagePickerBackend? backend])
     : _backend = backend ?? PlatformImagePickerBackend();
@@ -53,21 +61,31 @@ class ImagePickerService implements IImagePickerService {
   /// (rare; the defaults land ~150–400 KB).
   static const int _ceilingBytes = 1500 * 1024;
 
-  /// Max extra passes before we accept whatever we have.
+  /// Max extra passes before rejecting an image that remains over the cap.
   static const int _maxExtraPasses = 3;
 
   @override
-  Future<PickedImage?> pickFromCamera() =>
-      _pickAndCompress(ImageSourceKind.camera);
+  Future<PickedImage?> pickFromCamera() async {
+    final path = await _backend.pick(ImageSourceKind.camera);
+    return path == null ? null : _compress(path);
+  }
 
   @override
-  Future<PickedImage?> pickFromGallery() =>
-      _pickAndCompress(ImageSourceKind.gallery);
+  Future<List<PickedImage>> pickFromGallery({int limit = 10}) async {
+    if (limit <= 0) return const [];
+    if (limit == 1) {
+      final path = await _backend.pick(ImageSourceKind.gallery);
+      return path == null ? const [] : [await _compress(path)];
+    }
+    final paths = await _backend.pickMultiple(limit: limit);
+    final images = <PickedImage>[];
+    for (final path in paths) {
+      images.add(await _compress(path));
+    }
+    return List.unmodifiable(images);
+  }
 
-  Future<PickedImage?> _pickAndCompress(ImageSourceKind source) async {
-    final path = await _backend.pick(source);
-    if (path == null) return null; // user cancelled
-
+  Future<PickedImage> _compress(String path) async {
     var side = _maxSide;
     var quality = _quality;
     var bytes = await _backend.compress(path, maxSide: side, quality: quality);
@@ -82,6 +100,9 @@ class ImagePickerService implements IImagePickerService {
       bytes = await _backend.compress(path, maxSide: side, quality: quality);
     }
 
+    if (bytes.length > _ceilingBytes) {
+      throw const ImageTooLargeException();
+    }
     return PickedImage(bytes: bytes, mime: 'image/jpeg');
   }
 }
@@ -94,9 +115,12 @@ enum ImageSourceKind { camera, gallery }
 
 /// Thin seam over `image_picker` + `flutter_image_compress`.
 abstract class ImagePickerBackend {
-  /// Pick a file; returns its path, or null if cancelled. Throws
-  /// [ImagePermissionDeniedException] on a denied camera permission.
+  /// Pick one camera or gallery file; returns its path, or null if cancelled.
+  /// Throws [ImagePermissionDeniedException] when access is denied.
   Future<String?> pick(ImageSourceKind source);
+
+  /// Pick gallery files in the platform picker's stable result order.
+  Future<List<String>> pickMultiple({required int limit});
 
   /// Compress [path] to JPEG bounded by [maxSide]px at [quality].
   Future<Uint8List> compress(
@@ -122,14 +146,28 @@ class PlatformImagePickerBackend implements ImagePickerBackend {
       );
       return file?.path;
     } on PlatformException catch (e) {
-      // image_picker surfaces a denied camera/photo permission as a
-      // PlatformException with an `*_access_denied` code.
-      if (e.code.contains('access_denied') || e.code.contains('denied')) {
+      if (_isPermissionDenied(e)) {
         throw const ImagePermissionDeniedException();
       }
       rethrow;
     }
   }
+
+  @override
+  Future<List<String>> pickMultiple({required int limit}) async {
+    try {
+      final files = await _picker.pickMultiImage(limit: limit);
+      return files.map((file) => file.path).toList(growable: false);
+    } on PlatformException catch (e) {
+      if (_isPermissionDenied(e)) {
+        throw const ImagePermissionDeniedException();
+      }
+      rethrow;
+    }
+  }
+
+  static bool _isPermissionDenied(PlatformException error) =>
+      error.code.contains('access_denied') || error.code.contains('denied');
 
   @override
   Future<Uint8List> compress(

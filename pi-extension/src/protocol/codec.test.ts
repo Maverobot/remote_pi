@@ -109,6 +109,20 @@ describe("encodeClient roundtrip", () => {
     expect(JSON.parse(encodeClient(msg).trim())).toEqual(msg);
   });
 
+  test("user_message preserves multiple images in order", () => {
+    const msg = {
+      type: "user_message" as const,
+      id: "018f9c2a",
+      text: "compare these",
+      images: [
+        { data: "RklSU1Q=", mime: "image/png" },
+        { data: "U0VDT05E", mime: "image/jpeg" },
+      ],
+    };
+
+    expect(JSON.parse(encodeClient(msg).trim())).toEqual(msg);
+  });
+
   test("user_message with steer streaming behavior", () => {
     const msg = {
       type: "user_message" as const,

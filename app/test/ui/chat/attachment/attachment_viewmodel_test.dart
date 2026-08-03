@@ -13,24 +13,36 @@ import 'package:app/ui/chat/attachment/viewmodels/attachment_viewmodel.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _FakePicker implements IImagePickerService {
-  PickedImage? next = PickedImage(
+  PickedImage? nextCamera = PickedImage(
     bytes: Uint8List.fromList([1, 2, 3]),
     mime: 'image/jpeg',
   );
+  List<PickedImage> nextGallery = [
+    PickedImage(bytes: Uint8List.fromList([1, 2, 3]), mime: 'image/jpeg'),
+  ];
   bool denyCamera = false;
   bool fail = false;
+  int? galleryLimit;
+  int cameraCalls = 0;
+  int galleryCalls = 0;
+  Completer<List<PickedImage>>? delayedGallery;
 
   @override
   Future<PickedImage?> pickFromCamera() async {
+    cameraCalls++;
     if (denyCamera) throw const ImagePermissionDeniedException();
     if (fail) throw Exception('boom');
-    return next;
+    return nextCamera;
   }
 
   @override
-  Future<PickedImage?> pickFromGallery() async {
+  Future<List<PickedImage>> pickFromGallery({int limit = 10}) async {
+    galleryCalls++;
+    galleryLimit = limit;
     if (fail) throw Exception('boom');
-    return next;
+    final delayed = delayedGallery;
+    if (delayed != null) return delayed.future;
+    return nextGallery.take(limit).toList();
   }
 }
 
@@ -74,33 +86,142 @@ WireModel _model({required bool vision, String name = 'M'}) => WireModel(
 );
 
 void main() {
-  test('pickFromGallery attaches an image; removeImage clears it', () async {
-    final vm = AttachmentViewModel(_FakePicker(), _FakeActions());
-    await vm.pickFromGallery();
-    expect(vm.state, isA<AttachmentAttached>());
-    expect(vm.hasImage, isTrue);
+  test(
+    'gallery and camera append in stable order; indexed removal preserves the rest',
+    () async {
+      final picker = _FakePicker()
+        ..nextGallery = [
+          PickedImage(bytes: Uint8List.fromList([1]), mime: 'image/jpeg'),
+          PickedImage(bytes: Uint8List.fromList([2]), mime: 'image/jpeg'),
+        ]
+        ..nextCamera = PickedImage(
+          bytes: Uint8List.fromList([3]),
+          mime: 'image/jpeg',
+        );
+      final vm = AttachmentViewModel(picker, _FakeActions());
 
-    vm.removeImage();
-    expect(vm.state, isA<AttachmentEmpty>());
-    expect(vm.hasImage, isFalse);
-    vm.dispose();
-  });
-
-  test('takeImageForSend returns base64 MessageImage and resets', () async {
-    final picker = _FakePicker()
-      ..next = PickedImage(
-        bytes: Uint8List.fromList([10, 20, 30]),
+      await vm.pickFromGallery();
+      picker.nextGallery = [
+        PickedImage(bytes: Uint8List.fromList([3]), mime: 'image/jpeg'),
+      ];
+      picker.nextCamera = PickedImage(
+        bytes: Uint8List.fromList([4]),
         mime: 'image/jpeg',
       );
+      await vm.pickFromGallery();
+      await vm.pickFromCamera();
+
+      final attached = vm.state as AttachmentAttached;
+      expect(attached.images.map((image) => image.bytes.single), [1, 2, 3, 4]);
+      vm.removeImageAt(1);
+      expect(
+        (vm.state as AttachmentAttached).images.map(
+          (image) => image.bytes.single,
+        ),
+        [1, 3, 4],
+      );
+      vm.dispose();
+    },
+  );
+
+  test(
+    'takeImagesForSend returns every image as base64 and resets atomically',
+    () async {
+      final picker = _FakePicker()
+        ..nextGallery = [
+          PickedImage(bytes: Uint8List.fromList([10]), mime: 'image/jpeg'),
+          PickedImage(bytes: Uint8List.fromList([20]), mime: 'image/jpeg'),
+        ];
+      final vm = AttachmentViewModel(picker, _FakeActions());
+      await vm.pickFromGallery();
+
+      final images = vm.takeImagesForSend();
+      expect(images.map((image) => base64Decode(image.data).single), [10, 20]);
+      expect(vm.state, isA<AttachmentEmpty>());
+      expect(vm.takeImagesForSend(), isEmpty);
+      vm.dispose();
+    },
+  );
+
+  test(
+    'the tenth image reaches the cap, emits feedback, and blocks additions',
+    () async {
+      final picker = _FakePicker()
+        ..nextGallery = List.generate(
+          AttachmentViewModel.maxImages,
+          (index) => PickedImage(
+            bytes: Uint8List.fromList([index]),
+            mime: 'image/jpeg',
+          ),
+        );
+      final vm = AttachmentViewModel(picker, _FakeActions());
+      final hints = <AttachHint>[];
+      final sub = vm.hints.listen(hints.add);
+
+      await vm.pickFromGallery();
+      await Future<void>.delayed(Duration.zero);
+      expect(vm.imageCount, AttachmentViewModel.maxImages);
+      expect(vm.canAddImages, isFalse);
+      expect(hints, contains(AttachHint.imageLimitReached));
+
+      await vm.pickFromCamera();
+      expect(vm.imageCount, AttachmentViewModel.maxImages);
+      expect(picker.galleryLimit, AttachmentViewModel.maxImages);
+      await sub.cancel();
+      vm.dispose();
+    },
+  );
+
+  test(
+    'an in-flight pick blocks removal, send capture, and overlapping picks',
+    () async {
+      final picker = _FakePicker();
+      final vm = AttachmentViewModel(picker, _FakeActions());
+      await vm.pickFromGallery();
+      final delayed = Completer<List<PickedImage>>();
+      picker.delayedGallery = delayed;
+
+      final inFlight = vm.pickFromGallery();
+      await Future<void>.delayed(Duration.zero);
+      expect(vm.state, isA<AttachmentPicking>());
+
+      vm.removeImageAt(0);
+      expect(vm.imageCount, 1, reason: 'existing preview cannot mutate');
+      expect(
+        vm.takeImagesForSend(),
+        isEmpty,
+        reason: 'send capture is blocked',
+      );
+      await vm.pickFromCamera();
+      expect(picker.cameraCalls, 0, reason: 'overlapping picker is blocked');
+
+      delayed.complete([
+        PickedImage(bytes: Uint8List.fromList([4]), mime: 'image/jpeg'),
+      ]);
+      await inFlight;
+
+      expect(
+        (vm.state as AttachmentAttached).images.map((image) => image.bytes),
+        [
+          [1, 2, 3],
+          [4],
+        ],
+      );
+      expect(picker.galleryCalls, 2);
+      vm.dispose();
+    },
+  );
+
+  test('a failed addition preserves images already attached', () async {
+    final picker = _FakePicker();
     final vm = AttachmentViewModel(picker, _FakeActions());
     await vm.pickFromGallery();
+    picker.fail = true;
 
-    final msg = vm.takeImageForSend();
-    expect(msg, isNotNull);
-    expect(msg!.mime, 'image/jpeg');
-    expect(base64Decode(msg.data), [10, 20, 30]);
-    expect(vm.state, isA<AttachmentEmpty>());
-    expect(vm.takeImageForSend(), isNull); // nothing left
+    await vm.pickFromCamera();
+
+    expect(vm.imageCount, 1);
+    expect(vm.state, isA<AttachmentAttached>());
     vm.dispose();
   });
 

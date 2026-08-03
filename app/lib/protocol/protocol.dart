@@ -411,7 +411,7 @@ sealed class ClientMessage {
   Map<String, dynamic> toJson();
 }
 
-/// Plan/30 — one image carried inline on a `user_message` (base64 + mime).
+/// One image carried inline in the ordered `user_message.images` array.
 /// Mirrors `WireImage` in `pi-extension/src/protocol/types.ts` and the SDK's
 /// `ImageContent`. The relay forwards it opaquely inside the existing `ct`.
 class WireImage {
@@ -458,17 +458,15 @@ class UserMessage extends ClientMessage {
   /// compatibility with older Pi extensions.
   final UserMessageStreamingBehavior? streamingBehavior;
 
-  /// Plan/30 — optional attached images. The feature sends at most one, but
-  /// the wire shape is a list to mirror the SDK's `(TextContent|ImageContent)[]`
-  /// and stay forward-compatible. Omitted entirely when empty (retro-compat).
+  /// Ordered attached images. Omitted entirely when empty (retro-compat).
   final List<WireImage>? images;
 
   UserMessage({
     required this.id,
     required this.text,
     this.streamingBehavior,
-    this.images,
-  });
+    List<WireImage>? images,
+  }) : images = images == null ? null : List.unmodifiable(images);
 
   @override
   Map<String, dynamic> toJson() => {
@@ -1163,14 +1161,18 @@ class PairOk extends ServerMessage {
 /// Mirror of user input typed directly in the Pi's terminal (or injected via
 /// RPC). The Pi emits this so the app can show what was sent even though it
 /// did not originate from the app's own [UserMessage] flow.
-/// Parse an optional `images` array (the Pi echoes back whatever the app
-/// sent on `user_message`). Returns the first image — the feature is one
-/// image per message — or null when absent/empty.
-WireImage? _firstImage(dynamic raw) {
-  if (raw is! List || raw.isEmpty) return null;
-  final first = raw.first;
-  if (first is! Map) return null;
-  return WireImage.fromJson(first.cast<String, dynamic>());
+List<WireImage> _wireImages(dynamic raw) {
+  if (raw is! List) return const [];
+  final images = <WireImage>[];
+  for (final item in raw) {
+    if (item is! Map) continue;
+    final data = item['data'];
+    final mime = item['mime'];
+    if (data is String && mime is String) {
+      images.add(WireImage(data: data, mime: mime));
+    }
+  }
+  return List.unmodifiable(images);
 }
 
 class QueuedMessageItem {
@@ -1249,15 +1251,15 @@ class UserInput extends ServerMessage {
   /// for steering).
   final UserMessageStreamingBehavior? streamingBehavior;
 
-  /// Plan/30 — echoed-back attached image (the Pi rebroadcasts `images`).
-  final WireImage? image;
+  /// Ordered echoed-back images (the Pi rebroadcasts `images`).
+  final List<WireImage> images;
 
   UserInput({
     required this.id,
     required this.text,
     this.streamingBehavior,
-    this.image,
-  });
+    List<WireImage> images = const [],
+  }) : images = List.unmodifiable(images);
 
   factory UserInput.fromJson(Map<String, dynamic> j) => UserInput(
     id: j['id'] as String,
@@ -1265,7 +1267,7 @@ class UserInput extends ServerMessage {
     streamingBehavior: UserMessageStreamingBehavior.fromWire(
       j['streaming_behavior'] as String?,
     ),
-    image: _firstImage(j['images']),
+    images: _wireImages(j['images']),
   );
 }
 
@@ -1352,7 +1354,7 @@ sealed class SessionHistoryEvent {
         ts: ts,
         id: j['id'] as String,
         text: j['text'] as String,
-        image: _firstImage(j['images']),
+        images: _wireImages(j['images']),
       ),
       'ask_user_prompt' => AskUserPromptEvt(
         ts: ts,
@@ -1409,15 +1411,15 @@ class UserInputEvt extends SessionHistoryEvent {
   final String id;
   final String text;
 
-  /// Plan/30 — image replayed from history (decision #8 — bytes always
-  /// travel, so the bubble reconstructs on cold start / reconnect).
-  final WireImage? image;
+  /// Ordered images replayed from history. Bytes always travel inline so the
+  /// bubble reconstructs on cold start / reconnect.
+  final List<WireImage> images;
 
   const UserInputEvt({
     required super.ts,
     required this.id,
     required this.text,
-    this.image,
+    this.images = const [],
   });
 }
 

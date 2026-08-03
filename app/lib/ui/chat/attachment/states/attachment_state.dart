@@ -1,18 +1,22 @@
 import 'package:app/data/images/image_picker_service.dart';
 
-/// Plan/30 — composer attachment state.
+/// Composer attachment state for an ordered image collection.
 ///
-/// Models the one-image pick lifecycle (empty → picking → attached) and
-/// carries [visionSupported] so the attach button can grey out for a
-/// text-only model (#9). `visionSupported` is tri-state: `true`/`false` once
-/// the model catalogue is known, `null` while unknown (don't gate yet).
+/// [visionSupported] is tri-state: `true`/`false` once the model catalogue is
+/// known, `null` while unknown (don't gate yet). Every exposed image list is
+/// immutable so a state emission is a complete snapshot.
 sealed class AttachmentState {
-  const AttachmentState({required this.visionSupported});
+  const AttachmentState({
+    required this.visionSupported,
+    this.images = const [],
+  });
 
   /// Whether the active model accepts images. `null` = not yet known.
   final bool? visionSupported;
 
-  /// Convenience: gate the attach affordance only when we *know* it's false.
+  final List<PickedImage> images;
+
+  /// Gate the attach affordance only when we *know* vision is unsupported.
   bool get attachBlockedByVision => visionSupported == false;
 }
 
@@ -28,40 +32,61 @@ final class AttachmentEmpty extends AttachmentState {
   int get hashCode => visionSupported.hashCode;
 }
 
-/// A pick is in flight (camera/gallery sheet → compression).
+/// A pick is in flight. Existing images remain visible and are preserved if
+/// the new pick is cancelled or fails.
 final class AttachmentPicking extends AttachmentState {
-  const AttachmentPicking({super.visionSupported});
+  AttachmentPicking({required List<PickedImage> images, super.visionSupported})
+    : super(images: List.unmodifiable(images));
 
   @override
   bool operator ==(Object other) =>
-      other is AttachmentPicking && other.visionSupported == visionSupported;
+      other is AttachmentPicking &&
+      _sameImageInstances(other.images, images) &&
+      other.visionSupported == visionSupported;
 
   @override
-  int get hashCode => visionSupported.hashCode;
+  int get hashCode => Object.hash(
+    Object.hashAll(images.map(identityHashCode)),
+    visionSupported,
+  );
 }
 
-/// An image is attached and previewed in the composer.
+/// One or more images are attached and previewed in the composer.
 final class AttachmentAttached extends AttachmentState {
-  const AttachmentAttached({required this.image, super.visionSupported});
-
-  final PickedImage image;
+  AttachmentAttached({required List<PickedImage> images, super.visionSupported})
+    : assert(images.isNotEmpty),
+      super(images: List.unmodifiable(images));
 
   @override
   bool operator ==(Object other) =>
       other is AttachmentAttached &&
-      identical(other.image, image) &&
+      _sameImageInstances(other.images, images) &&
       other.visionSupported == visionSupported;
 
   @override
-  int get hashCode => Object.hash(identityHashCode(image), visionSupported);
+  int get hashCode => Object.hash(
+    Object.hashAll(images.map(identityHashCode)),
+    visionSupported,
+  );
 }
 
-/// One-shot hints the composer asks the host page to surface (snackbar /
-/// settings deep-link), mirroring the voice [VoiceHint] pattern.
+bool _sameImageInstances(List<PickedImage> left, List<PickedImage> right) {
+  if (identical(left, right)) return true;
+  if (left.length != right.length) return false;
+  for (var index = 0; index < left.length; index++) {
+    if (!identical(left[index], right[index])) return false;
+  }
+  return true;
+}
+
+/// One-shot hints the composer asks the host page to surface.
 enum AttachHint {
-  /// Camera permission denied — guide to system Settings (#10).
+  /// Camera permission denied — guide to system Settings.
   cameraPermissionDenied,
 
   /// Pick/compress failed for some other reason.
   pickFailed,
+
+  /// The composer reached its hard ten-image limit.
+  imageLimitReached,
 }

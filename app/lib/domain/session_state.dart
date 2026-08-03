@@ -75,24 +75,23 @@ class UserMsg extends ChatMessage {
   final UserMsgStatus status;
   final bool steering;
 
-  /// Plan/30 — optional attached image (one max). `null` for text-only
-  /// messages, which is every message before this feature.
-  final MessageImage? image;
+  /// Ordered images attached to this message. Empty for text-only messages.
+  final List<MessageImage> images;
 
-  const UserMsg({
+  UserMsg({
     required super.id,
     required this.text,
     this.status = UserMsgStatus.confirmed,
     this.steering = false,
-    this.image,
-  });
+    List<MessageImage> images = const [],
+  }) : images = List.unmodifiable(images);
 
   UserMsg copyWith({UserMsgStatus? status, bool? steering}) => UserMsg(
     id: id,
     text: text,
     status: status ?? this.status,
     steering: steering ?? this.steering,
-    image: image,
+    images: images,
   );
 
   @override
@@ -102,10 +101,20 @@ class UserMsg extends ChatMessage {
       other.text == text &&
       other.status == status &&
       other.steering == steering &&
-      other.image == image;
+      _sameMessageImages(other.images, images);
 
   @override
-  int get hashCode => Object.hash(id, text, status, steering, image);
+  int get hashCode =>
+      Object.hash(id, text, status, steering, Object.hashAll(images));
+}
+
+bool _sameMessageImages(List<MessageImage> left, List<MessageImage> right) {
+  if (identical(left, right)) return true;
+  if (left.length != right.length) return false;
+  for (var index = 0; index < left.length; index++) {
+    if (left[index] != right[index]) return false;
+  }
+  return true;
 }
 
 class AssistantMsg extends ChatMessage {
