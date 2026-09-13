@@ -18,11 +18,13 @@ final class PtyOutputScheduler {
     this.maxCharsPerFrame = 64 * 1024,
     this.maxSliceChars = 4 * 1024,
     this.maxWorkPerFrame = const Duration(milliseconds: 4),
+    this.hiddenDrainInterval = const Duration(milliseconds: 100),
     void Function(VoidCallback drain)? scheduleFrame,
     int Function()? clockMicros,
   }) : assert(maxCharsPerFrame > 0),
        assert(maxSliceChars > 0),
        assert(maxWorkPerFrame > Duration.zero),
+       assert(hiddenDrainInterval > Duration.zero),
        _scheduleFrame = scheduleFrame ?? _scheduleOnNextFrame,
        _clockMicros = clockMicros ?? _monotonicMicros;
 
@@ -38,10 +40,23 @@ final class PtyOutputScheduler {
   /// Parcela máxima do frame dedicada a parse/model/render invalidation.
   final Duration maxWorkPerFrame;
 
+  /// Sem frame por este tempo, drena por timer. Janela em outra mesa do macOS
+  /// (ou minimizada/oculta) não recebe vsync e o Flutter para de produzir
+  /// frames — mas o Dart segue vivo. Antes disto o drenar dependia SÓ do
+  /// frame: o buffer enchia, o ack do PTY era suspenso (backpressure), o pipe
+  /// do kernel lotava e o processo filho (claude, npm run dev…) BLOQUEAVA no
+  /// write até a janela voltar — o "modo de espera" ao trocar de mesa. É o
+  /// que o VS Code evita lendo o PTY fora do loop de render. Drenar fora de
+  /// frame é seguro: é parse + scrollback; o desenho acontece quando houver
+  /// frame de novo. Com a janela visível o frame chega em ~16 ms e o timer
+  /// nunca dispara.
+  final Duration hiddenDrainInterval;
+
   final void Function(VoidCallback drain) _scheduleFrame;
   final int Function() _clockMicros;
   final ListQueue<PtyOutputCoalescer> _ready = ListQueue();
   bool _frameScheduled = false;
+  Timer? _hiddenDrain;
   bool _draining = false;
   int _pendingChars = 0;
 
@@ -89,10 +104,17 @@ final class PtyOutputScheduler {
     if (_frameScheduled || _ready.isEmpty) return;
     _frameScheduled = true;
     _scheduleFrame(_drainFrame);
+    // Watchdog: se o frame não vier (janela oculta), drena por timer. Quem
+    // chegar primeiro drena; o outro vê `_frameScheduled == false` e sai.
+    _hiddenDrain?.cancel();
+    _hiddenDrain = Timer(hiddenDrainInterval, _drainFrame);
   }
 
   void _drainFrame() {
+    if (!_frameScheduled) return; // já drenado pelo outro caminho
     _frameScheduled = false;
+    _hiddenDrain?.cancel();
+    _hiddenDrain = null;
     if (_ready.isEmpty) return;
 
     _draining = true;

@@ -17,14 +17,6 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 
 
-- [ ] Possibilidade de Caffeinate <!-- id: k4 labels: feature -->
-
-- [ ] Test on iOS (iPad) <!-- id: k9 labels: mobile blockedBy: k14 -->
-      <!-- comment: 2026-09-12T20:05 -->
-      iOS tests passed on device. Store prep: bundle id switched to work.jacobmoura.cockpit.remote (the plain id was taken by the BDZ7AJ7ZN2 team via Xcode automatic signing); .remote and .remote.debug registered in team U843T2P7A2 through the App Store Connect API; ITSAppUsesNonExemptEncryption=false and PrivacyInfo.xcprivacy added to the Runner target. `flutter build ios --release --no-codesign` OK with the new id. Next: create the app record in App Store Connect with the .remote id, decide iPad-only vs iPhone, screenshots, privacy policy URL, demo SSH host for the reviewer.
-
-
-
 - [ ] In-app Help section (user manual) <!-- id: k5 labels: docs, feature -->
       A Help entry inside Cockpit the user can read like a manual: shortcuts, panels, Gallery documents, CLI verbs, remote workspaces.
 
@@ -41,10 +33,6 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
       Viewer, .kanban, .html, .http, .dbq and diff tabs carry only a path and a mode, so a second window can rebuild them. Each Flutter window is a separate engine/isolate: state crosses only as messages. This slice gives most of the two-monitor value.
 
 
-- [ ] Publish on Google Play <!-- id: k11 labels: cd, mobile blockedBy: k8, k16 -->
-
-
-- [ ] Publish on the App Store <!-- id: k12 labels: cd, mobile blockedBy: k9, k16 -->
 
 
 - [ ] Remote workspace redesign (plan 58) <!-- id: k13 labels: feature -->
@@ -82,6 +70,14 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
       <!-- comment: 2026-09-12T18:10 -->
       Android bring-up done: applicationId work.jacobmoura.cockpit (same as iOS), label "Cockpit Remote", adaptive icon copied from ../app/android, release keystore generated (android/keystore/cockpit-release.jks, gitignored; back it up to iCloud like the mobile app one; passwords in android/key.properties), Gradle signing wired, permissions INTERNET + ACCESS_NETWORK_STATE + POST_NOTIFICATIONS + cleartext for http dev servers. Toolchain pinned to AGP 8.11.1/Gradle 8.14 (AGP 9 rejects flutter_inappwebview's proguard file). First signed APK built: ~/Desktop/CockpitRemote-1.28.31-android.apk. Blocker for reproducible builds: anaki_* hooks throw on Android/iOS; fixed in anakiORM (tag cockpit-pin-mobile-hooks) but must be PUBLISHED to pub.dev (git checkout has no desktop binaries).
+- [ ] Test on iOS (iPad) <!-- id: k9 labels: mobile blockedBy: k14 -->
+      <!-- comment: 2026-09-12T20:05 -->
+      iOS tests passed on device. Store prep: bundle id switched to work.jacobmoura.cockpit.remote (the plain id was taken by the BDZ7AJ7ZN2 team via Xcode automatic signing); .remote and .remote.debug registered in team U843T2P7A2 through the App Store Connect API; ITSAppUsesNonExemptEncryption=false and PrivacyInfo.xcprivacy added to the Runner target. `flutter build ios --release --no-codesign` OK with the new id. Next: create the app record in App Store Connect with the .remote id, decide iPad-only vs iPhone, screenshots, privacy policy URL, demo SSH host for the reviewer.
+- [ ] Publish on the App Store <!-- id: k12 labels: cd, mobile blockedBy: k9, k16 -->
+- [ ] Publish on Google Play <!-- id: k11 labels: cd, mobile blockedBy: k8, k16 -->
+
+
+
 
 
 
@@ -119,4 +115,7 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 - [x] Kanban: card dependencies (blocked by) <!-- labels: feature -->
       Done 2026-09-12: `blockedBy: k1, k2` in the card comment (by id, either order with labels). Card footer replaced the note preview: `#id`, comment icon with count, and "blocked by N" (pending blockers only, tooltip lists them) or "blocks N". Detail panel has a Blocked by row with chips (struck through when done, unknown ids marked) and a searchable card picker. Filter popover gained Blocked/Ready toggles. Blockers get an id when linked; a card never blocks itself. Not done: the warning when moving a blocked card to the last column.
+
+- [x] Terminal output stalls when the window is on another macOS Space (was: "Possibilidade de Caffeinate") <!-- id: k4 labels: bug -->
+      Fixed 2026-09-13. Not machine sleep and not App Nap (already disabled): with the window on another Space (or minimized) Flutter stops producing frames, and the PTY output scheduler only drained inside a frame. The buffer filled, the ack to the native reader was suspended (backpressure), the kernel pipe filled and the child process (claude, dev server) blocked on write until the window came back. Now the scheduler arms a 100 ms watchdog timer per scheduled frame and drains by timer when no frame arrives, the way VS Code reads the PTY off the render loop. Rendering catches up when frames resume. A real caffeinate (keep the Mac awake while agents run) is a different feature, not needed for this symptom.
 
