@@ -12,6 +12,9 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
       macOS is done (k10). On Windows/Linux the OS starts a NEW process with the file path as argument: detect a running Cockpit (the CLI socket already exists), forward the path to it and exit; otherwise open a document window directly. Association: Inno Setup registry keys (Windows) and MimeType in the .desktop (Linux). Also register the desktop_multi_window plugin callback on those platforms (windows/runner + linux/my_application.cc) so document windows get plugins.
 
+- [ ] Kanban: long-press (or click-and-hold) on the advance arrow sends the card straight to the last column <!-- id: k19 labels: feature -->
+      Today the arrow moves the card one column forward. A long press or touch-and-hold on the same button should skip the intermediate columns and drop the card in the last column (Done). A short click keeps the current one-step behavior. Blocked cards still have no button.
+
 - [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
       Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
 
