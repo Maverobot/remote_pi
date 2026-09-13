@@ -6,28 +6,11 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 ## Backlog
 
-- [ ] Cmd+` (switch realm) leaks a backtick into the terminal <!-- id: k18 labels: bug -->
-      Cmd+` switches the realm correctly, but the terminal tab that had focus receives a literal ` each time; after a few switches the prompt holds `````` and the user has to delete them before typing. Likely cause: the shortcut is handled at the app level (CallbackShortcuts) and returns the realm switch, but the key event still reaches the terminal's text input path; the Ghostty adapter (flterm) receives a KeyDown with character "`" while Cmd is held and, since the Kitty encoder only strips Ctrl/Alt for chords, it forwards the character. Fix: either mark the shortcut as handled before the terminal sees it (KeyEventResult.handled from the app binding, checked in the terminal's onKeyEvent), or have the terminal ignore printable characters when Super/Cmd is held (no terminal takes Cmd+letter as text). Reproduce: focus a terminal tab, press Cmd+` two or three times, look at the prompt.
-
-
-
-
-
-
-
-
-
-
-
-
 - [ ] Windows/Linux: "Open with Cockpit" (file association + single instance) <!-- id: k17 labels: feature -->
       <!-- comment: 2026-09-13T16:40 -->
       Part 3 done (plugins + present channel in windows/runner/flutter_window.cpp and linux/runner/my_application.cc), so "Open in new window" from inside the app now gets plugins, title and size on Windows/Linux too. Written without a local toolchain: the first CI build for those targets validates it. Still open: single instance (forward the path to the running app via the CLI socket) and file association (Inno Setup / .desktop MimeType).
 
       macOS is done (k10). On Windows/Linux the OS starts a NEW process with the file path as argument: detect a running Cockpit (the CLI socket already exists), forward the path to it and exit; otherwise open a document window directly. Association: Inno Setup registry keys (Windows) and MimeType in the .desktop (Linux). Also register the desktop_multi_window plugin callback on those platforms (windows/runner + linux/my_application.cc) so document windows get plugins.
-
-- [ ] Document the new features on the Cockpit page of the site <!-- id: k2 labels: docs -->
-      `../site`: .env.cockpit, Restart tab, Neovim, workspace CLI, remote hosts, Gallery documents, Database panel and everything else that shipped since the page was last updated.
 
 - [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
       Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
@@ -57,6 +40,9 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 - [ ] Consolidated 2.0.0 release notes <!-- id: k1 labels: docs blockedBy: k16, k2 -->
       Every 1.x since 1.28.0 is a 2.0 beta. Write the single 2.0.0 section from the 1.x changelog entries; it is what Sparkle and the download page will show.
+
+- [ ] Document the new features on the Cockpit page of the site <!-- id: k2 labels: docs -->
+      `../site`: .env.cockpit, Restart tab, Neovim, workspace CLI, remote hosts, Gallery documents, Database panel and everything else that shipped since the page was last updated.
 
 ## Doing
 - [ ] Android CD pipeline <!-- id: k7 labels: cd, mobile -->
@@ -121,4 +107,7 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 - [x] Document window: open files in their own window (from the OS and from inside Cockpit) <!-- id: k10 labels: feature -->
       Done 2026-09-13 (macOS). Replaces the two cards "detach a file tab" and "Open with Cockpit": no tab detach on purpose (it would clash with the pane multiplexer's tab drag); instead a lightweight document window (desktop_multi_window: one engine per window, state = the path) that renders the right viewer: markdown preview, code, .kanban board, .notebook folder, media; .dbq/.http open as text (they need the workspace's connections). Opens from the file tree and viewer tab menus ("Open in new window") and from the Finder (double click / Open with) via CFBundleDocumentTypes: .kanban, .notebook (package), .ckp, .dbq as Owner; markdown and text as Alternate. Viewers now depend on a DocumentHost abstraction (the VM in the app, a standalone dart:io host in the window: no LSP, no git). External edits reload via a folder watcher. Terminal tabs in separate windows stay out (k15).
+
+- [x] Cmd+` (switch realm) leaks a backtick into the terminal <!-- id: k18 labels: bug -->
+      Fixed 2026-09-13 in flterm (0136792, tag cockpit-pin-flterm-super-keys, pinned in cockpit). The global HardwareKeyboard handler switches the realm but Flutter still delivers the key to the focused terminal; under the Kitty protocol the encoder emitted CSI 96;9u, which the prompt rendered as `. The adapter now returns ignored for press/repeat with Super (no Ctrl) and a character on desktop, before the encoder. Ctrl+C still sends 0x03; Cmd+Left still encodes CSI 1;9D.
 

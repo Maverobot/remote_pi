@@ -373,10 +373,10 @@ dependency_overrides:
   flterm:
     git:
       url: https://github.com/jacobaraujo7/libghostty.git
-      ref: cockpit-pin-flterm-deadkeys
+      ref: cockpit-pin-flterm-super-keys
       path: packages/flterm
   libghostty:
     git:
       url: https://github.com/jacobaraujo7/libghostty.git
-      ref: cockpit-pin-flterm-deadkeys
+      ref: cockpit-pin-flterm-super-keys
       path: packages/libghostty
