@@ -269,6 +269,9 @@ class _KanbanBoardViewState extends State<KanbanBoardView> {
   void _advance(KanbanCard card) =>
       _apply(KanbanEditor.advanceCard(_doc, card));
 
+  void _advanceToEnd(KanbanCard card) =>
+      _apply(KanbanEditor.advanceToEnd(_doc, card));
+
   void _moveCard(KanbanCard card, int toColumn, {int? atIndex}) =>
       _apply(KanbanEditor.moveCard(_doc, card, toColumn, atIndex: atIndex));
 
@@ -917,6 +920,7 @@ class _KanbanBoardViewState extends State<KanbanBoardView> {
       titleController: _titleCtrl,
       titleFocus: _titleFocus,
       onAdvance: () => _advance(card),
+      onAdvanceToEnd: () => _advanceToEnd(card),
       onOpen: () => _selectDetail(_selectedKey == key ? null : key),
       // Clicar no título faz as duas coisas: abre o card no painel E entra em
       // edição do texto. Antes o título (que ocupa quase todo o card) era o
@@ -1021,6 +1025,7 @@ class _KanbanBoardViewState extends State<KanbanBoardView> {
       isLastColumn: column == _doc.columns.length - 1,
       selected: _selectedKey == _keyOf(card),
       onAdvance: () => _advance(card),
+      onAdvanceToEnd: () => _advanceToEnd(card),
       onOpen: () {
         final key = _keyOf(card);
         _selectDetail(_selectedKey == key ? null : key);
@@ -1262,6 +1267,7 @@ class _CardTile extends StatelessWidget {
     required this.titleController,
     required this.titleFocus,
     required this.onAdvance,
+    required this.onAdvanceToEnd,
     required this.onOpen,
     required this.onEditTitle,
     required this.onCommitTitle,
@@ -1276,6 +1282,7 @@ class _CardTile extends StatelessWidget {
   final TextEditingController titleController;
   final FocusNode titleFocus;
   final VoidCallback onAdvance;
+  final VoidCallback onAdvanceToEnd;
   final VoidCallback onOpen;
   final VoidCallback? onEditTitle;
   final VoidCallback onCommitTitle;
@@ -1375,6 +1382,7 @@ class _CardTile extends StatelessWidget {
                               _AdvanceButton(
                                 done: isLastColumn,
                                 onTap: onAdvance,
+                                onLongPress: onAdvanceToEnd,
                               ),
                           ],
                         ),
@@ -1539,9 +1547,17 @@ class _BlockerChip extends StatelessWidget {
 /// O botão que empurra o card pra próxima coluna. Na última ele vira o check
 /// preenchido e desfaz — riscar é chegada, não uma marcação à mão.
 class _AdvanceButton extends StatelessWidget {
-  const _AdvanceButton({required this.done, required this.onTap});
+  const _AdvanceButton({
+    required this.done,
+    required this.onTap,
+    required this.onLongPress,
+  });
   final bool done;
   final VoidCallback onTap;
+
+  /// Segurar (clique ou toque longo) pula direto pra última coluna. Na última
+  /// não há pra onde pular, então o gesto some e o segurar cai no menu do card.
+  final VoidCallback onLongPress;
 
   @override
   Widget build(BuildContext context) {
@@ -1549,11 +1565,12 @@ class _AdvanceButton extends StatelessWidget {
     final tr = context.t.cockpit.kanbanView;
     return Tooltip(
       tooltip: TooltipContainer(
-        child: Text(done ? tr.advanceBack : tr.advance),
+        child: Text(done ? tr.advanceBack : tr.advanceHold),
       ).call,
       child: GestureDetector(
         // O toque no botão não abre o detalhe nem arrasta o card.
         onTap: onTap,
+        onLongPress: done ? null : onLongPress,
         child: Container(
           width: 20,
           height: 20,
@@ -1631,6 +1648,7 @@ class _ListRow extends StatelessWidget {
     required this.isLastColumn,
     required this.selected,
     required this.onAdvance,
+    required this.onAdvanceToEnd,
     required this.onOpen,
     required this.onMenu,
   });
@@ -1640,6 +1658,7 @@ class _ListRow extends StatelessWidget {
   final bool isLastColumn;
   final bool selected;
   final VoidCallback onAdvance;
+  final VoidCallback onAdvanceToEnd;
   final VoidCallback onOpen;
   final void Function(Offset position) onMenu;
 
@@ -1663,7 +1682,11 @@ class _ListRow extends StatelessWidget {
           children: [
             Container(width: 3, height: 20, color: stripe),
             const SizedBox(width: 10),
-            _AdvanceButton(done: isLastColumn, onTap: onAdvance),
+            _AdvanceButton(
+              done: isLastColumn,
+              onTap: onAdvance,
+              onLongPress: onAdvanceToEnd,
+            ),
             const SizedBox(width: 11),
             Expanded(
               child: Text(

@@ -552,6 +552,7 @@
       "cardLabels": "Labels",
       "deleteCard": "Delete card",
       "advance": "Move to next column",
+      "advanceHold": "Move to next column (hold: move to last column)",
       "advanceBack": "Move back a column",
       "emptyColumn": "No cards",
       "cardCount": {
@@ -924,9 +925,9 @@
       "general": {
         "sectionAgent": "Agent",
         "sectionEditor": "Editor",
-      "editorEngineTitle": "Engine",
-      "editorEngineCockpit": "Cockpit (default)",
-      "editorEngineNeovim": "Neovim",
+        "editorEngineTitle": "Engine",
+        "editorEngineCockpit": "Cockpit (default)",
+        "editorEngineNeovim": "Neovim",
         "neovimChecking": "Looking for Neovim…",
         "neovimNotFound": "Neovim was not found in your shell PATH.",
         "neovimRefresh": "Check again",

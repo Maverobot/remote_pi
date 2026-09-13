@@ -1837,6 +1837,9 @@ class Translations$cockpit$kanbanView$en {
 	/// en: 'Move to next column'
 	String get advance => 'Move to next column';
 
+	/// en: 'Move to next column (hold: move to last column)'
+	String get advanceHold => 'Move to next column (hold: move to last column)';
+
 	/// en: 'Move back a column'
 	String get advanceBack => 'Move back a column';
 
@@ -4717,6 +4720,7 @@ extension on Translations {
 			'cockpit.kanbanView.cardLabels' => 'Labels',
 			'cockpit.kanbanView.deleteCard' => 'Delete card',
 			'cockpit.kanbanView.advance' => 'Move to next column',
+			'cockpit.kanbanView.advanceHold' => 'Move to next column (hold: move to last column)',
 			'cockpit.kanbanView.advanceBack' => 'Move back a column',
 			'cockpit.kanbanView.emptyColumn' => 'No cards',
 			'cockpit.kanbanView.cardCount' => ({required num n}) => (_root.$meta.cardinalResolver ?? PluralResolvers.cardinal('en'))(n, one: '1 card', other: '${n} cards', ), 
@@ -4754,9 +4758,9 @@ extension on Translations {
 			'cockpit.dbMongoView.refresh' => 'Refresh',
 			'cockpit.dbMongoView.insertDocument' => 'Insert document',
 			'cockpit.dbMongoView.noDocuments' => 'No documents in this collection.',
-			'cockpit.dbMongoView.noDocumentsMatch' => 'No documents match this filter.',
 			_ => null,
 		} ?? switch (path) {
+			'cockpit.dbMongoView.noDocumentsMatch' => 'No documents match this filter.',
 			'cockpit.dbMongoView.loadMore' => 'Load more',
 			'cockpit.dbMongoView.edit' => 'Edit',
 			'cockpit.dbMongoView.insert' => 'Insert',
@@ -5268,9 +5272,9 @@ extension on Translations {
 			'settings.page.automations.generateFromSourceControlDescription' => 'Cockpit sends only the selected diff and recent commit subjects. Common credential patterns and sensitive files are redacted before the harness runs.',
 			'settings.page.automations.discoveryFailed' => 'Could not discover installed automation harnesses.',
 			'settings.page.automations.staleModel' => ({required Object model, required Object harness}) => 'Model "${model}" is no longer available for ${harness}. Using the CLI default — pick another model in Settings if needed.',
-			'settings.page.automations.recommendedSuffix' => 'Recommended',
 			_ => null,
 		} ?? switch (path) {
+			'settings.page.automations.recommendedSuffix' => 'Recommended',
 			'settings.remoteHosts.title' => 'Remote hosts',
 			'settings.remoteHosts.description' => 'Machines you reach over SSH. Adding a host here is the same as adding one from the workspace "+" menu.',
 			'settings.remoteHosts.empty' => 'No remote hosts yet.',

@@ -905,6 +905,7 @@ class _Translations$cockpit$kanbanView$pt_BR extends Translations$cockpit$kanban
 	@override String get cardLabels => 'Marcadores';
 	@override String get deleteCard => 'Apagar card';
 	@override String get advance => 'Passar pra próxima coluna';
+	@override String get advanceHold => 'Mover para a próxima coluna (segurar: mover para a última)';
 	@override String get advanceBack => 'Voltar uma coluna';
 	@override String get emptyColumn => 'Sem cards';
 	@override String cardCount({required num n}) => (_root.$meta.cardinalResolver ?? PluralResolvers.cardinal('pt'))(n,
@@ -2528,6 +2529,7 @@ extension on TranslationsPtBr {
 			'cockpit.kanbanView.cardLabels' => 'Marcadores',
 			'cockpit.kanbanView.deleteCard' => 'Apagar card',
 			'cockpit.kanbanView.advance' => 'Passar pra próxima coluna',
+			'cockpit.kanbanView.advanceHold' => 'Mover para a próxima coluna (segurar: mover para a última)',
 			'cockpit.kanbanView.advanceBack' => 'Voltar uma coluna',
 			'cockpit.kanbanView.emptyColumn' => 'Sem cards',
 			'cockpit.kanbanView.cardCount' => ({required num n}) => (_root.$meta.cardinalResolver ?? PluralResolvers.cardinal('pt'))(n, one: '1 card', other: '${n} cards', ), 
@@ -2565,9 +2567,9 @@ extension on TranslationsPtBr {
 			'cockpit.dbMongoView.refresh' => 'Atualizar',
 			'cockpit.dbMongoView.insertDocument' => 'Inserir documento',
 			'cockpit.dbMongoView.noDocuments' => 'Nenhum documento nesta coleção.',
-			'cockpit.dbMongoView.noDocumentsMatch' => 'Nenhum documento corresponde a este filtro.',
 			_ => null,
 		} ?? switch (path) {
+			'cockpit.dbMongoView.noDocumentsMatch' => 'Nenhum documento corresponde a este filtro.',
 			'cockpit.dbMongoView.loadMore' => 'Carregar mais',
 			'cockpit.dbMongoView.edit' => 'Editar',
 			'cockpit.dbMongoView.insert' => 'Inserir',
@@ -3079,9 +3081,9 @@ extension on TranslationsPtBr {
 			'settings.page.automations.generateFromSourceControlDescription' => 'O Cockpit envia apenas o diff selecionado e os assuntos dos commits recentes. Padrões comuns de credenciais e arquivos sensíveis são redigidos antes de o harness rodar.',
 			'settings.page.automations.discoveryFailed' => 'Não foi possível descobrir os harnesses de automação instalados.',
 			'settings.page.automations.staleModel' => ({required Object model, required Object harness}) => 'O modelo "${model}" não está mais disponível para ${harness}. Usando o padrão da CLI; escolha outro modelo em Configurações se precisar.',
-			'settings.page.automations.recommendedSuffix' => 'Recomendado',
 			_ => null,
 		} ?? switch (path) {
+			'settings.page.automations.recommendedSuffix' => 'Recomendado',
 			'settings.remoteHosts.title' => 'Hosts remotos',
 			'settings.remoteHosts.description' => 'Máquinas que você acessa por SSH. Adicionar um host aqui é o mesmo que adicionar pelo menu "+" do workspace.',
 			'settings.remoteHosts.empty' => 'Nenhum host remoto ainda.',

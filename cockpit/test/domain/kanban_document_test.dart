@@ -119,6 +119,23 @@ um parágrafo solto
       );
     });
 
+    test('avançar até o fim pula as intermediárias e marca [x]', () {
+      var doc = KanbanDocument.parse(_board);
+      final card = doc.columns[0].cards.first;
+      final id = card.id;
+
+      doc = KanbanDocument.parse(KanbanEditor.advanceToEnd(doc, card));
+      expect(doc.columns[1].cards.any((c) => c.id == id), isFalse);
+      final moved = doc.columns[2].cards.firstWhere((c) => c.id == id);
+      expect(moved.checked, isTrue);
+    });
+
+    test('avançar até o fim na última coluna não muda nada', () {
+      final doc = KanbanDocument.parse(_board);
+      final done = doc.columns[2].cards.single;
+      expect(KanbanEditor.advanceToEnd(doc, done), doc.content);
+    });
+
     test('avançar na última coluna volta uma e desmarca', () {
       var doc = KanbanDocument.parse(_board);
       final done = doc.columns[2].cards.single;

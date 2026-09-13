@@ -65,6 +65,15 @@ abstract final class KanbanEditor {
     return moveCard(doc, card, to);
   }
 
+  /// Manda o card direto pra última coluna, pulando as intermediárias. Na
+  /// última coluna não faz nada (o "desfazer" continua sendo o toque curto).
+  static String advanceToEnd(KanbanDocument doc, KanbanCard card) {
+    final from = _columnOf(doc, card);
+    final last = doc.columns.length - 1;
+    if (from < 0 || from >= last) return doc.content;
+    return moveCard(doc, card, last);
+  }
+
   /// Cria um card no fim de [column] com [title] e devolve o conteúdo novo.
   static String addCard(KanbanDocument doc, int column, String title) {
     if (column < 0 || column >= doc.columns.length) return doc.content;
