@@ -2,7 +2,6 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:cockpit/app/cockpit/ui/document/document_windows.dart';
-import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 /// Arquivos abertos **pelo sistema** (Finder: duplo clique, "Abrir com").
@@ -29,7 +28,7 @@ class OpenFilesChannel {
     });
     // Gancho de diagnóstico (debug): COCKPIT_OPEN_DOCUMENT=<path> abre uma
     // janela de documento no boot sem depender do Finder/LaunchServices.
-    if (kDebugMode) {
+    {
       final probe = Platform.environment['COCKPIT_OPEN_DOCUMENT'];
       if (probe != null && probe.isNotEmpty) {
         unawaited(DocumentWindows.open(probe));

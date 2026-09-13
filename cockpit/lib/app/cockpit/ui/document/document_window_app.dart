@@ -33,6 +33,22 @@ import 'package:shadcn_flutter/shadcn_flutter.dart';
 Future<void> runDocumentWindow(List<String> args) async {
   final path = DocumentWindows.pathFromArguments(args)!;
   WidgetsFlutterBinding.ensureInitialized();
+  // Qualquer falha ANTES do runApp deixaria a janela preta e muda. Erros da
+  // árvore de widgets também: sem handler, o engine desta janela não tem o
+  // runGuarded do app. Tudo vira uma tela de erro legível.
+  FlutterError.onError = (details) {
+    FlutterError.presentError(details);
+    stderr.writeln('[document-window] ${details.exception}');
+  };
+  try {
+    await _boot(path);
+  } catch (e, st) {
+    stderr.writeln('[document-window] boot failed: $e\n$st');
+    runApp(_BootError(path: path, error: '$e'));
+  }
+}
+
+Future<void> _boot(String path) async {
   // SEM MediaKit.ensureInitialized(): o holder nativo do media_kit é POR
   // PROCESSO; inicializar de novo no engine desta janela achava a referência
   // do engine principal e a DESCARTAVA (log "Found 1 reference(s). Disposing"),
@@ -50,6 +66,7 @@ Future<void> runDocumentWindow(List<String> args) async {
     const ThemeStore(),
   );
   await settings.load();
+  stderr.writeln('[document-window] booted for $path');
 
   unawaited(
     DocumentWindowChannel.present(path.split(Platform.pathSeparator).last),
@@ -63,6 +80,31 @@ Future<void> runDocumentWindow(List<String> args) async {
           ..addChangeNotifier<SettingsController>(() => settings)
           ..addChangeNotifier<EditorMenuBridge>(EditorMenuBridge.new),
         child: DocumentWindowRoot(path: path),
+      ),
+    ),
+  );
+}
+
+/// Tela de erro da janela de documento (boot falhou): texto cru, sem tema,
+/// porque o tema pode ser justamente o que falhou.
+class _BootError extends StatelessWidget {
+  const _BootError({required this.path, required this.error});
+
+  final String path;
+  final String error;
+
+  @override
+  Widget build(BuildContext context) => WidgetsApp(
+    color: const Color(0xFF1E1E1E),
+    debugShowCheckedModeBanner: false,
+    builder: (context, _) => ColoredBox(
+      color: const Color(0xFF1E1E1E),
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Text(
+          'Cockpit could not open this document.\n\n$path\n\n$error',
+          style: const TextStyle(color: Color(0xFFDDDDDD), fontSize: 13),
+        ),
       ),
     ),
   );
