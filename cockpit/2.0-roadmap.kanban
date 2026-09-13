@@ -17,20 +17,20 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 
 
-- [ ] In-app Help section (user manual) <!-- id: k5 labels: docs, feature -->
-      A Help entry inside Cockpit the user can read like a manual: shortcuts, panels, Gallery documents, CLI verbs, remote workspaces.
+- [ ] Windows/Linux: "Open with Cockpit" (file association + single instance) <!-- id: k17 labels: feature -->
+      <!-- comment: 2026-09-13T16:40 -->
+      Part 3 done (plugins + present channel in windows/runner/flutter_window.cpp and linux/runner/my_application.cc), so "Open in new window" from inside the app now gets plugins, title and size on Windows/Linux too. Written without a local toolchain: the first CI build for those targets validates it. Still open: single instance (forward the path to the running app via the CLI socket) and file association (Inno Setup / .desktop MimeType).
 
-- [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
-      Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
+      macOS is done (k10). On Windows/Linux the OS starts a NEW process with the file path as argument: detect a running Cockpit (the CLI socket already exists), forward the path to it and exit; otherwise open a document window directly. Association: Inno Setup registry keys (Windows) and MimeType in the .desktop (Linux). Also register the desktop_multi_window plugin callback on those platforms (windows/runner + linux/my_application.cc) so document windows get plugins.
 
 - [ ] Document the new features on the Cockpit page of the site <!-- id: k2 labels: docs -->
       `../site`: .env.cockpit, Restart tab, Neovim, workspace CLI, remote hosts, Gallery documents, Database panel and everything else that shipped since the page was last updated.
 
+- [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
+      Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
 
 
 
-- [ ] Windows/Linux: "Open with Cockpit" (file association + single instance) <!-- id: k17 labels: feature -->
-      macOS is done (k10). On Windows/Linux the OS starts a NEW process with the file path as argument: detect a running Cockpit (the CLI socket already exists), forward the path to it and exit; otherwise open a document window directly. Association: Inno Setup registry keys (Windows) and MimeType in the .desktop (Linux). Also register the desktop_multi_window plugin callback on those platforms (windows/runner + linux/my_application.cc) so document windows get plugins.
 
 - [ ] Remote workspace redesign (plan 58) <!-- id: k13 labels: feature -->
       Remote workspace = a host folder with worktrees, git and file tree like local; pick the folder when connecting; the "+" becomes a Local/Remote menu instead of a fixed button.
