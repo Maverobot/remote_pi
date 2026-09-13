@@ -2582,11 +2582,9 @@ class _ViewToggle extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           color: on ? colors.accent : Colors.transparent,
-          child: Icon(
-            icon,
-            size: 13,
-            color: on ? colors.accentText : colors.text3,
-          ),
+          // Sobre o fundo `accent` o ícone usa `bg` (branco no claro, quase
+          // preto no escuro): `accentText` é azul e sumia no tema claro.
+          child: Icon(icon, size: 13, color: on ? colors.bg : colors.text3),
         ),
       ),
     );

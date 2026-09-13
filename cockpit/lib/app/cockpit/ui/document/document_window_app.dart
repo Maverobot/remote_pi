@@ -16,6 +16,7 @@ import 'package:cockpit/app/core/data/setup/json_state_store.dart';
 import 'package:cockpit/app/core/data/setup/storage_location.dart';
 import 'package:cockpit/app/core/data/theme_store.dart';
 import 'package:cockpit/app/core/domain/entities/app_settings.dart';
+import 'package:cockpit/app/core/ui/app_zoom.dart';
 import 'package:cockpit/app/core/ui/clamping_scroll_behavior.dart';
 import 'package:cockpit/app/core/ui/menu/editor_menu_bridge.dart';
 import 'package:cockpit/app/core/ui/overlay/app_popover_handler.dart';
@@ -66,6 +67,7 @@ Future<void> _boot(String path) async {
     const ThemeStore(),
   );
   await settings.load();
+  _followSettingsFile(store, settings);
   stderr.writeln('[document-window] booted for $path');
 
   unawaited(
@@ -83,6 +85,27 @@ Future<void> _boot(String path) async {
       ),
     ),
   );
+}
+
+/// A janela HERDA tema, fontes e zoom do app principal e os acompanha ao
+/// vivo: observa a pasta do JSON de settings e relê quando o app grava
+/// (⌘= na janela principal escala esta também). No sentido inverso o app
+/// principal não relê; um ⌘= aqui vale pra esta janela e fica gravado.
+void _followSettingsFile(JsonStateStore store, SettingsController settings) {
+  final file = File(store.path);
+  Timer? debounce;
+  try {
+    file.parent.watch().listen((event) {
+      if (event.path != file.path) return;
+      debounce?.cancel();
+      debounce = Timer(const Duration(milliseconds: 200), () async {
+        await store.reload();
+        await settings.load();
+      });
+    });
+  } on FileSystemException {
+    // sem watcher: fica com o que leu ao abrir
+  }
 }
 
 /// Tela de erro da janela de documento (boot falhou): texto cru, sem tema,
@@ -151,17 +174,27 @@ class DocumentWindowRoot extends StatelessWidget {
             settings: s,
             theme: theme,
           );
-          return DefaultSelectionStyle(
-            selectionColor: tokens.terminal.selection,
-            cursorColor: tokens.colors.accent,
-            child: CockpitTheme(
-              colors: tokens.colors,
-              typo: tokens.typo,
-              syntax: tokens.syntax,
-              terminal: tokens.terminal,
-              child: ColoredBox(
-                color: tokens.colors.bg,
-                child: DocumentScreen(path: path),
+          // Mesmo zoom do app (⌘=/⌘-/⌘0) e mesma escala herdada das settings.
+          return CallbackShortcuts(
+            bindings: zoomBindings(controller),
+            child: Focus(
+              autofocus: true,
+              child: DefaultSelectionStyle(
+                selectionColor: tokens.terminal.selection,
+                cursorColor: tokens.colors.accent,
+                child: AppZoom(
+                  scale: s.interfaceSize / 14.0,
+                  child: CockpitTheme(
+                    colors: tokens.colors,
+                    typo: tokens.typo,
+                    syntax: tokens.syntax,
+                    terminal: tokens.terminal,
+                    child: ColoredBox(
+                      color: tokens.colors.bg,
+                      child: DocumentScreen(path: path),
+                    ),
+                  ),
+                ),
               ),
             ),
           );

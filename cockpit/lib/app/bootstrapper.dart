@@ -485,7 +485,7 @@ class WindowStateKeeper extends StatefulWidget {
 }
 
 class WindowStateKeeperState extends State<WindowStateKeeper>
-    with WindowListener {
+    with WindowListener, WidgetsBindingObserver {
   Timer? _debounce;
 
   /// O fechamento começou — daqui pra frente **nada** pergunta nada à janela.
@@ -513,7 +513,26 @@ class WindowStateKeeperState extends State<WindowStateKeeper>
     // O listener entra antes do snapshot: se a janela mudar durante os awaits,
     // o synchronizer preserva o evento mais novo e descarta a leitura obsoleta.
     windowManager.addListener(this);
+    WidgetsBinding.instance.addObserver(this);
     unawaited(_activitySync.synchronize());
+  }
+
+  /// "Usuário ausente" é do APP, não desta janela: com uma janela de
+  /// documento em foco a principal perde o key window, mas o usuário continua
+  /// aqui — pausar git poll, monitor de harness e chime nessa hora parecia a
+  /// janela "congelada". O lifecycle do app só vai a `inactive` quando o
+  /// processo inteiro perde a ativação (outro app na frente).
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.resumed:
+        _activitySync.focus();
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+      case AppLifecycleState.paused:
+      case AppLifecycleState.detached:
+        _activitySync.blur();
+    }
   }
 
   Future<WindowActivitySnapshot> _readNativeActivity() async =>
@@ -525,6 +544,7 @@ class WindowStateKeeperState extends State<WindowStateKeeper>
   @override
   void dispose() {
     windowManager.removeListener(this);
+    WidgetsBinding.instance.removeObserver(this);
     _debounce?.cancel();
     super.dispose();
   }
@@ -538,8 +558,20 @@ class WindowStateKeeperState extends State<WindowStateKeeper>
   @override
   void onWindowFocus() => _activitySync.focus();
 
+  /// Blur da JANELA não é ausência (ver [didChangeAppLifecycleState]): se o
+  /// app continua ativo, outra janela nossa é que ficou key. Só confirma o
+  /// blur quando o lifecycle diz que o app inteiro saiu de foco — com um
+  /// respiro, porque o resignKey chega antes da mudança de lifecycle.
   @override
-  void onWindowBlur() => _activitySync.blur();
+  void onWindowBlur() {
+    Future<void>.delayed(const Duration(milliseconds: 120), () {
+      if (!mounted) return;
+      if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+        return;
+      }
+      _activitySync.blur();
+    });
+  }
 
   @override
   void onWindowMinimize() => _activitySync.minimize();
