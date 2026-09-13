@@ -24,6 +24,49 @@ As versões seguem o `version:` do `pubspec.yaml` (SSOT). O campo `notes` do
     linhas não-vazias — o começo da seção deve fazer sentido sozinho.
 -->
 
+## [1.28.32] - 2026-09-13
+
+**Still a beta for the upcoming 2.0.0.** Files open in their own window,
+terminals keep working when the window is on another Space, Mermaid
+diagrams, kanban dependencies, workspace shortcuts and the first Android
+build from CI.
+
+### Added
+
+- **Document window.** Right-click a file in Files (or a viewer tab) and
+  choose Open in new window: a lightweight window with just that document,
+  markdown preview, code, kanban board or notebook, with the same theme and
+  zoom as the app. On macOS, double-clicking a `.kanban`, `.notebook`, `.ckp`
+  or `.dbq` in the Finder opens it in Cockpit; markdown and text appear under
+  Open with. Audio and video stay in the main window.
+- **Mermaid diagrams** render in the markdown preview, plus a Diagram
+  template in the Gallery.
+- **Kanban dependencies.** `blockedBy: k1, k2` in a card comment; the card
+  shows a lock with the pending count, loses the advance button and can be
+  filtered as Blocked or Ready. Cards show their number and comment count
+  instead of a note preview.
+- **Workspace shortcuts.** Shift+Cmd+N and Shift+Cmd+M (Ctrl+Shift on
+  Windows/Linux) go to the previous or next workspace, worktrees included.
+- **`.env.cockpit` on remote workspaces**, read on the host at spawn.
+- **Terminal output redaction.** Values from `.env.cockpit` are replaced by
+  `***` in the terminal, the saved scrollback and `cockpit read-tab`.
+- **Tasks from the CLI.** `cockpit run-task`, `stop-task`, `restart-task` and
+  `send-task-key` drive the Tasks panel, on local and remote workspaces.
+- **Android** APK and AAB built and signed by the release pipeline.
+
+### Fixed
+
+- **Terminals no longer stall when the window is on another macOS Space** or
+  minimized: output kept piling up until the window came back, and the agent
+  blocked on write. Output is now drained even when no frame is rendered.
+- **Accents inside Claude Code** were already fixed in 1.28.30; this release
+  also stops Cmd+` (switch realm) from leaking a backtick into a terminal
+  running a Kitty-protocol app.
+- **Remote hosts stop retrying in the background** when their workspace is
+  not selected.
+- **Dropping a file into the terminal** now keeps the keyboard focus.
+- Kanban view toggle icon was invisible in the light theme.
+
 ## [1.28.31] - 2026-09-12
 
 **Still a beta for the upcoming 2.0.0.** Kanban boards can be filtered, and
