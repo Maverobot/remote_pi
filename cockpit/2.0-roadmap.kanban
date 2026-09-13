@@ -6,6 +6,9 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
 ## Backlog
 
+- [ ] Cmd+` (switch realm) leaks a backtick into the terminal <!-- id: k18 labels: bug -->
+      Cmd+` switches the realm correctly, but the terminal tab that had focus receives a literal ` each time; after a few switches the prompt holds `````` and the user has to delete them before typing. Likely cause: the shortcut is handled at the app level (CallbackShortcuts) and returns the realm switch, but the key event still reaches the terminal's text input path; the Ghostty adapter (flterm) receives a KeyDown with character "`" while Cmd is held and, since the Kitty encoder only strips Ctrl/Alt for chords, it forwards the character. Fix: either mark the shortcut as handled before the terminal sees it (KeyEventResult.handled from the app binding, checked in the terminal's onKeyEvent), or have the terminal ignore printable characters when Super/Cmd is held (no terminal takes Cmd+letter as text). Reproduce: focus a terminal tab, press Cmd+` two or three times, look at the prompt.
+
 
 
 
