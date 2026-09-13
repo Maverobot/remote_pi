@@ -234,6 +234,7 @@ dependencies:
   slang_flutter: ^4.18.0
   launch_at_startup: ^0.5.1
   pinenacl: ^0.6.0
+  desktop_multi_window: ^0.3.1
 
 dev_dependencies:
   flutter_test:

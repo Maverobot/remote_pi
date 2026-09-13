@@ -53,6 +53,7 @@ import 'package:cockpit/app/cockpit/domain/entities/file_node.dart';
 import 'package:cockpit/app/cockpit/domain/entities/gallery_template.dart';
 import 'package:cockpit/app/core/utils/workspace_env.dart';
 import 'package:cockpit/app/cockpit/domain/services/workspace_cycle.dart';
+import 'package:cockpit/app/cockpit/ui/session/document_host.dart';
 import 'package:cockpit/app/cockpit/data/remote/remote_host_terminal_gateway.dart';
 import 'package:cockpit/i18n/strings.g.dart' as slang;
 import 'package:cockpit/app/cockpit/domain/entities/notebook_document.dart';
@@ -131,7 +132,7 @@ import 'package:flutter/scheduler.dart';
 ///
 /// As operações de pane agem no **projeto ativo** ([_selectedProjectId]) — o
 /// `IndexedStack` garante que só o projeto ativo é interativo.
-class CockpitViewModel extends ChangeNotifier {
+class CockpitViewModel extends ChangeNotifier implements DocumentHost {
   CockpitViewModel(
     this._projects,
     this._factory,
@@ -343,6 +344,7 @@ class CockpitViewModel extends ChangeNotifier {
   }
 
   /// Garante coordenador SCM na sessão (abertura, restore ou mount do FileViewer).
+  @override
   void ensureScmCoordinator(FileViewerSession session) =>
       _ensureScmCoordinator(session);
 
@@ -813,6 +815,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// Filhos de uma pasta (lazy-load da árvore de arquivos). Roteia pro
   /// filesystem REMOTO quando o workspace ativo é um host remoto (plano 58);
   /// senão, o filesystem local.
+  @override
   Future<List<FileNode>> listChildren(String path) async {
     final host = _activeRemoteHost();
     if (host == null) return _fileSystem.children(path);
@@ -1786,6 +1789,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Texto de um arquivo (local ou host remoto) pra widgets que leem vários
   /// arquivos de uma pasta (caderno). `null` = binário/ilegível.
+  @override
   Future<String?> readTextAt(String path) async {
     final view = await _readFile(path);
     return switch (view) {
@@ -1797,6 +1801,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Eventos de mudança numa pasta (caderno). Local = `Directory.watch`;
   /// remoto = vazio (o painel tem "recarregar"; plano 58 não tem fs.watch).
+  @override
   Stream<void> watchFolder(String path) {
     if (_activeRemoteHost() != null || path.isEmpty) {
       return const Stream<void>.empty();
@@ -1818,6 +1823,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Grava bytes em [path] (local ou host remoto), criando a pasta-pai local
   /// se faltar. Usado pelo caderno para `_assets/` (imagem colada/arrastada).
+  @override
   Future<bool> writeBytesAt(String path, Uint8List bytes) async {
     final host = _activeRemoteHost();
     if (host != null) {
@@ -1842,6 +1848,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Grava [content] em [path] (local ou host remoto) e bumpa a árvore.
   /// Contraparte de [readTextAt] pra abas que não são `FileViewerSession`.
+  @override
   Future<bool> writeTextAt(String path, String content) async {
     final host = _activeRemoteHost();
     if (host != null) {
@@ -2373,6 +2380,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// Caminho a exibir no breadcrumb do viewer: **relativo** à raiz do workspace
   /// quando o arquivo está dentro dele; **absoluto** quando é externo (drop do
   /// SO). Sem barra inicial — a UI fatia por `/`.
+  @override
   String displayPath(String projectId, String absolutePath) {
     final root = _projectById(projectId)?.path;
     if (root != null && _isUnder(absolutePath, root)) {
@@ -2454,6 +2462,7 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Diagnostics de todos os language servers (mesclados). O `FileViewer` filtra
   /// pelo `uri` do seu documento. Ver [LspServerPool].
+  @override
   Stream<LspDiagnosticsBatch> get lspDiagnostics => _lsp.diagnostics;
 
   /// Abre [path] no LSP (didOpen). O fallback de raiz é o caminho do projeto —
@@ -2462,6 +2471,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// arquivos fora dele (classe do SDK aberta por go-to-definition): o pool usa
   /// isso pra rotear o arquivo externo ao servidor que já existe, em vez de
   /// subir um novo com raiz no SDK. Ver `LspServerPool._rootFor`.
+  @override
   Future<void> lspOpenDocument(String path, String text, String projectId) =>
       _lsp.openDocument(
         path: path,
@@ -2470,10 +2480,12 @@ class CockpitViewModel extends ChangeNotifier {
       );
 
   /// Notifica edição (didChange, full sync).
+  @override
   Future<void> lspChangeDocument(String path, String text) =>
       _lsp.changeDocument(path: path, text: text);
 
   /// Fecha o documento no LSP (didClose + refcount).
+  @override
   Future<void> lspCloseDocument(String path) => _lsp.closeDocument(path);
 
   /// Aplica os overrides de comando do LSP (da tela "Language") no pool. Vale
@@ -2519,6 +2531,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// Formata [path] via LSP. Faz um `didChange` com [text] antes (flush do
   /// debounce) pra o servidor formatar o conteúdo mais recente, e devolve os
   /// edits a aplicar no buffer. Lista vazia = sem servidor / sem suporte / erro.
+  @override
   Future<List<LspTextEdit>> lspFormat(String path, String text) async {
     await _lsp.changeDocument(path: path, text: text);
     return _lsp.formatDocument(path);
@@ -2526,11 +2539,13 @@ class CockpitViewModel extends ChangeNotifier {
 
   /// Tokens semânticos do documento via LSP. Lista vazia se sem servidor /
   /// sem suporte / erro.
+  @override
   Future<SemanticTokens> lspSemanticTokensFull(String path) =>
       _lsp.semanticTokensFull(path);
 
   /// Go to definition: resolve location no servidor, abre arquivo + revela linha.
   /// No-op silencioso se sem servidor / sem definição / erro.
+  @override
   Future<void> goToDefinition(String path, int line, int character) async {
     final location = await _lsp.definition(path, line, character);
     if (location == null) return;
@@ -2703,6 +2718,7 @@ class CockpitViewModel extends ChangeNotifier {
     String targetDir,
   ) => files.movePath(path, targetDir);
 
+  @override
   Future<Result<void, FileOperationError>> deletePath(String path) =>
       files.deletePath(path);
 
@@ -5328,6 +5344,7 @@ class CockpitViewModel extends ChangeNotifier {
   /// 58) o `path` é vazio; a root efetiva é a pasta do pin (`remotePath`), a
   /// mesma que o painel de DB usa via `treeRootPath` — sem isso o `.dbq`
   /// resolveria conexões num root errado e listaria "(none)".
+  @override
   String? projectRootOf(String projectId) {
     final p = _projectById(projectId);
     if (p == null) return null;

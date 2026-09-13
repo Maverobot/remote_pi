@@ -281,6 +281,7 @@
       "close": "Cerrar",
       "allTabs": "Todas las pestañas",
       "pinTab": "Fijar pestaña",
+      "openInNewWindow": "Abrir en ventana nueva",
       "rename": "Renombrar",
       "openAsMarkdown": "Abrir como markdown",
       "openAsBoard": "Abrir como tablero",
@@ -350,6 +351,7 @@
       "openInFileManager": "Abrir en el gestor de archivos",
       "open": "Abrir",
       "openWith": "Abrir con",
+      "openInNewWindow": "Abrir en ventana nueva",
       "openLayout": "Abrir layout",
       "openAsMarkdown": "Abrir como markdown",
       "showGitDiff": "Mostrar diff de git",
@@ -784,6 +786,10 @@
       "reload": "Recargar",
       "urlHint": "Escribe la URL o dirección",
       "go": "Ir"
+    },
+    "documentWindow": {
+      "mediaNotSupported": "Audio y video se abren en la ventana principal de Cockpit.",
+      "fileNotFound": "Archivo no encontrado: ${path}"
     },
     "gallery": {
       "intro": "Documentos especiales de Cockpit para que veas lo que el agente de IA está haciendo.",

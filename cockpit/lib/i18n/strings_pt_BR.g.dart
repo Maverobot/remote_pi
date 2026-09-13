@@ -140,6 +140,7 @@ class _Translations$cockpit$pt_BR extends Translations$cockpit$en {
 	@override late final _Translations$cockpit$terminal$pt_BR terminal = _Translations$cockpit$terminal$pt_BR._(_root);
 	@override late final _Translations$cockpit$remoteHost$pt_BR remoteHost = _Translations$cockpit$remoteHost$pt_BR._(_root);
 	@override late final _Translations$cockpit$browserPane$pt_BR browserPane = _Translations$cockpit$browserPane$pt_BR._(_root);
+	@override late final _Translations$cockpit$documentWindow$pt_BR documentWindow = _Translations$cockpit$documentWindow$pt_BR._(_root);
 	@override late final _Translations$cockpit$gallery$pt_BR gallery = _Translations$cockpit$gallery$pt_BR._(_root);
 	@override late final _Translations$cockpit$notebook$pt_BR notebook = _Translations$cockpit$notebook$pt_BR._(_root);
 }
@@ -588,6 +589,7 @@ class _Translations$cockpit$paneView$pt_BR extends Translations$cockpit$paneView
 	@override String get close => 'Fechar';
 	@override String get allTabs => 'Todas as abas';
 	@override String get pinTab => 'Fixar aba';
+	@override String get openInNewWindow => 'Abrir em nova janela';
 	@override String get rename => 'Renomear';
 	@override String get openAsMarkdown => 'Abrir como markdown';
 	@override String get openAsBoard => 'Abrir como quadro';
@@ -664,6 +666,7 @@ class _Translations$cockpit$fileTreePanel$pt_BR extends Translations$cockpit$fil
 	@override String get openInFileManager => 'Abrir no gerenciador de arquivos';
 	@override String get open => 'Abrir';
 	@override String get openWith => 'Abrir com';
+	@override String get openInNewWindow => 'Abrir em nova janela';
 	@override String get openLayout => 'Abrir layout';
 	@override String get openAsMarkdown => 'Abrir como markdown';
 	@override String get showGitDiff => 'Mostrar diff do git';
@@ -1235,6 +1238,17 @@ class _Translations$cockpit$browserPane$pt_BR extends Translations$cockpit$brows
 	@override String get reload => 'Recarregar';
 	@override String get urlHint => 'Digite a URL ou endereço';
 	@override String get go => 'Ir';
+}
+
+// Path: cockpit.documentWindow
+class _Translations$cockpit$documentWindow$pt_BR extends Translations$cockpit$documentWindow$en {
+	_Translations$cockpit$documentWindow$pt_BR._(TranslationsPtBr root) : this._root = root, super.internal(root);
+
+	final TranslationsPtBr _root; // ignore: unused_field
+
+	// Translations
+	@override String get mediaNotSupported => 'Áudio e vídeo abrem na janela principal do Cockpit.';
+	@override String fileNotFound({required Object path}) => 'Arquivo não encontrado: ${path}';
 }
 
 // Path: cockpit.gallery
@@ -2276,6 +2290,7 @@ extension on TranslationsPtBr {
 			'cockpit.paneView.close' => 'Fechar',
 			'cockpit.paneView.allTabs' => 'Todas as abas',
 			'cockpit.paneView.pinTab' => 'Fixar aba',
+			'cockpit.paneView.openInNewWindow' => 'Abrir em nova janela',
 			'cockpit.paneView.rename' => 'Renomear',
 			'cockpit.paneView.openAsMarkdown' => 'Abrir como markdown',
 			'cockpit.paneView.openAsBoard' => 'Abrir como quadro',
@@ -2343,6 +2358,7 @@ extension on TranslationsPtBr {
 			'cockpit.fileTreePanel.openInFileManager' => 'Abrir no gerenciador de arquivos',
 			'cockpit.fileTreePanel.open' => 'Abrir',
 			'cockpit.fileTreePanel.openWith' => 'Abrir com',
+			'cockpit.fileTreePanel.openInNewWindow' => 'Abrir em nova janela',
 			'cockpit.fileTreePanel.openLayout' => 'Abrir layout',
 			'cockpit.fileTreePanel.openAsMarkdown' => 'Abrir como markdown',
 			'cockpit.fileTreePanel.showGitDiff' => 'Mostrar diff do git',
@@ -2550,10 +2566,10 @@ extension on TranslationsPtBr {
 			'cockpit.dbMongoView.insertDocument' => 'Inserir documento',
 			'cockpit.dbMongoView.noDocuments' => 'Nenhum documento nesta coleção.',
 			'cockpit.dbMongoView.noDocumentsMatch' => 'Nenhum documento corresponde a este filtro.',
-			'cockpit.dbMongoView.loadMore' => 'Carregar mais',
-			'cockpit.dbMongoView.edit' => 'Editar',
 			_ => null,
 		} ?? switch (path) {
+			'cockpit.dbMongoView.loadMore' => 'Carregar mais',
+			'cockpit.dbMongoView.edit' => 'Editar',
 			'cockpit.dbMongoView.insert' => 'Inserir',
 			'cockpit.dbConnectionDialog.chooseFileTitle' => 'Escolher banco SQLite',
 			'cockpit.dbConnectionDialog.file' => 'Arquivo',
@@ -2707,6 +2723,8 @@ extension on TranslationsPtBr {
 			'cockpit.browserPane.reload' => 'Recarregar',
 			'cockpit.browserPane.urlHint' => 'Digite a URL ou endereço',
 			'cockpit.browserPane.go' => 'Ir',
+			'cockpit.documentWindow.mediaNotSupported' => 'Áudio e vídeo abrem na janela principal do Cockpit.',
+			'cockpit.documentWindow.fileNotFound' => ({required Object path}) => 'Arquivo não encontrado: ${path}',
 			'cockpit.gallery.intro' => 'Documentos especiais do Cockpit para que você tenha o visual do que o agente de IA esteja fazendo.',
 			'cockpit.gallery.createErrorTitle' => 'Não foi possível criar o arquivo',
 			'cockpit.gallery.dbQuery.title' => 'Consulta de banco',
@@ -3062,12 +3080,12 @@ extension on TranslationsPtBr {
 			'settings.page.automations.discoveryFailed' => 'Não foi possível descobrir os harnesses de automação instalados.',
 			'settings.page.automations.staleModel' => ({required Object model, required Object harness}) => 'O modelo "${model}" não está mais disponível para ${harness}. Usando o padrão da CLI; escolha outro modelo em Configurações se precisar.',
 			'settings.page.automations.recommendedSuffix' => 'Recomendado',
+			_ => null,
+		} ?? switch (path) {
 			'settings.remoteHosts.title' => 'Hosts remotos',
 			'settings.remoteHosts.description' => 'Máquinas que você acessa por SSH. Adicionar um host aqui é o mesmo que adicionar pelo menu "+" do workspace.',
 			'settings.remoteHosts.empty' => 'Nenhum host remoto ainda.',
 			'settings.remoteHosts.add' => 'Adicionar host',
-			_ => null,
-		} ?? switch (path) {
 			'settings.remoteHosts.edit' => 'Editar',
 			'settings.remoteHosts.reconnect' => 'Reconectar',
 			'settings.remoteHosts.remove' => 'Remover',

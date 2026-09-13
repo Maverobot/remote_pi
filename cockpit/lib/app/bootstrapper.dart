@@ -17,6 +17,7 @@ import 'package:cockpit/app/core/utils/platform_kind.dart';
 import 'package:cockpit/app/core/data/setup/hive_migration.dart';
 import 'package:cockpit/app/core/data/setup/local_network_permission.dart';
 import 'package:cockpit/app/core/data/setup/json_state_store.dart';
+import 'package:cockpit/app/cockpit/ui/document/open_files_channel.dart';
 import 'package:cockpit/app/core/data/setup/storage_location.dart';
 import 'package:cockpit/app/core/data/theme_store.dart';
 import 'package:cockpit/app/core/domain/entities/app_settings.dart';
@@ -158,6 +159,9 @@ class _CockpitBootstrapperState extends State<CockpitBootstrapper> {
           _winStore = winStore;
         });
       }
+      // Arquivos abertos pelo Finder (a frio ou com o app vivo) → janela de
+      // documento. Liga cedo: o buffer nativo já pode ter caminhos.
+      if (!isMobilePlatform) unawaited(OpenFilesChannel.bind());
 
       // 2. Restaura bounds e mostra a janela já — a árvore está renderizando a
       // LoadingScreen no tema carregado acima.

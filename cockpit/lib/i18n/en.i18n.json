@@ -281,6 +281,7 @@
       "close": "Close",
       "allTabs": "All tabs",
       "pinTab": "Pin tab",
+      "openInNewWindow": "Open in new window",
       "rename": "Rename",
       "openAsMarkdown": "Open as markdown",
       "openAsBoard": "Open as board",
@@ -350,6 +351,7 @@
       "openInFileManager": "Open in file manager",
       "open": "Open",
       "openWith": "Open with",
+      "openInNewWindow": "Open in new window",
       "openLayout": "Open layout",
       "openAsMarkdown": "Open as markdown",
       "showGitDiff": "Show git diff",
@@ -784,6 +786,10 @@
       "reload": "Reload",
       "urlHint": "Enter URL or address",
       "go": "Go"
+    },
+    "documentWindow": {
+      "mediaNotSupported": "Audio and video open in the main Cockpit window.",
+      "fileNotFound": "File not found: ${path}"
     },
     "gallery": {
       "intro": "Special Cockpit documents that give you a visual of what the AI agent is doing.",

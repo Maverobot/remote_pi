@@ -6,7 +6,7 @@ import 'package:cockpit/app/cockpit/domain/entities/browser_capability.dart';
 import 'package:cockpit/app/cockpit/domain/entities/file_view.dart';
 import 'package:cockpit/app/cockpit/domain/entities/scm_line_decorations.dart';
 import 'package:cockpit/app/cockpit/ui/session/file_viewer_session.dart';
-import 'package:cockpit/app/cockpit/ui/viewmodels/cockpit_viewmodel.dart';
+import 'package:cockpit/app/cockpit/ui/session/document_host.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/agent_markdown.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/code_editor.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/file_find_bar.dart';
@@ -113,7 +113,9 @@ class _FileViewerState extends State<FileViewer> {
   /// LSP: VM (captado uma vez), assinatura de diagnostics, debounce do
   /// didChange, e tokens semânticos. `_diagnostics` espelha o último batch;
   /// `_semanticTokens` e `_semanticLegend` são locais (requeridos pro decode).
-  CockpitViewModel? _vm;
+  /// Ambiente do documento (app = CockpitViewModel; janela solta = host
+  /// standalone). Ver [DocumentHost].
+  DocumentHost? _vm;
   StreamSubscription<LspDiagnosticsBatch>? _diagSub;
   Timer? _lspDebounce;
   List<LspDiagnostic> _diagnostics = const <LspDiagnostic>[];
@@ -218,7 +220,7 @@ class _FileViewerState extends State<FileViewer> {
   /// Cobre abas restauradas no boot, onde o FileViewer monta sem ter passado
   /// por `openFile`.
   void _ensureAndBindScm(CodeEditingController controller) {
-    final vm = _vm ?? context.read<CockpitViewModel>();
+    final vm = _vm ?? documentHostOf(context);
     _vm = vm;
     vm.ensureScmCoordinator(widget.session);
     widget.session.scmCoordinator?.attachController(controller);
@@ -231,7 +233,7 @@ class _FileViewerState extends State<FileViewer> {
   /// Abre o documento no LSP e passa a escutar os diagnostics deste arquivo.
   /// No-op para linguagens sem servidor (o pool degrada graciosamente).
   void _startLsp(String text) {
-    final vm = context.read<CockpitViewModel>();
+    final vm = documentHostOf(context);
     _vm = vm;
     final path = widget.session.path;
     // Sem gate por "está dentro do workspace": arquivos externos (classe do SDK
@@ -790,10 +792,7 @@ class _FileViewerState extends State<FileViewer> {
 
   /// Raiz do workspace — limite de leitura do preview via webview.
   String get _workspaceRoot =>
-      context.read<CockpitViewModel>().projectRootOf(
-        widget.session.projectId,
-      ) ??
-      '';
+      documentHostOf(context).projectRootOf(widget.session.projectId) ?? '';
 
   @override
   Widget build(BuildContext context) {
@@ -880,10 +879,9 @@ class _FileViewerState extends State<FileViewer> {
           // Format vivem no menu File — não são repetidas aqui.
           _Toolbar(
             leading: FilePathBreadcrumb(
-              path: context.read<CockpitViewModel>().displayPath(
-                widget.session.projectId,
-                widget.session.path,
-              ),
+              path: documentHostOf(
+                context,
+              ).displayPath(widget.session.projectId, widget.session.path),
               fileName: widget.session.title,
             ),
             hasPreview: _hasPreview,

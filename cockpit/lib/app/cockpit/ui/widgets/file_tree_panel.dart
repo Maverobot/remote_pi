@@ -84,6 +84,7 @@ class FileTreePanel extends StatefulWidget {
     this.stagedPaths = const <String>[],
     this.unstagedPaths = const <String>[],
     required this.onOpenWith,
+    this.onOpenInWindow,
     this.onOpenLayout,
     this.onOpenAsSource,
     required this.onCreateInFolder,
@@ -266,6 +267,10 @@ class FileTreePanel extends StatefulWidget {
 
   /// "Open with" → abre o arquivo/pasta no app/explorador padrão do SO.
   final ValueChanged<String> onOpenWith;
+
+  /// Abre o arquivo numa janela de documento própria (desktop). `null` =
+  /// item ausente no menu (mobile).
+  final ValueChanged<String>? onOpenInWindow;
 
   /// "Open layout" (só arquivos `.ckp`): aplica o layout de orquestração.
   final ValueChanged<String>? onOpenLayout;
@@ -993,6 +998,7 @@ class _FileTreePanelState extends State<FileTreePanel> {
       onTapFile: widget.onTapFile,
       onSelectFile: widget.onSelectFile,
       onOpenWith: widget.onOpenWith,
+      onOpenInWindow: widget.onOpenInWindow,
       onOpenLayout: widget.onOpenLayout,
       onOpenAsSource: widget.onOpenAsSource,
       onCreateInFolder: widget.onCreateInFolder,
@@ -1596,6 +1602,7 @@ class _TreeEdit {
     required this.onTapFile,
     required this.onSelectFile,
     required this.onOpenWith,
+    this.onOpenInWindow,
     this.onOpenLayout,
     this.onOpenAsSource,
     required this.onCreateInFolder,
@@ -1636,6 +1643,7 @@ class _TreeEdit {
   /// "Show git diff" (menu de contexto) → abre o diff do arquivo.
   final ValueChanged<String> onShowDiff;
   final ValueChanged<String> onOpenWith;
+  final ValueChanged<String>? onOpenInWindow;
   final ValueChanged<String>? onOpenLayout;
   final ValueChanged<String>? onOpenAsSource;
   final void Function(String relativeSub, bool terminal) onCreateInFolder;
@@ -1768,6 +1776,9 @@ class _DirViewState extends State<_DirView> {
                 },
                 onDoubleTap: () => edit.onOpenFile(node.path),
                 onOpenWith: () => edit.onOpenWith(node.path),
+                onOpenInWindow: edit.onOpenInWindow == null
+                    ? null
+                    : () => edit.onOpenInWindow!(node.path),
                 onOpenLayout:
                     edit.onOpenLayout == null ||
                         !node.name.toLowerCase().endsWith('.ckp')
@@ -1884,6 +1895,9 @@ class _FolderState extends State<_Folder> {
           onNewFile: () => edit.onStartCreate(widget.node.path, false),
           onNewFolder: () => edit.onStartCreate(widget.node.path, true),
           onOpenWith: () => edit.onOpenWith(widget.node.path),
+          onOpenInWindow: edit.onOpenInWindow == null
+              ? null
+              : () => edit.onOpenInWindow!(widget.node.path),
           onStartRename: () => edit.onStartRename(widget.node.path),
           onCommitRename: (name) => edit.onCommitRename(widget.node.path, name),
           onCancelRename: edit.onCancelRename,
@@ -1932,6 +1946,7 @@ class _Row extends StatefulWidget {
     this.onTap,
     this.onDoubleTap,
     this.onOpenWith,
+    this.onOpenInWindow,
     this.onOpenLayout,
     this.onOpenAsSource,
     this.onCreateInFolder,
@@ -1964,6 +1979,7 @@ class _Row extends StatefulWidget {
 
   /// "Open with" (arquivo) / "Open in Finder" (pasta).
   final VoidCallback? onOpenWith;
+  final VoidCallback? onOpenInWindow;
 
   /// "Open layout" (só arquivos `.ckp`). `null` = item não aparece.
   final VoidCallback? onOpenLayout;
@@ -2057,6 +2073,13 @@ class _RowState extends State<_Row> {
             label: tr.openWith,
             icon: Icons.launch_outlined,
           ),
+          // Janela de documento própria (a aba, se houver, fica onde está).
+          if (widget.onOpenInWindow != null)
+            AppMenuItem(
+              value: 'open-window',
+              label: tr.openInNewWindow,
+              icon: Icons.open_in_browser,
+            ),
           // Só arquivos `.kanban`: escapa do quadro e edita o markdown cru.
           if (widget.onOpenAsSource != null)
             AppMenuItem(
@@ -2150,6 +2173,8 @@ class _RowState extends State<_Row> {
         case 'openwith':
         case 'reveal':
           widget.onOpenWith?.call();
+        case 'open-window':
+          widget.onOpenInWindow?.call();
         case 'layout':
           widget.onOpenLayout?.call();
         case 'as-source':

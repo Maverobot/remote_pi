@@ -188,6 +188,7 @@ class Translations$cockpit$en {
 	late final Translations$cockpit$terminal$en terminal = Translations$cockpit$terminal$en.internal(_root);
 	late final Translations$cockpit$remoteHost$en remoteHost = Translations$cockpit$remoteHost$en.internal(_root);
 	late final Translations$cockpit$browserPane$en browserPane = Translations$cockpit$browserPane$en.internal(_root);
+	late final Translations$cockpit$documentWindow$en documentWindow = Translations$cockpit$documentWindow$en.internal(_root);
 	late final Translations$cockpit$gallery$en gallery = Translations$cockpit$gallery$en.internal(_root);
 	late final Translations$cockpit$notebook$en notebook = Translations$cockpit$notebook$en.internal(_root);
 }
@@ -1063,6 +1064,9 @@ class Translations$cockpit$paneView$en {
 	/// en: 'Pin tab'
 	String get pinTab => 'Pin tab';
 
+	/// en: 'Open in new window'
+	String get openInNewWindow => 'Open in new window';
+
 	/// en: 'Rename'
 	String get rename => 'Rename';
 
@@ -1272,6 +1276,9 @@ class Translations$cockpit$fileTreePanel$en {
 
 	/// en: 'Open with'
 	String get openWith => 'Open with';
+
+	/// en: 'Open in new window'
+	String get openInNewWindow => 'Open in new window';
 
 	/// en: 'Open layout'
 	String get openLayout => 'Open layout';
@@ -2539,6 +2546,21 @@ class Translations$cockpit$browserPane$en {
 
 	/// en: 'Go'
 	String get go => 'Go';
+}
+
+// Path: cockpit.documentWindow
+class Translations$cockpit$documentWindow$en {
+	Translations$cockpit$documentWindow$en.internal(this._root);
+
+	final Translations _root; // ignore: unused_field
+
+	// Translations
+
+	/// en: 'Audio and video open in the main Cockpit window.'
+	String get mediaNotSupported => 'Audio and video open in the main Cockpit window.';
+
+	/// en: 'File not found: ${path}'
+	String fileNotFound({required Object path}) => 'File not found: ${path}';
 }
 
 // Path: cockpit.gallery
@@ -4457,6 +4479,7 @@ extension on Translations {
 			'cockpit.paneView.close' => 'Close',
 			'cockpit.paneView.allTabs' => 'All tabs',
 			'cockpit.paneView.pinTab' => 'Pin tab',
+			'cockpit.paneView.openInNewWindow' => 'Open in new window',
 			'cockpit.paneView.rename' => 'Rename',
 			'cockpit.paneView.openAsMarkdown' => 'Open as markdown',
 			'cockpit.paneView.openAsBoard' => 'Open as board',
@@ -4524,6 +4547,7 @@ extension on Translations {
 			'cockpit.fileTreePanel.openInFileManager' => 'Open in file manager',
 			'cockpit.fileTreePanel.open' => 'Open',
 			'cockpit.fileTreePanel.openWith' => 'Open with',
+			'cockpit.fileTreePanel.openInNewWindow' => 'Open in new window',
 			'cockpit.fileTreePanel.openLayout' => 'Open layout',
 			'cockpit.fileTreePanel.openAsMarkdown' => 'Open as markdown',
 			'cockpit.fileTreePanel.showGitDiff' => 'Show git diff',
@@ -4731,10 +4755,10 @@ extension on Translations {
 			'cockpit.dbMongoView.insertDocument' => 'Insert document',
 			'cockpit.dbMongoView.noDocuments' => 'No documents in this collection.',
 			'cockpit.dbMongoView.noDocumentsMatch' => 'No documents match this filter.',
-			'cockpit.dbMongoView.loadMore' => 'Load more',
-			'cockpit.dbMongoView.edit' => 'Edit',
 			_ => null,
 		} ?? switch (path) {
+			'cockpit.dbMongoView.loadMore' => 'Load more',
+			'cockpit.dbMongoView.edit' => 'Edit',
 			'cockpit.dbMongoView.insert' => 'Insert',
 			'cockpit.dbConnectionDialog.chooseFileTitle' => 'Choose SQLite database',
 			'cockpit.dbConnectionDialog.file' => 'File',
@@ -4888,6 +4912,8 @@ extension on Translations {
 			'cockpit.browserPane.reload' => 'Reload',
 			'cockpit.browserPane.urlHint' => 'Enter URL or address',
 			'cockpit.browserPane.go' => 'Go',
+			'cockpit.documentWindow.mediaNotSupported' => 'Audio and video open in the main Cockpit window.',
+			'cockpit.documentWindow.fileNotFound' => ({required Object path}) => 'File not found: ${path}',
 			'cockpit.gallery.intro' => 'Special Cockpit documents that give you a visual of what the AI agent is doing.',
 			'cockpit.gallery.createErrorTitle' => 'Could not create the file',
 			'cockpit.gallery.dbQuery.title' => 'Database query',
@@ -5243,12 +5269,12 @@ extension on Translations {
 			'settings.page.automations.discoveryFailed' => 'Could not discover installed automation harnesses.',
 			'settings.page.automations.staleModel' => ({required Object model, required Object harness}) => 'Model "${model}" is no longer available for ${harness}. Using the CLI default — pick another model in Settings if needed.',
 			'settings.page.automations.recommendedSuffix' => 'Recommended',
+			_ => null,
+		} ?? switch (path) {
 			'settings.remoteHosts.title' => 'Remote hosts',
 			'settings.remoteHosts.description' => 'Machines you reach over SSH. Adding a host here is the same as adding one from the workspace "+" menu.',
 			'settings.remoteHosts.empty' => 'No remote hosts yet.',
 			'settings.remoteHosts.add' => 'Add host',
-			_ => null,
-		} ?? switch (path) {
 			'settings.remoteHosts.edit' => 'Edit',
 			'settings.remoteHosts.reconnect' => 'Reconnect',
 			'settings.remoteHosts.remove' => 'Remove',

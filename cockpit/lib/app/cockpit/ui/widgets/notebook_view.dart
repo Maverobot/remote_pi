@@ -4,7 +4,7 @@ import 'dart:typed_data';
 
 import 'package:cockpit/app/cockpit/domain/entities/notebook_document.dart';
 import 'package:cockpit/app/cockpit/ui/session/notebook_session.dart';
-import 'package:cockpit/app/cockpit/ui/viewmodels/cockpit_viewmodel.dart';
+import 'package:cockpit/app/cockpit/ui/session/document_host.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/confirm_dialog.dart';
 import 'package:cockpit/app/cockpit/ui/widgets/kanban_board_view.dart'
     show kanbanDisplayPath;
@@ -24,7 +24,6 @@ import 'package:flutter/material.dart'
     as material
     show TextField, InputDecoration, InputBorder;
 import 'package:flutter/services.dart' show LogicalKeyboardKey;
-import 'package:flutter_modular/flutter_modular.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 
 /// Tab de um caderno `nome.notebook/` (plano 62, passo 4). Protótipo visual:
@@ -87,7 +86,7 @@ class _NotebookViewState extends State<NotebookView> {
   bool _listCollapsed = false;
   static const _autosaveDelay = Duration(milliseconds: 1500);
 
-  CockpitViewModel get _vm => context.read<CockpitViewModel>();
+  DocumentHost get _vm => documentHostOf(context);
 
   @override
   void initState() {

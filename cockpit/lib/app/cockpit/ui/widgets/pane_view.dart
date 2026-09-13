@@ -51,6 +51,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_modular/flutter_modular.dart';
 import 'package:cockpit/app/core/ui/widgets/app_tooltip.dart';
 import 'package:cockpit/i18n/strings.g.dart';
+import 'package:cockpit/app/cockpit/ui/document/document_windows.dart';
 import 'package:shadcn_flutter/shadcn_flutter.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:cockpit/app/core/terminal/xterm/xterm.dart';
@@ -724,6 +725,13 @@ class _TabState extends State<_Tab> {
         // do terminal, e um quadro aberto o dia todo merece um nome melhor que
         // o do arquivo.
         if (viewer != null) ...[
+          // Cópia solta numa janela de documento (a aba continua aqui).
+          if (!isMobilePlatform && !viewer.scratch)
+            AppMenuItem(
+              value: 'open-window',
+              label: tr.openInNewWindow,
+              icon: Icons.open_in_browser,
+            ),
           AppMenuItem(
             value: 'rename',
             label: tr.rename,
@@ -795,6 +803,8 @@ class _TabState extends State<_Tab> {
     switch (value) {
       case 'pin':
         if (viewer != null) viewer.pin();
+      case 'open-window':
+        if (viewer != null) unawaited(DocumentWindows.open(viewer.path));
       case 'copy-id':
         if (terminal != null) {
           await Clipboard.setData(ClipboardData(text: terminal.id));

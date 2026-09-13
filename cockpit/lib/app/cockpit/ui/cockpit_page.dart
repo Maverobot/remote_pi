@@ -10,6 +10,7 @@ import 'package:cockpit/app/cockpit/ui/actions/workspace_actions.dart';
 import 'package:cockpit/app/cockpit/ui/actions/worktree_actions.dart';
 import 'package:cockpit/app/core/app_intents.dart';
 import 'package:cockpit/app/cockpit/domain/entities/project.dart';
+import 'package:cockpit/app/cockpit/ui/document/document_windows.dart';
 import 'package:cockpit/app/cockpit/domain/entities/remote_host.dart';
 import 'package:cockpit/app/core/domain/entities/app_settings.dart';
 import 'package:cockpit/app/core/domain/entities/automation.dart';
@@ -1208,6 +1209,8 @@ class _TreePanel extends StatelessWidget {
           stagedPaths: vm.stagedAbsolutePaths(),
           unstagedPaths: vm.unstagedAbsolutePaths(),
           onOpenWith: vm.openWithDefaultApp,
+          // Janela de documento própria: só no desktop (engine extra por janela).
+          onOpenInWindow: isMobilePlatform ? null : DocumentWindows.open,
           onOpenAsSource: vm.openFileAsSource,
           onOpenLayout: (path) async {
             final res = await vm.applyLayoutFile(path);

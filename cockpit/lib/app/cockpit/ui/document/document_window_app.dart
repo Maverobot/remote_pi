@@ -1,0 +1,272 @@
+import 'dart:async';
+import 'dart:io';
+
+import 'package:cockpit/app/cockpit/data/filesystem/file_reader_impl.dart';
+import 'package:cockpit/app/cockpit/domain/entities/file_view.dart';
+import 'package:cockpit/app/cockpit/ui/document/document_windows.dart';
+import 'package:cockpit/app/cockpit/ui/document/standalone_document_host.dart';
+import 'package:cockpit/app/cockpit/ui/session/document_host.dart';
+import 'package:cockpit/app/cockpit/ui/session/file_viewer_session.dart';
+import 'package:cockpit/app/cockpit/ui/session/notebook_session.dart';
+import 'package:cockpit/app/cockpit/ui/widgets/file_viewer.dart';
+import 'package:cockpit/app/cockpit/ui/widgets/kanban_board_view.dart';
+import 'package:cockpit/app/cockpit/ui/widgets/notebook_view.dart';
+import 'package:cockpit/app/core/data/repositories/json_settings_store.dart';
+import 'package:cockpit/app/core/data/setup/json_state_store.dart';
+import 'package:cockpit/app/core/data/setup/storage_location.dart';
+import 'package:cockpit/app/core/data/theme_store.dart';
+import 'package:cockpit/app/core/domain/entities/app_settings.dart';
+import 'package:cockpit/app/core/ui/clamping_scroll_behavior.dart';
+import 'package:cockpit/app/core/ui/menu/editor_menu_bridge.dart';
+import 'package:cockpit/app/core/ui/overlay/app_popover_handler.dart';
+import 'package:cockpit/app/core/ui/settings_controller.dart';
+import 'package:cockpit/app/core/ui/themes/themes.dart';
+import 'package:cockpit/i18n/strings.g.dart';
+import 'package:flutter_modular/flutter_modular.dart';
+import 'package:shadcn_flutter/shadcn_flutter.dart';
+
+/// Entrypoint da **janela de documento** (ver [DocumentWindows]): o `main`
+/// chega aqui quando o engine foi criado pelo `desktop_multi_window` com um
+/// argumento de documento. Sobe só o necessário — settings (tema/fontes) do
+/// mesmo JSON do app, i18n e o viewer do caminho — sem módulo do Cockpit,
+/// sem projetos, sem status hook, sem LSP.
+Future<void> runDocumentWindow(List<String> args) async {
+  final path = DocumentWindows.pathFromArguments(args)!;
+  WidgetsFlutterBinding.ensureInitialized();
+  // SEM MediaKit.ensureInitialized(): o holder nativo do media_kit é POR
+  // PROCESSO; inicializar de novo no engine desta janela achava a referência
+  // do engine principal e a DESCARTAVA (log "Found 1 reference(s). Disposing"),
+  // quebrando o player da janela principal. Áudio/vídeo ficam fora da janela
+  // de documento (ver [DocumentScreen]).
+
+  await LocaleSettings.useDeviceLocale();
+  final stateDir = await StorageLocation.stateDir();
+  final store = await JsonStateStore.open(
+    stateDir,
+    JsonSettingsStore.storeName,
+  );
+  final settings = SettingsController(
+    JsonSettingsStore(store),
+    const ThemeStore(),
+  );
+  await settings.load();
+
+  unawaited(
+    DocumentWindowChannel.present(path.split(Platform.pathSeparator).last),
+  );
+
+  runApp(
+    TranslationProvider(
+      child: ModularApp(
+        module: createModule(register: (_) {}),
+        provide: (s) => s
+          ..addChangeNotifier<SettingsController>(() => settings)
+          ..addChangeNotifier<EditorMenuBridge>(EditorMenuBridge.new),
+        child: DocumentWindowRoot(path: path),
+      ),
+    ),
+  );
+}
+
+/// Raiz visual da janela de documento: mesmo tema/tokens do app (lê o
+/// [SettingsController]) em volta de um [DocumentScreen].
+class DocumentWindowRoot extends StatelessWidget {
+  const DocumentWindowRoot({super.key, required this.path});
+
+  final String path;
+
+  @override
+  Widget build(BuildContext context) {
+    final controller = context.watch<SettingsController>();
+    final s = controller.settings;
+    final theme = controller.activeTheme;
+    return ShadcnApp(
+      title: path.split(Platform.pathSeparator).last,
+      debugShowCheckedModeBanner: false,
+      popoverHandler: const AppPopoverOverlayHandler(),
+      menuHandler: const AppPopoverOverlayHandler(),
+      tooltipHandler: const AppPopoverOverlayHandler(),
+      scrollBehavior: const ClampingScrollBehavior(),
+      theme: buildTheme(
+        brightness: Brightness.light,
+        settings: s,
+        theme: theme,
+      ),
+      darkTheme: buildTheme(
+        brightness: Brightness.dark,
+        settings: s,
+        theme: theme,
+      ),
+      themeMode: switch (s.themeMode) {
+        AppThemeMode.system => ThemeMode.system,
+        AppThemeMode.light => ThemeMode.light,
+        AppThemeMode.dark => ThemeMode.dark,
+      },
+      home: Builder(
+        builder: (context) {
+          final tokens = buildTokens(
+            brightness: Theme.of(context).brightness,
+            settings: s,
+            theme: theme,
+          );
+          return DefaultSelectionStyle(
+            selectionColor: tokens.terminal.selection,
+            cursorColor: tokens.colors.accent,
+            child: CockpitTheme(
+              colors: tokens.colors,
+              typo: tokens.typo,
+              syntax: tokens.syntax,
+              terminal: tokens.terminal,
+              child: ColoredBox(
+                color: tokens.colors.bg,
+                child: DocumentScreen(path: path),
+              ),
+            ),
+          );
+        },
+      ),
+    );
+  }
+}
+
+/// Lê [path] e escolhe o viewer: pasta `.notebook` → caderno; `.kanban` →
+/// quadro; o resto → [FileViewer] (markdown com preview, código, imagem,
+/// mídia). `.dbq`/`.http` abrem como texto aqui: query e request precisam
+/// das conexões do workspace, que a janela solta não tem. Relê o arquivo
+/// quando ele muda no disco (edição em outra janela ou por agente).
+class DocumentScreen extends StatefulWidget {
+  const DocumentScreen({super.key, required this.path});
+
+  final String path;
+
+  @override
+  State<DocumentScreen> createState() => _DocumentScreenState();
+}
+
+class _DocumentScreenState extends State<DocumentScreen> {
+  static const _reader = FileReaderImpl();
+
+  late final StandaloneDocumentHost _host = StandaloneDocumentHost(
+    workspaceRoot: StandaloneDocumentHost.findWorkspaceRoot(widget.path),
+  );
+  FileViewerSession? _session;
+  NotebookSession? _notebook;
+  bool _missing = false;
+  StreamSubscription<FileSystemEvent>? _watch;
+  Timer? _debounce;
+
+  bool get _isNotebook =>
+      widget.path.toLowerCase().endsWith('.notebook') &&
+      FileSystemEntity.isDirectorySync(widget.path);
+
+  @override
+  void initState() {
+    super.initState();
+    if (_isNotebook) {
+      _notebook = NotebookSession(id: 'doc', projectId: '', path: widget.path);
+    } else {
+      unawaited(_load());
+      _watchFile();
+    }
+  }
+
+  Future<void> _load() async {
+    if (!File(widget.path).existsSync()) {
+      if (mounted) setState(() => _missing = true);
+      return;
+    }
+    final view = await _reader.read(widget.path);
+    if (!mounted) return;
+    setState(() {
+      _missing = false;
+      final current = _session;
+      if (current == null) {
+        _session = FileViewerSession(
+          id: 'doc',
+          projectId: '',
+          path: widget.path,
+          view: view,
+        );
+      } else {
+        current.view = view;
+      }
+    });
+  }
+
+  /// Observa a PASTA do arquivo (evento por nome): mais barato e robusto que
+  /// observar o arquivo, que some/renasce em editores que gravam por rename.
+  void _watchFile() {
+    final dir = File(widget.path).parent;
+    try {
+      _watch = dir.watch().listen((event) {
+        if (event.path != widget.path) return;
+        _debounce?.cancel();
+        _debounce = Timer(const Duration(milliseconds: 150), _load);
+      });
+    } on FileSystemException {
+      // sem watcher (fs exótico): a janela mostra o que leu ao abrir
+    }
+  }
+
+  Future<bool> _save(String content) async {
+    final ok = await _host.writeTextAt(widget.path, content);
+    if (ok) await _load();
+    return ok;
+  }
+
+  @override
+  void dispose() {
+    _debounce?.cancel();
+    unawaited(_watch?.cancel());
+    _session?.dispose();
+    _notebook?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final tr = context.t.cockpit.documentWindow;
+    final Widget body;
+    if (_notebook case final notebook?) {
+      body = NotebookView(
+        session: notebook,
+        active: true,
+        focused: true,
+        workspaceRoot: _host.workspaceRoot,
+      );
+    } else if (_missing) {
+      body = Center(
+        child: Text(
+          tr.fileNotFound(path: widget.path),
+          style: context.typo.body.copyWith(color: context.colors.text3),
+        ),
+      );
+    } else if (_session case final session?) {
+      if (session.view is FileViewAudio || session.view is FileViewVideo) {
+        // media_kit não pode ser inicializado num segundo engine (ver
+        // runDocumentWindow); mídia abre na janela principal.
+        body = Center(
+          child: Text(
+            tr.mediaNotSupported,
+            style: context.typo.body.copyWith(color: context.colors.text3),
+          ),
+        );
+      } else if (widget.path.toLowerCase().endsWith('.kanban')) {
+        body = KanbanBoardView(
+          session: session,
+          active: true,
+          focused: true,
+          workspaceRoot: _host.workspaceRoot,
+          onSave: _save,
+          onReload: _load,
+          onViewModeChanged: (_) {},
+        );
+      } else {
+        body = FileViewer(session: session, onSave: _save);
+      }
+    } else {
+      body = const Center(child: CircularProgressIndicator());
+    }
+    return DocumentHostScope(host: _host, child: body);
+  }
+}

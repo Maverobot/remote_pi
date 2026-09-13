@@ -1,6 +1,8 @@
 import 'dart:io';
 
 import 'package:cockpit/app/bootstrapper.dart';
+import 'package:cockpit/app/cockpit/ui/document/document_window_app.dart';
+import 'package:cockpit/app/cockpit/ui/document/document_windows.dart';
 import 'package:cockpit/app/core/data/diagnostics/diagnostics_log.dart';
 import 'package:cockpit/app/core/data/diagnostics/error_handlers.dart';
 import 'package:cockpit/app/core/data/diagnostics/linux_performance_diagnostics.dart';
@@ -20,7 +22,13 @@ import 'package:shadcn_flutter/shadcn_flutter.dart';
 /// Aqui fica só o que precisa envolver *tudo*: a captura global de erros. Um app
 /// GUI não tem stdout visível, então sem isso qualquer falha em produção some
 /// sem deixar rastro — inclusive as que fecham o app sozinho.
-Future<void> main() async {
+Future<void> main(List<String> args) async {
+  // Engine criado pelo desktop_multi_window pra uma janela de documento:
+  // sobe só o viewer (ver DocumentWindows), nunca o app inteiro.
+  if (DocumentWindows.pathFromArguments(args) != null) {
+    await runDocumentWindow(args);
+    return;
+  }
   await runGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
 
