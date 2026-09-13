@@ -2103,6 +2103,14 @@ class _RowState extends State<_Row> {
           ),
         ],
         if (isFolder) ...[
+          // Pasta `.notebook` é um documento (caderno): também abre solta.
+          if (widget.onOpenInWindow != null &&
+              widget.name.toLowerCase().endsWith('.notebook'))
+            AppMenuItem(
+              value: 'open-window',
+              label: tr.openInNewWindow,
+              icon: Icons.open_in_browser,
+            ),
           AppMenuItem(
             value: 'newfile',
             label: tr.newFile,
