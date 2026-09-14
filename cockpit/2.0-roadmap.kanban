@@ -12,6 +12,9 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 
       macOS is done (k10). On Windows/Linux the OS starts a NEW process with the file path as argument: detect a running Cockpit (the CLI socket already exists), forward the path to it and exit; otherwise open a document window directly. Association: Inno Setup registry keys (Windows) and MimeType in the .desktop (Linux). Also register the desktop_multi_window plugin callback on those platforms (windows/runner + linux/my_application.cc) so document windows get plugins.
 
+- [ ] Files pane: right-click on the empty area below the tree does nothing, so you cannot paste into the root <!-- id: k20 labels: bug -->
+      The context menu only opens on a file or folder row. Clicking the empty space at the bottom of the pane (or inside an empty folder) shows nothing, so there is no way to paste, create a file or folder at the workspace root without picking a folder first. The empty area should open the folder menu targeting the root (or the folder being viewed when it is empty).
+
 - [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
       Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
 
