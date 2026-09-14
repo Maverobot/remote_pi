@@ -15,6 +15,9 @@ labels: {bug: red, cd: orange, mobile: blue, docs: green, feature: purple, secur
 - [ ] Files pane: right-click on the empty area below the tree does nothing, so you cannot paste into the root <!-- id: k20 labels: bug -->
       The context menu only opens on a file or folder row. Clicking the empty space at the bottom of the pane (or inside an empty folder) shows nothing, so there is no way to paste, create a file or folder at the workspace root without picking a folder first. The empty area should open the folder menu targeting the root (or the folder being viewed when it is empty).
 
+- [ ] Opening a .ckp layout should replace the current layout (close the existing tabs first) <!-- id: k21 labels: feature -->
+      Today applying a .ckp file adds its terminals and splits on top of whatever is already open, so the workspace ends up with the old tabs plus the new ones. Opening a layout should mean "become this layout": close the current tabs of the workspace, then build the panes described in the file. Applies to opening from the Files pane and to `cockpit orchestrate`. Consider a confirmation when a tab has a running process.
+
 - [ ] Windows code signing via SignPath OSS <!-- id: k3 labels: cd -->
       Application submitted on signpath.org (MIT license added 2026-07-30). Once approved, integrate signing into the windows job of cockpit-release.yml. Unsigned builds keep triggering SmartScreen.
 
