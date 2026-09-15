@@ -172,22 +172,8 @@ export type ExtensionUiResponseWire =
       ask: AskResponseEnrichmentWire;
     };
 
-export type AskUserOption = { title: string; description?: string };
-
-export type AskUserResponsePayload =
-  | {
-      kind: "selection";
-      selections: string[];
-      comment?: string;
-    }
-  | {
-      kind: "freeform";
-      text: string;
-      comment?: string;
-    };
-
 export type ClientMessage =
-  | { type: "pair_request"; id: string; token: string; device_name: string; capabilities?: string[] }
+  | { type: "pair_request"; id: string; token: string; device_name: string }
   // Plan/30: optional `images` carry inline base64 attachments (one today).
   // Omitted entirely on text-only messages — the no-image path is unchanged.
   | {
@@ -202,7 +188,7 @@ export type ClientMessage =
   | { type: "approve_tool"; id: string; tool_call_id: string; decision: "allow" | "deny" }
   | { type: "cancel"; id: string; target_id: string }
   | { type: "ping"; id: string }
-  | { type: "session_sync"; id: string; limit?: number; capabilities?: string[] }
+  | { type: "session_sync"; id: string; limit?: number }
   // Plan/28 — Typed app actions on the paired Pi session. Each carries a
   // structured payload (no string parsing) and gets either `action_ok` or
   // `action_error` back. Visible side-effects (chat output, model change
@@ -215,13 +201,7 @@ export type ClientMessage =
   // Plan/57 — interactive extension prompt response (ask_user via pi-ask).
   // Mirrors RpcExtensionUIResponse; the optional `ask` envelope carries
   // pi-ask's structured answer so multi/preview/notes survive the round-trip.
-  | ExtensionUiResponseWire
-  | {
-      type: "ask_user_response";
-      id: string;
-      response?: AskUserResponsePayload;
-      cancelled?: boolean;
-    };
+  | ExtensionUiResponseWire;
 
 /**
  * Plan/30 — one inline image attachment on a `user_message`. Mirrors the
@@ -255,26 +235,6 @@ export type SessionHistoryEvent =
   // Plan/30: `images` replayed in history so a re-sync rebuilds the image
   // bubble (the bytes live in `_messageBuffer`). Omitted on text-only inputs.
   | { ts: number; type: "user_input"; id: string; text: string; images?: WireImage[] }
-  | {
-      ts: number;
-      type: "ask_user_prompt";
-      id: string;
-      question: string;
-      context?: string;
-      options: AskUserOption[];
-      allow_multiple: boolean;
-      allow_freeform: boolean;
-      allow_comment: boolean;
-      room_id?: string;
-    }
-  | {
-      ts: number;
-      type: "ask_user_resolved";
-      id: string;
-      answer_label: string;
-      cancelled: boolean;
-      room_id?: string;
-    }
   | {
       ts: number;
       type: "tool_request";
@@ -340,24 +300,6 @@ export type ServerMessage =
       text: string;
       images?: WireImage[];
       streaming_behavior?: StreamingBehavior;
-    }
-  | {
-      type: "ask_user_prompt";
-      id: string;
-      question: string;
-      context?: string;
-      options: AskUserOption[];
-      allow_multiple: boolean;
-      allow_freeform: boolean;
-      allow_comment: boolean;
-      room_id?: string;
-    }
-  | {
-      type: "ask_user_resolved";
-      id: string;
-      answer_label: string;
-      cancelled: boolean;
-      room_id?: string;
     }
   | { type: "queued_message_state"; id?: string; text?: string; items?: QueuedMessageItem[] }
   | { type: "steer_consumed"; id: string }

@@ -20,7 +20,7 @@ class MessageRecord {
   /// Tool request+result collapsed into one row (tool messages only).
   final ToolEventData? tool;
 
-  /// Ask-user prompt card persisted as an inline row.
+  /// Read-only legacy pi-ask-user history; retained for existing saved rows.
   final AskUserPromptData? askUser;
   final DateTime ts;
 

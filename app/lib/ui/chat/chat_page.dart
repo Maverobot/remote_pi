@@ -404,14 +404,6 @@ class ChatPage extends StatelessWidget {
           messages: visible,
           streaming: streaming,
           onDecide: (id, decision) => vm.approveTool(id, decision),
-          onRespondAskUser: (id, selections, freeform, comment, cancelled) =>
-              vm.respondAskUser(
-                promptId: id,
-                selections: selections,
-                freeform: freeform,
-                comment: comment,
-                cancelled: cancelled,
-              ),
         );
       }(),
     };
@@ -583,20 +575,10 @@ class _MessageList extends StatelessWidget {
   final List<ChatMessage> messages;
   final StreamingMessage? streaming;
   final void Function(String, ApproveDecision) onDecide;
-  final void Function(
-    String id,
-    List<String>? selections,
-    String? freeform,
-    String? comment,
-    bool cancelled,
-  )
-  onRespondAskUser;
-
   const _MessageList({
     required this.messages,
     required this.streaming,
     required this.onDecide,
-    required this.onRespondAskUser,
   });
 
   @override
@@ -634,10 +616,7 @@ class _MessageList extends StatelessWidget {
             AssistantMsg() => AssistantBubble(msg),
             ToolEvent() => ToolRequestCard(tool: msg, onDecide: onDecide),
             CompactionMsg() => CompactionBubble(msg),
-            AskUserPromptMsg() => AskUserPromptCard(
-              prompt: msg,
-              onRespond: onRespondAskUser,
-            ),
+            AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
           },
         );
       },

@@ -17,8 +17,6 @@ const SERVER_TYPES = new Set<ServerMessage["type"]>([
   "session_history",
   // Plan/57 — interactive extension prompt (ask_user via pi-ask).
   "extension_ui_request",
-  "ask_user_prompt",
-  "ask_user_resolved",
 ]);
 
 export class DecodeError extends Error {

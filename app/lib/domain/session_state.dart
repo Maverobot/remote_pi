@@ -172,7 +172,7 @@ class ToolEvent extends ChatMessage {
   int get hashCode => Object.hash(id, toolCallId, status);
 }
 
-/// Plan/44 — question + answer metadata for `ask_user_prompt` cards.
+/// Saved question + answer metadata from the retired pi-ask-user integration.
 class AskUserPromptChoice {
   final String title;
   final String? description;

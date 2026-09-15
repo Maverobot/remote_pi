@@ -40,6 +40,18 @@ The first run shows a short interactive wizard (agent name, default session,
 whether to auto-start the relay). On every following run, `/remote-pi` joins
 the local agent session and starts the relay automatically — no extra typing.
 
+### Interactive questions on mobile
+
+Mobile questions use the optional `@eko24ive/pi-ask` companion, loaded in the
+same Pi process as Remote Pi. Its `@eko24ive/pi-ask:*` events drive the app's
+full-screen question sheet over `extension_ui_request` / `extension_ui_response`.
+Remote Pi does not install the companion automatically.
+
+The fork's older Maverobot/pi-ask-user live integration is retired. Existing
+saved prompt cards remain readable, including unanswered cards, but cannot be
+answered or cancelled. New questions use the pi-ask sheet instead; legacy
+`ask_user_prompt` / `ask_user_response` clients are no longer supported.
+
 ### Try the agent network in 30 seconds
 
 Open **two** Pi terminals in the same directory and run `/remote-pi` in each.
