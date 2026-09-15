@@ -792,6 +792,12 @@ void main() {
           ),
         );
         await _settle();
+        expect(messages(s.epk).map((r) => r.id), [
+          'legacy-0',
+          'legacy-1',
+          'legacy-2',
+          if (events.isNotEmpty) 'latest',
+        ]);
         final legacy = messages(s.epk).where((r) => r.role == MsgRole.askUser);
         expect(legacy.map((r) => r.id), ['legacy-0', 'legacy-1', 'legacy-2']);
         expect(legacy.map((r) => r.askUser!.toJson()).toList(), saved);
@@ -800,6 +806,181 @@ void main() {
       s.sync.dispose();
     },
   );
+
+  test(
+    'history sync keeps archived questions between their neighbors and pending users last',
+    () async {
+      final s = await setup();
+      final box = LocalBoxes().openMsgsBox(s.epk, 'main');
+      final saved = [
+        MessageRecord(
+          id: 'before',
+          seq: 0,
+          role: MsgRole.user,
+          text: 'Before the question',
+          ts: DateTime.fromMillisecondsSinceEpoch(300),
+        ),
+        MessageRecord(
+          id: 'legacy-question',
+          seq: 1,
+          role: MsgRole.askUser,
+          ts: DateTime.fromMillisecondsSinceEpoch(200),
+          askUser: const AskUserPromptData(
+            question: 'Which route?',
+            context: 'Saved context',
+            options: [],
+            allowMultiple: false,
+            allowFreeform: true,
+            allowComment: false,
+          ),
+        ),
+        MessageRecord(
+          id: 'after',
+          seq: 2,
+          role: MsgRole.assistant,
+          text: 'After the question',
+          ts: DateTime.fromMillisecondsSinceEpoch(100),
+        ),
+        MessageRecord(
+          id: 'legacy-tail',
+          seq: 3,
+          role: MsgRole.askUser,
+          ts: DateTime.fromMillisecondsSinceEpoch(350),
+          askUser: const AskUserPromptData(
+            question: 'One more question?',
+            context: '',
+            options: [],
+            allowMultiple: false,
+            allowFreeform: true,
+            allowComment: false,
+          ),
+        ),
+        MessageRecord(
+          id: 'pending',
+          seq: 4,
+          role: MsgRole.user,
+          text: 'Still awaiting echo',
+          pending: true,
+          ts: DateTime.fromMillisecondsSinceEpoch(400),
+        ),
+      ];
+      for (final row in saved) {
+        await box.put(row.seq, row.toJson());
+      }
+      await _settle();
+      var writes = 0;
+      final sub = box.watch().listen((_) => writes++);
+
+      for (var sync = 0; sync < 2; sync++) {
+        s.ch.push(
+          SessionHistory(
+            inReplyTo: 'ordered-sync-$sync',
+            sessionStartedAt: 0,
+            eos: true,
+            // Server order, not timestamps, remains authoritative.
+            events: const [
+              UserInputEvt(ts: 300, id: 'before', text: 'Before the question'),
+              AgentMessageEvt(
+                ts: 100,
+                inReplyTo: 'after',
+                text: 'After the question',
+              ),
+              UserInputEvt(ts: 50, id: 'new', text: 'New server message'),
+            ],
+          ),
+        );
+        final writesBeforeSync = writes;
+        await _settle();
+        final rows = messages(s.epk);
+        expect(rows.map((r) => r.id), [
+          'before',
+          'legacy-question',
+          'after',
+          'legacy-tail',
+          'new',
+          'pending',
+        ]);
+        expect(rows[1].askUser!.toJson(), saved[1].askUser!.toJson());
+        expect(rows.last.pending, isTrue);
+        if (sync == 1) {
+          expect(writes, writesBeforeSync, reason: 'repeat sync is idempotent');
+        }
+      }
+      await sub.cancel();
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
+
+  for (final repeatedText in [false, true]) {
+    test('archived questions keep their position among shared assistant IDs '
+        '(repeated text: $repeatedText)', () async {
+      final s = await setup();
+      final box = LocalBoxes().openMsgsBox(s.epk, 'main');
+      final texts = repeatedText
+          ? ['Segment', 'Segment', 'Segment']
+          : ['Before', 'After', 'Final'];
+      final saved = [
+        for (var i = 0; i < 3; i++) ...[
+          MessageRecord(
+            id: 'shared-turn',
+            seq: i == 0 ? 0 : i + 1,
+            role: MsgRole.assistant,
+            text: texts[i],
+            ts: DateTime.fromMillisecondsSinceEpoch(10),
+          ),
+          if (i == 0)
+            MessageRecord(
+              id: 'archived',
+              seq: 1,
+              role: MsgRole.askUser,
+              ts: DateTime.fromMillisecondsSinceEpoch(20),
+              askUser: const AskUserPromptData(
+                question: 'Saved question',
+                context: '',
+                options: [],
+                allowMultiple: false,
+                allowFreeform: true,
+                allowComment: false,
+              ),
+            ),
+        ],
+      ];
+      for (final row in saved) {
+        await box.put(row.seq, row.toJson());
+      }
+      await _settle();
+
+      for (var sync = 0; sync < 2; sync++) {
+        s.ch.push(
+          SessionHistory(
+            inReplyTo: 'shared-id-sync-$sync',
+            sessionStartedAt: 0,
+            eos: true,
+            events: [
+              for (final text in texts)
+                AgentMessageEvt(ts: 10, inReplyTo: 'shared-turn', text: text),
+            ],
+          ),
+        );
+        await _settle();
+        final rows = messages(s.epk);
+        expect(rows.map((r) => r.id), [
+          'shared-turn',
+          'archived',
+          'shared-turn',
+          'shared-turn',
+        ]);
+        expect(
+          rows.where((r) => r.role == MsgRole.assistant).map((r) => r.text),
+          texts,
+        );
+        expect(rows[1].askUser!.question, 'Saved question');
+      }
+      s.conn.dispose();
+      s.sync.dispose();
+    });
+  }
 
   test('session_history retains every user image in stable order', () async {
     final s = await setup();

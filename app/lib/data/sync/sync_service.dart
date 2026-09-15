@@ -711,23 +711,77 @@ class SyncService extends Service {
     final historyIds = {for (final r in rows) _key(r.role, r.id)};
     await _enqueue(() async {
       final box = await _boxes.msgsBox(epk, room);
-      // Legacy pi-ask-user cards are now read-only local history. The new
-      // pi-ask bridge never replays these rows, so omission must not erase them.
-      // Preserve pending user rows until the Pi echoes them as before.
-      final preserved = <MessageRecord>[];
-      for (final v in box.values) {
-        final r = MessageRecord.fromJson(_coerce(v));
-        if ((r.role == MsgRole.askUser ||
-                (r.role == MsgRole.user && r.pending)) &&
-            !historyIds.contains(_key(r.role, r.id))) {
-          preserved.add(r);
+      final stored = [
+        for (final v in box.values) MessageRecord.fromJson(_coerce(v)),
+      ];
+      // Pending users still follow server history until their echo arrives.
+      final pending = [
+        for (final r in stored)
+          if (r.role == MsgRole.user &&
+              r.pending &&
+              !historyIds.contains(_key(r.role, r.id)))
+            r,
+      ];
+      stored.sort((a, b) => a.seq.compareTo(b.seq));
+      // Assistant segments share a turn ID. Match their text and occurrence
+      // so a later segment cannot replace the archived card's neighbor.
+      String anchorKey(MessageRecord r) => jsonEncode([
+        r.role.name,
+        r.id,
+        if (r.role == MsgRole.assistant) r.text,
+      ]);
+      final serverPositions = <String, List<int>>{};
+      for (var i = 0; i < rows.length; i++) {
+        (serverPositions[anchorKey(rows[i])] ??= []).add(i);
+      }
+      final occurrences = <String, int>{};
+      final storedPositions = List<int?>.filled(stored.length, null);
+      for (var i = 0; i < stored.length; i++) {
+        final key = anchorKey(stored[i]);
+        final occurrence = occurrences[key] ?? 0;
+        occurrences[key] = occurrence + 1;
+        final positions = serverPositions[key];
+        if (positions != null && occurrence < positions.length) {
+          storedPositions[i] = positions[occurrence];
         }
       }
-      // Desired ordered state: history then preserved local rows.
-      final desired = <MessageRecord>[
-        for (var i = 0; i < rows.length; i++) rows[i].copyWith(seq: i),
-        for (var j = 0; j < preserved.length; j++)
-          preserved[j].copyWith(seq: rows.length + j),
+      // Anchor archived cards to their nearest surviving successor, or their
+      // predecessor if no successor remains. Only cards are inserted: server
+      // order is authoritative even when timestamps are equal or out of order.
+      final successors = List<int?>.filled(stored.length, null);
+      int? successor;
+      for (var i = stored.length - 1; i >= 0; i--) {
+        successor = storedPositions[i] ?? successor;
+        successors[i] = successor;
+      }
+      final archived = List.generate(rows.length + 1, (_) => <MessageRecord>[]);
+      int? predecessor;
+      var lastSlot = 0;
+      for (var i = 0; i < stored.length; i++) {
+        final r = stored[i];
+        predecessor = storedPositions[i] ?? predecessor;
+        if (r.role != MsgRole.askUser) continue;
+        // A truncated history may contain neither neighbor. Use time only to
+        // place the card, never to sort or otherwise reorder server rows.
+        var slot =
+            successors[i] ??
+            (predecessor == null
+                ? rows.indexWhere((row) => row.ts.isAfter(r.ts))
+                : predecessor + 1);
+        if (slot < 0) slot = rows.length;
+        slot = math.max(lastSlot, slot);
+        archived[slot].add(r);
+        lastSlot = slot;
+      }
+      final ordered = <MessageRecord>[
+        for (var i = 0; i <= rows.length; i++) ...[
+          ...archived[i],
+          if (i < rows.length) rows[i],
+        ],
+        ...pending,
+      ];
+      final desired = [
+        for (var i = 0; i < ordered.length; i++) ordered[i].copyWith(seq: i),
       ];
       // Reconcile the box to `desired` with the MINIMUM number of writes.
       //
