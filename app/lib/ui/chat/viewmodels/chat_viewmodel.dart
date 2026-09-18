@@ -46,12 +46,10 @@ class ChatViewModel extends ViewModel<ChatState> {
   StreamingMessage? _streaming;
   bool _working = false;
   List<QueuedMsg> _queuedMessages = const [];
-  // Plan/57 — interactive extension_ui_request awaiting an answer (ask_user).
   ExtensionUiRequest? _pendingUiRequest;
-  // Plan/57 — last submit-result error for the pending request (null when none
-  // / resolved). Surfaced to the modal so the user can retry instead of staring
-  // at a closed/dismissed flow that's still blocked on desktop.
   String? _pendingUiError;
+  int _pendingUiErrorRevision = 0;
+  List<ExtensionUiFlow> _uiFlows = const [];
   RuntimeRecord _runtime = const RuntimeRecord();
   bool _pairingRevoked = false;
   String? _peerOfflineReason;
@@ -244,31 +242,46 @@ class ChatViewModel extends ViewModel<ChatState> {
     _recompute();
   }
 
-  /// Plan/57 — interactive extension_ui_request arrived (ask_user via pi-ask).
-  ///
-  /// A `notify` whose id matches the open request is either:
-  ///  - a `completed` dismiss (notify_type absent/info) → close the modal, OR
-  ///  - a submit-result warning (notify_type warning/error) → keep the modal
-  ///    open and surface the message so the user can retry.
-  /// Any non-notify request opens/replaces the modal (and clears a prior error).
   void _onExtensionUiRequest(ExtensionUiRequest req) {
+    final index = _uiFlows.indexWhere((flow) => flow.request.id == req.id);
     if (req.method == ExtensionUiMethod.notify) {
-      final matchesOpen =
-          _pendingUiRequest != null && req.id == _pendingUiRequest!.id;
-      if (matchesOpen) {
-        final isWarning =
-            req.notifyType == 'warning' || req.notifyType == 'error';
-        if (isWarning) {
-          _pendingUiError = (req.message?.isNotEmpty ?? false)
-              ? req.message
-              : 'Answer was not accepted.';
-        } else {
+      if (index < 0) return;
+      final isWarning =
+          req.notifyType == 'warning' || req.notifyType == 'error';
+      if (isWarning) {
+        if (_pendingUiRequest?.id != req.id) return;
+        _pendingUiErrorRevision++;
+        _pendingUiError = (req.message?.isNotEmpty ?? false)
+            ? req.message
+            : 'Answer was not accepted.';
+      } else {
+        _uiFlows = List.unmodifiable([
+          for (final flow in _uiFlows)
+            if (flow.request.id == req.id)
+              flow.withStatus(ExtensionUiFlowStatus.completed)
+            else
+              flow,
+        ]);
+        if (_pendingUiRequest?.id == req.id) {
           _pendingUiRequest = null;
           _pendingUiError = null;
         }
       }
-      // Unmatched notifies (stand-alone notices) are ignored in v1.
     } else {
+      // Reconnect replays must neither duplicate history nor reopen a closed
+      // flow. Keep the original request and the form's in-progress draft.
+      if (index >= 0) return;
+      _uiFlows = List.unmodifiable([
+        for (final flow in _uiFlows)
+          if (flow.status == ExtensionUiFlowStatus.pending)
+            flow.withStatus(ExtensionUiFlowStatus.replaced)
+          else
+            flow,
+        ExtensionUiFlow(
+          request: req,
+          afterMessageRowId: chatMessageRows(_messages).lastOrNull?.id,
+        ),
+      ]);
       _pendingUiRequest = req;
       _pendingUiError = null;
     }
@@ -306,8 +319,10 @@ class ChatViewModel extends ViewModel<ChatState> {
       peerPresence: peerPresence,
       isWorking: isWorking,
       queuedMessages: _queuedMessages,
+      uiFlows: _uiFlows,
       pendingUiRequest: _pendingUiRequest,
       pendingUiError: _pendingUiError,
+      pendingUiErrorRevision: _pendingUiErrorRevision,
     );
   }
 
@@ -327,21 +342,19 @@ class ChatViewModel extends ViewModel<ChatState> {
   Future<void> approveTool(String toolCallId, ApproveDecision decision) =>
       _sync.approveTool(toolCallId, decision);
 
-  /// Plan/57 — submit (or cancel) an interactive extension_ui_request.
-  ///
-  /// Does NOT clear the pending request optimistically: pi-ask may reject the
-  /// answer (`invalid_answer`) without emitting `completed`, which would close
-  /// the modal and leave the flow blocked on desktop (dead end). The modal stays
-  /// open in a "submitting" state and closes only on the `completed` dismiss
-  /// notify. A rejected answer surfaces as [_pendingUiError] for retry. We do
-  /// clear any prior error here so a retry stops showing the old message.
-  /// A send that never left the device (no live channel) errors immediately —
-  /// no point spinning 25s toward the sheet's backstop.
+  /// Sending is not acceptance. Only a matching completion notification makes
+  /// the card read-only; send failures and rejections leave it retryable.
   Future<void> respondExtensionUi(ExtensionUiResponse resp) async {
+    final request = _pendingUiRequest;
+    if (request == null || request.id != resp.id) return;
+    if (resp.ask != null && resp.ask!.flowId != request.ask?.flowId) return;
     _pendingUiError = null;
     _recompute();
     final sent = await _sync.respondExtensionUi(resp);
+    // A delayed send failure must not attach to a different or completed flow.
+    if (_disposed || !identical(_pendingUiRequest, request)) return;
     if (!sent) {
+      _pendingUiErrorRevision++;
       _pendingUiError = 'Not connected — check the link to Pi and retry.';
       _recompute();
     }
@@ -352,6 +365,10 @@ class ChatViewModel extends ViewModel<ChatState> {
     _streaming = null;
     _working = false;
     _queuedMessages = const [];
+    _uiFlows = const [];
+    _pendingUiRequest = null;
+    _pendingUiError = null;
+    _pendingUiErrorRevision = 0;
     _recompute();
     await _sync.clearActiveSession();
   }

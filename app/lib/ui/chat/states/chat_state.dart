@@ -1,6 +1,58 @@
 import 'package:app/domain/session_state.dart';
 import 'package:app/protocol/protocol.dart';
 
+/// Turn IDs repeat across roles and assistant segments. Include assistant text
+/// so trimming a different segment cannot shift an anchor onto another reply.
+/// Count identical occurrences before filtering hidden tools.
+typedef ChatMessageRowId = ({
+  Type type,
+  String messageId,
+  String? assistantText,
+  int occurrence,
+});
+
+Iterable<({ChatMessageRowId id, ChatMessage message})> chatMessageRows(
+  List<ChatMessage> messages,
+) sync* {
+  final occurrences = <(Type, String, String?), int>{};
+  for (final message in messages) {
+    final assistantText = message is AssistantMsg ? message.text : null;
+    final key = (message.runtimeType, message.id, assistantText);
+    final occurrence = occurrences[key] ?? 0;
+    occurrences[key] = occurrence + 1;
+    yield (
+      id: (
+        type: message.runtimeType,
+        messageId: message.id,
+        assistantText: assistantText,
+        occurrence: occurrence,
+      ),
+      message: message,
+    );
+  }
+}
+
+enum ExtensionUiFlowStatus { pending, completed, replaced }
+
+/// Screen-local history only; never written to the message store.
+class ExtensionUiFlow {
+  final ExtensionUiRequest request;
+  final ChatMessageRowId? afterMessageRowId;
+  final ExtensionUiFlowStatus status;
+
+  const ExtensionUiFlow({
+    required this.request,
+    required this.afterMessageRowId,
+    this.status = ExtensionUiFlowStatus.pending,
+  });
+
+  ExtensionUiFlow withStatus(ExtensionUiFlowStatus status) => ExtensionUiFlow(
+    request: request,
+    afterMessageRowId: afterMessageRowId,
+    status: status,
+  );
+}
+
 // Sealed state for ChatViewModel.
 // Switch exhaustively in ChatPage.build().
 
@@ -31,6 +83,7 @@ class ChatReady extends ChatState {
   // shows banner offering manual reconnect. `peerOfflineReason` is the
   // raw wire reason (peer_stop / session_replaced / shutdown / …).
   final String? peerOfflineReason;
+
   /// Live relay-reported presence of the active peer. When the peer is
   /// [PresenceOffline] the chat enters read-only mode (history visible,
   /// input disabled). Defaults to [PresenceUnknown] until the relay
@@ -45,16 +98,13 @@ class ChatReady extends ChatState {
   final bool isWorking;
   final List<QueuedMsg> queuedMessages;
 
-  /// Plan/57 — an interactive extension_ui_request (ask_user via pi-ask)
-  /// awaiting an answer. Non-null → the chat renders a full-screen modal.
-  /// Cleared on submit/cancel/completed. Identity compared (the ViewModel
-  /// reuses the same instance across recomputes until it changes).
+  /// Active upstream pi-ask request; cleared only on completion or replacement.
   final ExtensionUiRequest? pendingUiRequest;
-
-  /// Plan/57 — last submit-result error for [pendingUiRequest] (null when none
-  /// or resolved). Shown in the modal so the user can retry instead of hitting a
-  /// dead end when pi-ask rejects an answer.
   final String? pendingUiError;
+
+  /// Distinguishes repeated identical failures coalesced into one UI frame.
+  final int pendingUiErrorRevision;
+  final List<ExtensionUiFlow> uiFlows;
 
   String? get queuedText =>
       queuedMessages.isEmpty ? null : queuedMessages.first.text;
@@ -70,6 +120,8 @@ class ChatReady extends ChatState {
     this.queuedMessages = const [],
     this.pendingUiRequest,
     this.pendingUiError,
+    this.pendingUiErrorRevision = 0,
+    this.uiFlows = const [],
   });
 
   ChatReady copyWith({
@@ -86,29 +138,33 @@ class ChatReady extends ChatState {
     bool clearQueuedMessages = false,
     ExtensionUiRequest? pendingUiRequest,
     bool clearPendingUiRequest = false,
+    List<ExtensionUiFlow>? uiFlows,
     String? pendingUiError,
+    int? pendingUiErrorRevision,
     bool clearPendingUiError = false,
-  }) =>
-      ChatReady(
-        messages: messages ?? this.messages,
-        streaming: clearStreaming ? null : (streaming ?? this.streaming),
-        isOffline: isOffline ?? this.isOffline,
-        pairingRevoked: pairingRevoked ?? this.pairingRevoked,
-        peerOfflineReason: clearPeerOffline
-            ? null
-            : (peerOfflineReason ?? this.peerOfflineReason),
-        peerPresence: peerPresence ?? this.peerPresence,
-        isWorking: isWorking ?? this.isWorking,
-        queuedMessages: clearQueuedMessages
-            ? const []
-            : (queuedMessages ?? this.queuedMessages),
-        pendingUiRequest: clearPendingUiRequest
-            ? null
-            : (pendingUiRequest ?? this.pendingUiRequest),
-        pendingUiError: clearPendingUiError
-            ? null
-            : (pendingUiError ?? this.pendingUiError),
-      );
+  }) => ChatReady(
+    messages: messages ?? this.messages,
+    uiFlows: uiFlows ?? this.uiFlows,
+    pendingUiErrorRevision:
+        pendingUiErrorRevision ?? this.pendingUiErrorRevision,
+    streaming: clearStreaming ? null : (streaming ?? this.streaming),
+    isOffline: isOffline ?? this.isOffline,
+    pairingRevoked: pairingRevoked ?? this.pairingRevoked,
+    peerOfflineReason: clearPeerOffline
+        ? null
+        : (peerOfflineReason ?? this.peerOfflineReason),
+    peerPresence: peerPresence ?? this.peerPresence,
+    isWorking: isWorking ?? this.isWorking,
+    queuedMessages: clearQueuedMessages
+        ? const []
+        : (queuedMessages ?? this.queuedMessages),
+    pendingUiRequest: clearPendingUiRequest
+        ? null
+        : (pendingUiRequest ?? this.pendingUiRequest),
+    pendingUiError: clearPendingUiError
+        ? null
+        : (pendingUiError ?? this.pendingUiError),
+  );
 
   @override
   bool operator ==(Object other) =>
@@ -121,22 +177,26 @@ class ChatReady extends ChatState {
       other.peerPresence.runtimeType == peerPresence.runtimeType &&
       other.isWorking == isWorking &&
       other.queuedMessages == queuedMessages &&
+      other.uiFlows == uiFlows &&
       other.pendingUiRequest == pendingUiRequest &&
-      other.pendingUiError == pendingUiError;
+      other.pendingUiError == pendingUiError &&
+      other.pendingUiErrorRevision == pendingUiErrorRevision;
 
   @override
   int get hashCode => Object.hash(
-        messages,
-        streaming,
-        isOffline,
-        pairingRevoked,
-        peerOfflineReason,
-        peerPresence.runtimeType,
-        isWorking,
-        queuedMessages,
-        pendingUiRequest,
-        pendingUiError,
-      );
+    messages,
+    streaming,
+    isOffline,
+    pairingRevoked,
+    peerOfflineReason,
+    peerPresence.runtimeType,
+    isWorking,
+    queuedMessages,
+    uiFlows,
+    pendingUiRequest,
+    pendingUiError,
+    pendingUiErrorRevision,
+  );
 }
 
 // Permanent offline — must re-pair.

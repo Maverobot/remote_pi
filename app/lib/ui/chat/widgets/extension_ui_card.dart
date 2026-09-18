@@ -4,38 +4,38 @@ import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/core/themes/themes.dart';
 import 'package:flutter/material.dart';
 
-/// Plan/57 — full-screen modal rendering an interactive `extension_ui_request`
-/// (ask_user via pi-ask).
-///
-/// Drives the rich `ask` envelope when present (single/multi/preview options +
-/// custom text per question), else falls back to the plain SDK method
-/// (select/input/confirm). Submits an [ExtensionUiResponse] via [onRespond];
-/// the [ChatViewModel] clears the pending request (removing this sheet from the
-/// tree) and relays the answer to pi-ask through the bridge.
-///
-/// Validation follows pi-ask's rules: for non-multi questions a custom text and
-/// a selected value can't be combined, so custom text wins when present.
-class ExtensionUiSheet extends StatefulWidget {
-  final ExtensionUiRequest request;
+import '../states/chat_state.dart';
 
-  /// Plan/57 — submit-result rejection message for [request] (null when none /
-  /// resolved). Surfaced so the user can retry instead of hitting a dead end
-  /// when pi-ask rejects an answer.
+/// Inline upstream pi-ask form. All questions submit together; the card remains
+/// pending until Pi confirms completion. Drafts survive lazy-list scrolling.
+class ExtensionUiCard extends StatefulWidget {
+  final ExtensionUiRequest request;
+  final ExtensionUiFlowStatus status;
+
   final String? error;
+  final int errorRevision;
   final Future<void> Function(ExtensionUiResponse) onRespond;
 
-  const ExtensionUiSheet({
+  const ExtensionUiCard({
     super.key,
     required this.request,
     this.error,
+    this.errorRevision = 0,
+    this.status = ExtensionUiFlowStatus.pending,
     required this.onRespond,
   });
 
   @override
-  State<ExtensionUiSheet> createState() => _ExtensionUiSheetState();
+  State<ExtensionUiCard> createState() => _ExtensionUiCardState();
 }
 
-class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
+class _ExtensionUiCardState extends State<ExtensionUiCard>
+    with AutomaticKeepAliveClientMixin {
+  bool get _closed => widget.status != ExtensionUiFlowStatus.pending;
+
+  @override
+  bool get wantKeepAlive => !_closed;
+
   // Rich (ask) state: question id → selected option values.
   final Map<String, Set<String>> _selected = {};
   // Rich: question id → custom text controller (lazily created, disposed).
@@ -52,26 +52,19 @@ class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
   AskEnrichmentWire? get _ask => widget.request.ask;
 
   @override
-  void didUpdateWidget(covariant ExtensionUiSheet oldWidget) {
+  void didUpdateWidget(covariant ExtensionUiCard oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Either a different request replaced this one, or a rejection arrived for
-    // the same request — in both cases stop spinning so the user can act. An
-    // error being CLEARED (non-null → null) must not reset: that's the
-    // viewmodel wiping the old message at the start of a retry, and stopping
-    // there would re-enable the buttons mid-flight (double submit).
-    // NB: chat_page keys this sheet by ValueKey(request.id), so a different
-    // request id never reaches didUpdateWidget (a fresh State is created
-    // instead) — the id check below is defensive only; the live transition is
-    // "error arrived for the same request".
+    // Clearing a retry error must not re-enable an in-flight submission.
     final errorArrived =
-        widget.error != oldWidget.error && widget.error != null;
-    if (widget.request.id != oldWidget.request.id || errorArrived) {
+        widget.error != null &&
+        (widget.error != oldWidget.error ||
+            widget.errorRevision != oldWidget.errorRevision);
+    if (_closed || errorArrived) {
       _submitTimeout?.cancel();
-      setState(() {
-        _submitting = false;
-        _awaitHint = false;
-      });
+      _submitting = false;
+      _awaitHint = false;
     }
+    updateKeepAlive();
   }
 
   void _armSubmitTimeout() {
@@ -123,19 +116,18 @@ class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
   }
 
   Future<void> _submit() async {
-    if (!_canSubmit || _submitting) return;
+    if (_closed || !_canSubmit || _submitting) return;
     setState(() {
       _submitting = true;
       _awaitHint = false;
     });
     _armSubmitTimeout();
     await widget.onRespond(_buildResponse());
-    // The modal stays open until the ChatViewModel clears the pending request
-    // on the `completed` dismiss notify (or surfaces an error for retry).
+    // Keep waiting for the server's completion or rejection notification.
   }
 
   Future<void> _cancel() async {
-    if (_submitting) return;
+    if (_closed || _submitting) return;
     setState(() {
       _submitting = true;
       _awaitHint = false;
@@ -214,50 +206,72 @@ class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context);
     final colors = context.colors;
     final ask = _ask;
     final title = widget.request.title ?? ask?.title ?? 'Clarification needed';
+    final border = switch (widget.status) {
+      ExtensionUiFlowStatus.pending => colors.accent,
+      ExtensionUiFlowStatus.completed => colors.success,
+      ExtensionUiFlowStatus.replaced => colors.muted,
+    };
 
-    // System back (Android) mirrors the close button: cancel the flow instead
-    // of popping the chat route underneath while the modal is still overlaid.
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) {
-        if (!didPop && !_submitting) _cancel();
-      },
-      child: Material(
-        color: colors.bg,
-        child: SafeArea(
-          child: Scaffold(
-            backgroundColor: colors.bg,
-            resizeToAvoidBottomInset: true,
-            appBar: AppBar(
-              backgroundColor: colors.bg,
-              elevation: 0,
-              scrolledUnderElevation: 0,
-              leading: IconButton(
-                icon: const Icon(Icons.close),
-                tooltip: 'Cancel',
-                onPressed: _submitting ? null : _cancel,
-              ),
-              title: Text(title),
-            ),
-            body: ask != null
-                ? _buildRich(context, ask)
-                : _buildDegraded(context),
-            bottomNavigationBar: _buildActions(context),
-          ),
-        ),
+    return Container(
+      decoration: BoxDecoration(
+        color: colors.surface,
+        border: Border.all(color: border),
+        borderRadius: BorderRadius.circular(12),
       ),
-    );
-  }
-
-  Widget _buildRich(BuildContext context, AskEnrichmentWire ask) {
-    return ListView.separated(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-      itemCount: ask.questions.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 24),
-      itemBuilder: (context, i) => _buildQuestion(context, ask.questions[i]),
+      padding: const EdgeInsets.all(12),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Row(
+            children: [
+              Text(
+                'ASK_USER',
+                style: TextStyle(
+                  fontFamily: kMonoFamily,
+                  fontSize: 11,
+                  color: border,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.5,
+                ),
+              ),
+              const Spacer(),
+              Text(switch (widget.status) {
+                ExtensionUiFlowStatus.pending => 'Needs your input',
+                ExtensionUiFlowStatus.completed => 'Completed',
+                ExtensionUiFlowStatus.replaced => 'Replaced',
+              }, style: TextStyle(color: border)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Text(
+            title,
+            style: TextStyle(fontFamily: kMonoFamily, color: colors.text),
+          ),
+          if (_closed) ...[
+            // The bridge confirms resolution, not the accepted answer. Do not
+            // present a local draft as a result (another client may resolve it).
+            if (ask != null)
+              for (final question in ask.questions) ...[
+                const SizedBox(height: 8),
+                Text(question.prompt),
+              ],
+          ] else ...[
+            if (ask != null)
+              for (final question in ask.questions) ...[
+                const SizedBox(height: 16),
+                _buildQuestion(context, question),
+              ]
+            else
+              _buildDegraded(context),
+            _buildActions(context),
+          ],
+        ],
+      ),
     );
   }
 
@@ -458,7 +472,7 @@ class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
               style: text.titleMedium,
             ),
             // ChatViewModel consumes notify requests without opening this
-            // sheet. Keep the defensive enum branch empty; [message] above
+            // card. Keep the defensive enum branch empty; [message] above
             // already renders it once if this path ever becomes reachable.
             ExtensionUiMethod.notify => const SizedBox.shrink(),
           },
@@ -470,54 +484,52 @@ class _ExtensionUiSheetState extends State<ExtensionUiSheet> {
   Widget _buildActions(BuildContext context) {
     final colors = context.colors;
     final showError = widget.error != null && widget.error!.isNotEmpty;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            if (showError)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: Text(
-                  widget.error!,
-                  style: TextStyle(color: colors.error, fontSize: 13),
-                ),
-              )
-            else if (_awaitHint)
-              const Padding(
-                padding: EdgeInsets.only(bottom: 8),
-                child: Text(
-                  'No response from Pi yet — retry or cancel.',
-                  style: TextStyle(fontSize: 13),
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          if (showError)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: Text(
+                widget.error!,
+                style: TextStyle(color: colors.error, fontSize: 13),
+              ),
+            )
+          else if (_awaitHint)
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text(
+                'No response from Pi yet — retry or cancel.',
+                style: TextStyle(fontSize: 13),
+              ),
+            ),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: _submitting ? null : _cancel,
+                  child: const Text('Cancel'),
                 ),
               ),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: _submitting ? null : _cancel,
-                    child: const Text('Cancel'),
-                  ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: FilledButton(
+                  onPressed: (_canSubmit && !_submitting) ? _submit : null,
+                  child: _submitting
+                      ? const SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('Submit'),
                 ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: FilledButton(
-                    onPressed: (_canSubmit && !_submitting) ? _submit : null,
-                    child: _submitting
-                        ? const SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('Submit'),
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

@@ -15,7 +15,7 @@ import 'package:app/ui/chat/widgets/ask_user_prompt_card.dart';
 import 'package:app/ui/chat/widgets/message_bubble.dart';
 import 'package:app/ui/chat/widgets/streaming_bubble.dart';
 import 'package:app/ui/chat/widgets/tool_request_card.dart';
-import 'package:app/ui/chat/widgets/extension_ui_sheet.dart';
+import 'package:app/ui/chat/widgets/extension_ui_card.dart';
 import 'package:app_settings/app_settings.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
@@ -62,7 +62,7 @@ class ChatPage extends StatelessWidget {
     final vm = context.watch<ChatViewModel>();
     final state = vm.state;
 
-    final scaffold = Scaffold(
+    return Scaffold(
       backgroundColor: context.colors.bg,
       body: SafeArea(
         child: Column(
@@ -80,32 +80,6 @@ class ChatPage extends StatelessWidget {
           ],
         ),
       ),
-    );
-
-    // Plan/57 — an interactive extension_ui_request (ask_user via pi-ask)
-    // renders as a full-screen modal layered ABOVE the Scaffold. Purely
-    // reactive: the overlay leaves the tree when the pending request clears
-    // (completed dismiss) — no route lifecycle to manage. `error` carries a
-    // submit-result rejection so the modal can offer a retry instead of a dead
-    // end.
-    final ready = state is ChatReady ? state : null;
-    final uiRequest = ready?.pendingUiRequest;
-    if (uiRequest == null) return scaffold;
-    return Stack(
-      children: [
-        scaffold,
-        Positioned.fill(
-          // Keyed by request id: a new flow must get a fresh State — question
-          // ids repeat across flows (e.g. "goal"), so reusing the State would
-          // leak old selections/custom text into the new modal.
-          child: ExtensionUiSheet(
-            key: ValueKey(uiRequest.id),
-            request: uiRequest,
-            error: ready?.pendingUiError,
-            onRespond: vm.respondExtensionUi,
-          ),
-        ),
-      ],
     );
   }
 
@@ -394,14 +368,19 @@ class ChatPage extends StatelessWidget {
         // Empty body → the default placeholder (Pi brand icon + "Nothing
         // here"), shown whenever there's nothing to render — including while
         // reconnecting (the reconnect handshake never swaps the body).
-        if (visible.isEmpty && streaming == null) {
+        if (visible.isEmpty && streaming == null && state.uiFlows.isEmpty) {
           return const _EmptyState(
             icon: LucideIcons.terminal,
             message: 'Nothing here',
           );
         }
         return _MessageList(
-          messages: visible,
+          messages: messages,
+          hideToolCalls: hideToolCalls,
+          uiFlows: state.uiFlows,
+          uiError: state.pendingUiError,
+          uiErrorRevision: state.pendingUiErrorRevision,
+          onRespond: vm.respondExtensionUi,
           streaming: streaming,
           onDecide: (id, decision) => vm.approveTool(id, decision),
         );
@@ -574,52 +553,92 @@ class ChatPage extends StatelessWidget {
 class _MessageList extends StatelessWidget {
   final List<ChatMessage> messages;
   final StreamingMessage? streaming;
+  final bool hideToolCalls;
+  final List<ExtensionUiFlow> uiFlows;
+  final String? uiError;
+  final int uiErrorRevision;
+  final Future<void> Function(ExtensionUiResponse) onRespond;
   final void Function(String, ApproveDecision) onDecide;
   const _MessageList({
     required this.messages,
     required this.streaming,
+    required this.hideToolCalls,
+    required this.uiFlows,
+    required this.uiError,
+    required this.uiErrorRevision,
+    required this.onRespond,
     required this.onDecide,
   });
 
   @override
   Widget build(BuildContext context) {
-    final itemCount = messages.length + (streaming != null ? 1 : 0);
+    // Anchor cards to exact committed rows, before filtering hidden tools.
+    // Streaming stays at the tail; append/replay updates cannot move a card to
+    // the newest position. Missing anchors (e.g. cleared history) go first.
+    final rows = chatMessageRows(messages).toList();
+    final rowIds = rows.map((row) => row.id).toSet();
+    final items = <Widget>[];
+    void addFlow(ExtensionUiFlow flow) {
+      items.add(
+        ExtensionUiCard(
+          key: ValueKey(('extension-ui', flow.request.id)),
+          request: flow.request,
+          status: flow.status,
+          errorRevision: uiErrorRevision,
+          error: flow.status == ExtensionUiFlowStatus.pending ? uiError : null,
+          onRespond: onRespond,
+        ),
+      );
+    }
 
-    // `reverse: true` anchors the viewport to the bottom (offset 0 = newest)
-    // and keeps it there as content arrives — no manual scroll-to-bottom is
-    // needed. The previous animateTo-on-every-rebuild fought this and caused
-    // overlapping animations (flicker / runaway scroll) during streaming.
-    return ListView.separated(
+    for (final flow in uiFlows) {
+      if (!rowIds.contains(flow.afterMessageRowId)) addFlow(flow);
+    }
+    for (final row in rows) {
+      final msg = row.message;
+      if (!hideToolCalls || msg is! ToolEvent) {
+        items.add(
+          KeyedSubtree(
+            key: ValueKey(('message', row.id)),
+            child: switch (msg) {
+              UserMsg() => UserBubble(msg),
+              AssistantMsg() => AssistantBubble(msg),
+              ToolEvent() => ToolRequestCard(tool: msg, onDecide: onDecide),
+              CompactionMsg() => CompactionBubble(msg),
+              AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
+            },
+          ),
+        );
+      }
+      for (final flow in uiFlows) {
+        if (flow.afterMessageRowId == row.id) addFlow(flow);
+      }
+    }
+    if (streaming != null) {
+      items.add(
+        KeyedSubtree(
+          key: const ValueKey('streaming'),
+          child: StreamingBubble(streaming!),
+        ),
+      );
+    }
+    final newestFirst = items.reversed.toList();
+    final indices = {
+      for (var i = 0; i < newestFirst.length; i++) newestFirst[i].key!: i,
+    };
+
+    // Reverse anchors the viewport at the bottom. The index callback preserves
+    // kept-alive form State when new messages shift its lazy-list index.
+    return ListView.builder(
       reverse: true,
       padding: const EdgeInsets.fromLTRB(16, 18, 16, 12),
-      itemCount: itemCount,
-      separatorBuilder: (context, idx) => const SizedBox(height: 14),
-      itemBuilder: (_, i) {
-        // Index 0 = bottom = newest. Stable keys are REQUIRED here: when the
-        // streaming bubble appears/disappears at index 0 every other item's
-        // index shifts by 1, and without keys Flutter re-matches elements by
-        // position — briefly painting the wrong message at a slot (the
-        // momentary C/B/A → B/C/A reorder). Keying by message id makes it
-        // match by identity instead.
-        if (streaming != null && i == 0) {
-          return KeyedSubtree(
-            key: const ValueKey('streaming'),
-            child: StreamingBubble(streaming!),
-          );
-        }
-        final msgIdx = messages.length - 1 - (i - (streaming != null ? 1 : 0));
-        final msg = messages[msgIdx];
-        return KeyedSubtree(
-          key: ValueKey(msg.id),
-          child: switch (msg) {
-            UserMsg() => UserBubble(msg),
-            AssistantMsg() => AssistantBubble(msg),
-            ToolEvent() => ToolRequestCard(tool: msg, onDecide: onDecide),
-            CompactionMsg() => CompactionBubble(msg),
-            AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
-          },
-        );
-      },
+      itemCount: newestFirst.length,
+      findChildIndexCallback: (key) => indices[key],
+      itemBuilder: (_, i) => Padding(
+        key: newestFirst[i].key,
+        padding: EdgeInsets.only(bottom: i == 0 ? 0 : 14),
+        child: newestFirst[i],
+      ),
     );
   }
 }

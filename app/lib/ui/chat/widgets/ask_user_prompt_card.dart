@@ -3,7 +3,7 @@ import 'package:app/ui/core/themes/themes.dart';
 import 'package:flutter/material.dart';
 
 /// Read-only history from the retired pi-ask-user integration. New interactive
-/// prompts use the upstream pi-ask extension UI sheet instead.
+/// prompts use the upstream pi-ask extension UI card instead.
 class AskUserPromptCard extends StatelessWidget {
   final AskUserPromptMsg prompt;
 

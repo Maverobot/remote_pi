@@ -1,111 +1,17 @@
-// Plan/57 — ChatViewModel routing for extension_ui_request (ask_user via
-// pi-ask): open modal, submit-result warning → retry error, completed notify →
-// dismiss, and the offline fail-fast on respond.
+// Upstream pi-ask request lifecycle and screen-local history.
 
 import 'dart:async';
 import 'dart:io';
 
 import 'package:app/data/local/boxes.dart';
-import 'package:app/data/preferences/preferences.dart';
-import 'package:app/data/repositories/session_read_repository.dart';
 import 'package:app/data/sync/sync_service.dart';
-import 'package:app/data/transport/channel.dart';
 import 'package:app/data/transport/connection_manager.dart';
-import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/chat/states/chat_state.dart';
-import 'package:app/ui/chat/viewmodels/chat_viewmodel.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
-class _FakeChannel implements IChannel, IControlLink {
-  final _ctrl = StreamController<ServerMessage>.broadcast();
-  final _control = StreamController<ControlInbound>.broadcast();
-  final List<ClientMessage> sent = [];
-  Object? sendError;
-  @override
-  Stream<ServerMessage> get serverMessages => _ctrl.stream;
-  @override
-  Stream<ControlInbound> get controlFrames => _control.stream;
-  @override
-  void sendControl(Map<String, dynamic> json) {}
-  @override
-  Future<void> send(ClientMessage msg) async {
-    final error = sendError;
-    if (error != null) throw error;
-    sent.add(msg);
-  }
-
-  @override
-  Future<void> close() async {
-    await _ctrl.close();
-    await _control.close();
-  }
-
-  void push(ServerMessage m) => _ctrl.add(m);
-}
-
-class _FakeSecureStorage implements FlutterSecureStorage {
-  final Map<String, String> _s = {};
-  @override
-  Future<String?> read({
-    required String key,
-    IOSOptions? iOptions,
-    AndroidOptions? aOptions,
-    LinuxOptions? lOptions,
-    WebOptions? webOptions,
-    MacOsOptions? mOptions,
-    WindowsOptions? wOptions,
-  }) async => _s[key];
-  @override
-  Future<void> write({
-    required String key,
-    required String? value,
-    IOSOptions? iOptions,
-    AndroidOptions? aOptions,
-    LinuxOptions? lOptions,
-    WebOptions? webOptions,
-    MacOsOptions? mOptions,
-    WindowsOptions? wOptions,
-  }) async {
-    if (value == null) {
-      _s.remove(key);
-    } else {
-      _s[key] = value;
-    }
-  }
-
-  @override
-  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
-}
-
-const _peer = PeerRecord(
-  remoteEpk: 'epk_extui',
-  sessionName: 'Pi',
-  relayUrl: 'ws://localhost',
-  pairedAt: '2026-01-01T00:00:00Z',
-);
-
-class _FakeStorage extends PairingStorage {
-  @override
-  Future<List<PeerRecord>> listPeers() async => const [_peer];
-  @override
-  Future<PeerRecord?> loadPeer(String epk) async =>
-      epk == _peer.remoteEpk ? _peer : null;
-  @override
-  Future<void> savePeer(PeerRecord r) async {}
-
-  final Map<String, List<PersistedRoom>> _rooms = {};
-  @override
-  Future<void> saveRooms(String epk, List<PersistedRoom> rooms) async =>
-      _rooms[epk] = rooms;
-  @override
-  Future<List<PersistedRoom>> loadRooms(String epk) async =>
-      _rooms[epk] ?? const [];
-  @override
-  Future<void> deleteRooms(String epk) async => _rooms.remove(epk);
-}
+import 'extension_ui_test_support.dart';
 
 ExtensionUiRequest _request(String flowId) => ExtensionUiRequest(
   id: flowId,
@@ -127,39 +33,10 @@ void main() {
     await _dir.delete(recursive: true);
   });
 
-  Future<
-    ({
-      _FakeChannel ch,
-      ConnectionManager conn,
-      SyncService sync,
-      ChatViewModel vm,
-    })
-  >
-  harness() async {
-    final ch = _FakeChannel();
-    final storage = _FakeStorage();
-    final conn = ConnectionManager(
-      factory: (_, _) async => ch,
-      storage: storage,
-    );
-    final boxes = LocalBoxes();
-    final sync = SyncService(conn, boxes);
-    final read = SessionReadRepository(boxes);
-    final prefs = Preferences(_FakeSecureStorage());
-    await prefs.setSelectedPeerEpk(_peer.remoteEpk);
-    await prefs.setSelectedRoom(epk: _peer.remoteEpk, roomId: 'main');
-
-    conn.adopt(ch, _peer);
-    await Future<void>.delayed(const Duration(milliseconds: 30));
-    final vm = ChatViewModel(read, sync, conn, prefs, storage);
-    await Future<void>.delayed(const Duration(milliseconds: 50));
-    return (ch: ch, conn: conn, sync: sync, vm: vm);
-  }
-
   test(
-    'request opens modal; warning notify sets error; completed dismisses',
+    'request opens card; warning notify sets error; completion retains read-only history',
     () async {
-      final h = await harness();
+      final h = await extensionUiHarness();
 
       h.ch.push(_request('tool:f1'));
       await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -167,7 +44,7 @@ void main() {
       expect(state.pendingUiRequest?.id, 'tool:f1');
       expect(state.pendingUiError, isNull);
 
-      // submit-result rejection → same id, warning → modal stays, error set.
+      // submit-result rejection → same id, warning → card stays, error set.
       h.ch.push(
         const ExtensionUiRequest(
           id: 'tool:f1',
@@ -178,7 +55,7 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 30));
       state = h.vm.state as ChatReady;
-      expect(state.pendingUiRequest?.id, 'tool:f1', reason: 'modal stays open');
+      expect(state.pendingUiRequest?.id, 'tool:f1', reason: 'card stays open');
       expect(state.pendingUiError, 'Unknown option value.');
 
       // Retry clears the error before shipping the response.
@@ -209,8 +86,9 @@ void main() {
       );
       await Future<void>.delayed(const Duration(milliseconds: 30));
       state = h.vm.state as ChatReady;
-      expect(state.pendingUiRequest, isNull, reason: 'modal dismissed');
+      expect(state.pendingUiRequest, isNull, reason: 'request completed');
       expect(state.pendingUiError, isNull);
+      expect(state.uiFlows.single.status, ExtensionUiFlowStatus.completed);
 
       h.vm.dispose();
       h.sync.dispose();
@@ -221,12 +99,12 @@ void main() {
   test(
     'unmatched notify is ignored; new request replaces the pending one',
     () async {
-      final h = await harness();
+      final h = await extensionUiHarness();
 
       h.ch.push(_request('tool:f1'));
       await Future<void>.delayed(const Duration(milliseconds: 30));
 
-      // Notify for some other id → no effect on the open modal.
+      // Notify for some other id → no effect on the open card.
       h.ch.push(
         const ExtensionUiRequest(
           id: 'other',
@@ -253,10 +131,122 @@ void main() {
   );
 
   test(
+    'replays preserve one card and rejection; completed replay cannot reopen it',
+    () async {
+      final h = await extensionUiHarness();
+      h.ch.push(_request('tool:f1'));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      h.ch.push(
+        const ExtensionUiRequest(
+          id: 'tool:f1',
+          method: ExtensionUiMethod.notify,
+          notifyType: 'warning',
+          message: 'Retry answer',
+        ),
+      );
+      h.ch.push(_request('tool:f1'));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      var state = h.vm.state as ChatReady;
+      expect(state.uiFlows, hasLength(1));
+      expect(state.pendingUiError, 'Retry answer');
+      h.ch.push(
+        const ExtensionUiRequest(
+          id: 'tool:f1',
+          method: ExtensionUiMethod.notify,
+        ),
+      );
+      h.ch.push(_request('tool:f1'));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      state = h.vm.state as ChatReady;
+      expect(state.uiFlows.single.status, ExtensionUiFlowStatus.completed);
+      expect(state.pendingUiRequest, isNull);
+      h.vm.dispose();
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'replacement is inert; stale replies and notifications do not affect the new flow',
+    () async {
+      final h = await extensionUiHarness();
+      h.ch.push(_request('tool:f1'));
+      h.ch.push(_request('tool:f2'));
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      var state = h.vm.state as ChatReady;
+      expect(state.uiFlows.map((flow) => flow.status), [
+        ExtensionUiFlowStatus.replaced,
+        ExtensionUiFlowStatus.pending,
+      ]);
+      h.ch.sent.clear();
+      await h.vm.respondExtensionUi(
+        ExtensionUiResponse(id: 'tool:f1', cancelled: true),
+      );
+      await h.vm.respondExtensionUi(
+        ExtensionUiResponse(
+          id: 'tool:f2',
+          ask: const AskResponseEnrichmentWire(
+            flowId: 'tool:f1',
+            isCancel: true,
+          ),
+        ),
+      );
+      expect(h.ch.sent, isEmpty);
+      h.ch.push(_request('tool:f1'));
+      h.ch.push(
+        const ExtensionUiRequest(
+          id: 'tool:f1',
+          method: ExtensionUiMethod.notify,
+          notifyType: 'warning',
+          message: 'Old rejection',
+        ),
+      );
+      h.ch.push(
+        const ExtensionUiRequest(
+          id: 'tool:f1',
+          method: ExtensionUiMethod.notify,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      state = h.vm.state as ChatReady;
+      expect(state.pendingUiRequest?.id, 'tool:f2');
+      expect(state.pendingUiError, isNull);
+      expect(state.uiFlows.map((flow) => flow.status), [
+        ExtensionUiFlowStatus.completed,
+        ExtensionUiFlowStatus.pending,
+      ]);
+      h.vm.dispose();
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test('delayed send failure cannot attach to a replacement flow', () async {
+    final h = await extensionUiHarness();
+    h.ch.push(_request('tool:f1'));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    final send = Completer<void>();
+    h.ch.sendPending = send;
+    final response = h.vm.respondExtensionUi(
+      ExtensionUiResponse(id: 'tool:f1', cancelled: true),
+    );
+    h.ch.push(_request('tool:f2'));
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    send.completeError(StateError('late disconnect'));
+    await response;
+    final state = h.vm.state as ChatReady;
+    expect(state.pendingUiRequest?.id, 'tool:f2');
+    expect(state.pendingUiError, isNull);
+    h.vm.dispose();
+    h.sync.dispose();
+    h.conn.dispose();
+  });
+
+  test(
     'respond with no live channel fails fast with a retryable error',
     () async {
-      final ch = _FakeChannel();
-      final storage = _FakeStorage();
+      final ch = ExtensionUiTestChannel();
+      final storage = ExtensionUiTestStorage();
       final conn = ConnectionManager(
         factory: (_, _) async => ch,
         storage: storage,
@@ -276,8 +266,8 @@ void main() {
     },
   );
 
-  test('send exception becomes a retryable modal error', () async {
-    final h = await harness();
+  test('send exception becomes a retryable card error', () async {
+    final h = await extensionUiHarness();
 
     h.ch.push(_request('tool:f1'));
     await Future<void>.delayed(const Duration(milliseconds: 30));
@@ -292,7 +282,7 @@ void main() {
     );
 
     final state = h.vm.state as ChatReady;
-    expect(state.pendingUiRequest?.id, 'tool:f1', reason: 'modal stays open');
+    expect(state.pendingUiRequest?.id, 'tool:f1', reason: 'card stays open');
     expect(
       state.pendingUiError,
       'Not connected — check the link to Pi and retry.',
