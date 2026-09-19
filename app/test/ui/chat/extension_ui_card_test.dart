@@ -45,6 +45,7 @@ void main() {
     WidgetTester tester, {
     required ExtensionUiRequest request,
     String? error,
+    ExtensionUiResponse? submittedResponse,
     ExtensionUiFlowStatus status = ExtensionUiFlowStatus.pending,
     Future<void> Function(ExtensionUiResponse)? onRespond,
   }) {
@@ -56,6 +57,7 @@ void main() {
               key: ValueKey(request.id),
               request: request,
               status: status,
+              submittedResponse: submittedResponse,
               error: error,
               onRespond: onRespond ?? (_) async {},
             ),
@@ -366,6 +368,28 @@ void main() {
       expect(answers['multi']!.values, ['a', 'b']);
       expect(answers['multi']!.customText, 'Custom multi');
       expect(answers['preview']!.values, ['p']);
+      await pumpCard(
+        tester,
+        request: request,
+        status: ExtensionUiFlowStatus.completed,
+        submittedResponse: sent.single,
+      );
+      expect(find.text('Submitted on this device'), findsOneWidget);
+      for (final text in [
+        'Single question',
+        'Custom single',
+        'Multi question',
+        'Multi A',
+        'Multi B',
+        'Custom multi',
+        'Preview question',
+        'Preview option',
+      ]) {
+        expect(find.text(text), findsOneWidget);
+      }
+      expect(find.text('Single option'), findsNothing);
+      expect(find.byType(TextField), findsNothing);
+      expect(find.byType(FilledButton), findsNothing);
     },
   );
 

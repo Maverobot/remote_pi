@@ -47,6 +47,7 @@ class ChatViewModel extends ViewModel<ChatState> {
   bool _working = false;
   List<QueuedMsg> _queuedMessages = const [];
   ExtensionUiRequest? _pendingUiRequest;
+  ExtensionUiResponse? _uiSubmission;
   String? _pendingUiError;
   int _pendingUiErrorRevision = 0;
   List<ExtensionUiFlow> _uiFlows = const [];
@@ -186,6 +187,13 @@ class ChatViewModel extends ViewModel<ChatState> {
 
   void _onMessages(List<MessageRecord> rows) {
     _messages = [for (final r in rows) r.toChatMessage()];
+    _uiFlows = List.unmodifiable(
+      _uiFlows.map((flow) {
+        if (!flow.awaitingToolRow) return flow;
+        final rowId = _toolRowId(flow.request.ask!.toolCallId!);
+        return rowId == null ? flow : flow.anchoredAfter(rowId);
+      }),
+    );
     _recompute();
   }
 
@@ -242,6 +250,17 @@ class ChatViewModel extends ViewModel<ChatState> {
     _recompute();
   }
 
+  ChatMessageRowId? _toolRowId(String toolCallId) {
+    for (final row in chatMessageRows(_messages)) {
+      if (row.message case ToolEvent(
+        toolCallId: final id,
+      ) when id == toolCallId) {
+        return row.id;
+      }
+    }
+    return null;
+  }
+
   void _onExtensionUiRequest(ExtensionUiRequest req) {
     final index = _uiFlows.indexWhere((flow) => flow.request.id == req.id);
     if (req.method == ExtensionUiMethod.notify) {
@@ -249,11 +268,16 @@ class ChatViewModel extends ViewModel<ChatState> {
       final isWarning =
           req.notifyType == 'warning' || req.notifyType == 'error';
       if (isWarning) {
-        if (_pendingUiRequest?.id != req.id) return;
-        _pendingUiErrorRevision++;
-        _pendingUiError = (req.message?.isNotEmpty ?? false)
-            ? req.message
-            : 'Answer was not accepted.';
+        // Rejection can follow completion when another client resolves first.
+        // Invalidate only this flow, including a send that has not returned.
+        if (_uiSubmission?.id == req.id) _uiSubmission = null;
+        _setSubmittedResponse(req.id, null);
+        if (_pendingUiRequest?.id == req.id) {
+          _pendingUiErrorRevision++;
+          _pendingUiError = (req.message?.isNotEmpty ?? false)
+              ? req.message
+              : 'Answer was not accepted.';
+        }
       } else {
         _uiFlows = List.unmodifiable([
           for (final flow in _uiFlows)
@@ -271,6 +295,7 @@ class ChatViewModel extends ViewModel<ChatState> {
       // Reconnect replays must neither duplicate history nor reopen a closed
       // flow. Keep the original request and the form's in-progress draft.
       if (index >= 0) return;
+      _uiSubmission = null;
       _uiFlows = List.unmodifiable([
         for (final flow in _uiFlows)
           if (flow.status == ExtensionUiFlowStatus.pending)
@@ -279,7 +304,9 @@ class ChatViewModel extends ViewModel<ChatState> {
             flow,
         ExtensionUiFlow(
           request: req,
-          afterMessageRowId: chatMessageRows(_messages).lastOrNull?.id,
+          afterMessageRowId: req.ask?.toolCallId != null
+              ? _toolRowId(req.ask!.toolCallId!)
+              : chatMessageRows(_messages).lastOrNull?.id,
         ),
       ]);
       _pendingUiRequest = req;
@@ -348,16 +375,57 @@ class ChatViewModel extends ViewModel<ChatState> {
     final request = _pendingUiRequest;
     if (request == null || request.id != resp.id) return;
     if (resp.ask != null && resp.ask!.flowId != request.ask?.flowId) return;
+    // Copy collections at submission time: later edits/retries are not answers.
+    final ask = resp.ask;
+    final submission = ExtensionUiResponse(
+      id: resp.id,
+      value: resp.value,
+      confirmed: resp.confirmed,
+      cancelled: resp.cancelled,
+      ask: ask == null
+          ? null
+          : AskResponseEnrichmentWire(
+              flowId: ask.flowId,
+              isCancel: ask.isCancel,
+              mode: ask.mode,
+              answers: Map.unmodifiable({
+                for (final entry in ask.answers.entries)
+                  entry.key: AskAnswerWire(
+                    values: List.unmodifiable(entry.value.values),
+                    customText: entry.value.customText,
+                    note: entry.value.note,
+                    optionNotes: Map.unmodifiable(entry.value.optionNotes),
+                  ),
+              }),
+            ),
+    );
+    _uiSubmission = submission;
+    _setSubmittedResponse(request.id, null);
     _pendingUiError = null;
     _recompute();
-    final sent = await _sync.respondExtensionUi(resp);
-    // A delayed send failure must not attach to a different or completed flow.
-    if (_disposed || !identical(_pendingUiRequest, request)) return;
-    if (!sent) {
+    final sent = await _sync.respondExtensionUi(submission);
+    // Reject stale sends after rejection, retry, replacement or session reset.
+    // A completion may arrive BEFORE send finishes: keep a successful snapshot
+    // on that completed flow, but never turn a failed send into a local answer.
+    if (_disposed || !identical(_uiSubmission, submission)) return;
+    if (sent && !submission.cancelled && submission.ask?.isCancel != true) {
+      _setSubmittedResponse(request.id, submission);
+    }
+    if (!sent && identical(_pendingUiRequest, request)) {
       _pendingUiErrorRevision++;
       _pendingUiError = 'Not connected — check the link to Pi and retry.';
-      _recompute();
     }
+    _recompute();
+  }
+
+  void _setSubmittedResponse(String id, ExtensionUiResponse? response) {
+    _uiFlows = List.unmodifiable([
+      for (final flow in _uiFlows)
+        if (flow.request.id == id)
+          flow.withSubmittedResponse(response)
+        else
+          flow,
+    ]);
   }
 
   Future<void> clearActiveSession() async {
@@ -366,6 +434,7 @@ class ChatViewModel extends ViewModel<ChatState> {
     _working = false;
     _queuedMessages = const [];
     _uiFlows = const [];
+    _uiSubmission = null;
     _pendingUiRequest = null;
     _pendingUiError = null;
     _pendingUiErrorRevision = 0;

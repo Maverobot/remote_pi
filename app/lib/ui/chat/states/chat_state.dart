@@ -40,16 +40,41 @@ class ExtensionUiFlow {
   final ChatMessageRowId? afterMessageRowId;
   final ExtensionUiFlowStatus status;
 
+  /// Successfully sent locally, not an authoritative server-accepted answer.
+  final ExtensionUiResponse? submittedResponse;
+
   const ExtensionUiFlow({
     required this.request,
     required this.afterMessageRowId,
     this.status = ExtensionUiFlowStatus.pending,
+    this.submittedResponse,
   });
+
+  // A correlated tool can still be in SyncService's asynchronous write queue.
+  // Once resolved, keep the exact row even if history later truncates it away.
+  bool get awaitingToolRow =>
+      request.ask?.toolCallId != null && afterMessageRowId == null;
+
+  ExtensionUiFlow anchoredAfter(ChatMessageRowId rowId) => ExtensionUiFlow(
+    request: request,
+    afterMessageRowId: rowId,
+    status: status,
+    submittedResponse: submittedResponse,
+  );
+
+  ExtensionUiFlow withSubmittedResponse(ExtensionUiResponse? response) =>
+      ExtensionUiFlow(
+        request: request,
+        afterMessageRowId: afterMessageRowId,
+        status: status,
+        submittedResponse: response,
+      );
 
   ExtensionUiFlow withStatus(ExtensionUiFlowStatus status) => ExtensionUiFlow(
     request: request,
     afterMessageRowId: afterMessageRowId,
     status: status,
+    submittedResponse: submittedResponse,
   );
 }
 

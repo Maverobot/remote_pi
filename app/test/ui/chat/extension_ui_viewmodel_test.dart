@@ -242,6 +242,209 @@ void main() {
     h.conn.dispose();
   });
 
+  for (final boundary in [
+    'completion',
+    'rejection',
+    'reset',
+    'replacement',
+    'send failure',
+    'rejection after completion',
+  ]) {
+    test('in-flight submission snapshot respects $boundary', () async {
+      final h = await extensionUiHarness();
+      try {
+        await h.vm.clearActiveSession();
+        h.ch.push(_request('snapshot'));
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        final send = Completer<void>();
+        h.ch.sendPending = send;
+        final values = ['a'];
+        final answers = {
+          'goal': AskAnswerWire(values: values, customText: 'Sent text'),
+        };
+        final response = h.vm.respondExtensionUi(
+          ExtensionUiResponse(
+            id: 'snapshot',
+            ask: AskResponseEnrichmentWire(
+              flowId: 'snapshot',
+              mode: 'submit',
+              answers: answers,
+            ),
+          ),
+        );
+        h.ch.sendPending = null;
+        values.add('b');
+        answers.clear();
+        expect(
+          (h.vm.state as ChatReady).uiFlows.single.submittedResponse,
+          isNull,
+        );
+        if (boundary == 'reset') {
+          await h.vm.clearActiveSession();
+        } else if (boundary == 'replacement') {
+          h.ch.push(_request('replacement'));
+        } else {
+          if (boundary == 'rejection') {
+            h.ch.push(
+              const ExtensionUiRequest(
+                id: 'snapshot',
+                method: ExtensionUiMethod.notify,
+                notifyType: 'warning',
+                message: 'Rejected',
+              ),
+            );
+          }
+          h.ch.push(
+            const ExtensionUiRequest(
+              id: 'snapshot',
+              method: ExtensionUiMethod.notify,
+            ),
+          );
+        }
+        if (boundary == 'rejection after completion') {
+          h.ch.push(
+            const ExtensionUiRequest(
+              id: 'snapshot',
+              method: ExtensionUiMethod.notify,
+              notifyType: 'warning',
+              message: 'Flow is no longer active',
+            ),
+          );
+        }
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+        if (boundary == 'send failure') {
+          send.completeError(StateError('late disconnect'));
+        } else {
+          send.complete();
+        }
+        await response;
+        final state = h.vm.state as ChatReady;
+        if (boundary == 'completion') {
+          expect(state.uiFlows.single.status, ExtensionUiFlowStatus.completed);
+          final submitted =
+              state.uiFlows.single.submittedResponse!.ask!.answers['goal']!;
+          expect(submitted.values, ['a']);
+          expect(submitted.customText, 'Sent text');
+        } else {
+          expect(
+            state.uiFlows.every((flow) => flow.submittedResponse == null),
+            isTrue,
+          );
+        }
+        expect(state.pendingUiError, isNull);
+      } finally {
+        h.vm.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    });
+  }
+
+  for (final closedStatus in [
+    ExtensionUiFlowStatus.completed,
+    ExtensionUiFlowStatus.replaced,
+  ]) {
+    for (final notifyType in ['warning', 'error']) {
+      test(
+        '$notifyType invalidates $closedStatus without affecting a newer submission',
+        () async {
+          final h = await extensionUiHarness();
+          Future<void> deliver(ServerMessage message) async {
+            h.ch.push(message);
+            await Future<void>.delayed(const Duration(milliseconds: 30));
+          }
+
+          ExtensionUiResponse answer(String id) => ExtensionUiResponse(
+            id: id,
+            ask: AskResponseEnrichmentWire(
+              flowId: id,
+              mode: 'submit',
+              answers: const {
+                'goal': AskAnswerWire(values: ['a']),
+              },
+            ),
+          );
+          try {
+            await h.vm.clearActiveSession();
+            await deliver(_request('old'));
+            await h.vm.respondExtensionUi(answer('old'));
+            if (closedStatus == ExtensionUiFlowStatus.completed) {
+              await deliver(
+                const ExtensionUiRequest(
+                  id: 'old',
+                  method: ExtensionUiMethod.notify,
+                ),
+              );
+            }
+            await deliver(_request('new'));
+            await h.vm.respondExtensionUi(answer('new'));
+            final rejection = ExtensionUiRequest(
+              id: 'old',
+              method: ExtensionUiMethod.notify,
+              notifyType: notifyType,
+              message: 'Old answer rejected',
+            );
+            final before = h.vm.state as ChatReady;
+            expect(before.uiFlows.first.status, closedStatus);
+            expect(before.uiFlows.first.submittedResponse, isNotNull);
+            final newerSubmission = before.uiFlows.last.submittedResponse;
+            expect(newerSubmission, isNotNull);
+            await deliver(rejection);
+            final after = h.vm.state as ChatReady;
+            expect(after.uiFlows.first.status, closedStatus);
+            expect(after.uiFlows.first.submittedResponse, isNull);
+            expect(after.uiFlows.last.submittedResponse, same(newerSubmission));
+            expect(after.pendingUiRequest?.id, 'new');
+            expect(after.pendingUiError, before.pendingUiError);
+            expect(after.pendingUiErrorRevision, before.pendingUiErrorRevision);
+
+            // A repeated old warning must not cancel the newer in-flight send.
+            final send = Completer<void>();
+            h.ch.sendPending = send;
+            final response = h.vm.respondExtensionUi(answer('new'));
+            h.ch.sendPending = null;
+            await deliver(rejection);
+            send.complete();
+            await response;
+            await deliver(
+              const ExtensionUiRequest(
+                id: 'new',
+                method: ExtensionUiMethod.notify,
+              ),
+            );
+            final completed = h.vm.state as ChatReady;
+            expect(completed.uiFlows.first.submittedResponse, isNull);
+            expect(
+              completed.uiFlows.last.status,
+              ExtensionUiFlowStatus.completed,
+            );
+            expect(
+              completed
+                  .uiFlows
+                  .last
+                  .submittedResponse!
+                  .ask!
+                  .answers['goal']!
+                  .values,
+              ['a'],
+            );
+            expect(completed.pendingUiError, isNull);
+            expect(
+              completed.pendingUiErrorRevision,
+              before.pendingUiErrorRevision,
+            );
+          } finally {
+            h.vm.dispose();
+            h.sync.dispose();
+            h.conn.dispose();
+            h.prefs.dispose();
+          }
+        },
+      );
+    }
+  }
+
   test(
     'respond with no live channel fails fast with a retryable error',
     () async {

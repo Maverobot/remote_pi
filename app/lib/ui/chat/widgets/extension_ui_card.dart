@@ -11,6 +11,7 @@ import '../states/chat_state.dart';
 class ExtensionUiCard extends StatefulWidget {
   final ExtensionUiRequest request;
   final ExtensionUiFlowStatus status;
+  final ExtensionUiResponse? submittedResponse;
 
   final String? error;
   final int errorRevision;
@@ -22,6 +23,7 @@ class ExtensionUiCard extends StatefulWidget {
     this.error,
     this.errorRevision = 0,
     this.status = ExtensionUiFlowStatus.pending,
+    this.submittedResponse,
     required this.onRespond,
   });
 
@@ -253,13 +255,30 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
             style: TextStyle(fontFamily: kMonoFamily, color: colors.text),
           ),
           if (_closed) ...[
-            // The bridge confirms resolution, not the accepted answer. Do not
-            // present a local draft as a result (another client may resolve it).
+            if (widget.status == ExtensionUiFlowStatus.completed) ...[
+              const SizedBox(height: 8),
+              Text(
+                widget.submittedResponse == null
+                    ? 'Completed — answer not synced'
+                    : 'Submitted on this device',
+              ),
+            ],
             if (ask != null)
               for (final question in ask.questions) ...[
                 const SizedBox(height: 8),
                 Text(question.prompt),
-              ],
+                if (widget.status == ExtensionUiFlowStatus.completed)
+                  ..._submittedAnswer(question),
+              ]
+            else if (widget.status == ExtensionUiFlowStatus.completed &&
+                widget.submittedResponse != null) ...[
+              const SizedBox(height: 8),
+              if (widget.submittedResponse!.value case final value?)
+                Text(value)
+              else if (widget.submittedResponse!.confirmed
+                  case final confirmed?)
+                Text(confirmed ? 'Yes' : 'No'),
+            ],
           ] else ...[
             if (ask != null)
               for (final question in ask.questions) ...[
@@ -273,6 +292,19 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
         ],
       ),
     );
+  }
+
+  List<Widget> _submittedAnswer(AskQuestionWire question) {
+    final answer = widget.submittedResponse?.ask?.answers[question.id];
+    if (answer == null) return const [];
+    return [
+      for (final value in answer.values)
+        Text(
+          question.options.where((o) => o.value == value).firstOrNull?.label ??
+              value,
+        ),
+      if (answer.customText case final text?) Text(text),
+    ];
   }
 
   Widget _buildQuestion(BuildContext context, AskQuestionWire q) {

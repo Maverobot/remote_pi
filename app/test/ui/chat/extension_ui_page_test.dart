@@ -16,6 +16,7 @@ import 'package:app/ui/chat/widgets/extension_ui_card.dart';
 import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:app/ui/chat/widgets/message_bubble.dart';
 import 'package:app/ui/chat/widgets/streaming_bubble.dart';
+import 'package:app/ui/chat/widgets/tool_request_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
@@ -33,25 +34,27 @@ class _Picker implements IImagePickerService {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-ExtensionUiRequest _request(String id) => ExtensionUiRequest(
-  id: id,
-  method: ExtensionUiMethod.select,
-  title: 'Choose direction $id',
-  ask: AskEnrichmentWire(
-    flowId: id,
-    source: 'tool',
-    questions: const [
-      AskQuestionWire(
-        id: 'goal',
-        label: '',
-        required: false,
-        prompt: 'What is the goal?',
-        type: AskQuestionWireType.multi,
-        options: [AskOptionWire(value: 'a', label: 'Alpha')],
+ExtensionUiRequest _request(String id, {String? toolCallId}) =>
+    ExtensionUiRequest(
+      id: id,
+      method: ExtensionUiMethod.select,
+      title: 'Choose direction $id',
+      ask: AskEnrichmentWire(
+        flowId: id,
+        toolCallId: toolCallId,
+        source: 'tool',
+        questions: const [
+          AskQuestionWire(
+            id: 'goal',
+            label: '',
+            required: false,
+            prompt: 'What is the goal?',
+            type: AskQuestionWireType.multi,
+            options: [AskOptionWire(value: 'a', label: 'Alpha')],
+          ),
+        ],
       ),
-    ],
-  ),
-);
+    );
 
 void main() {
   late Directory directory;
@@ -74,6 +77,305 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 50));
     });
     await tester.pump();
+  }
+
+  for (final requestBeforeTool in [false, true]) {
+    testWidgets('live question follows its intro and tool, not later replies '
+        '(request before tool: $requestBeforeTool)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 2000));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MultiProvider(
+              providers: [
+                ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+                ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+                ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+                ChangeNotifierProvider<AttachmentViewModel>.value(
+                  value: attach,
+                ),
+              ],
+              child: const ChatPage(),
+            ),
+          ),
+        );
+        final request = _request('live', toolCallId: 'ask-tool');
+        final tool = ToolRequest(
+          toolCallId: 'ask-tool',
+          tool: 'ask_user',
+          args: const {},
+        );
+        final card = find.byType(ExtensionUiCard);
+        Future<void> burst(List<ServerMessage> messages) async {
+          await tester.runAsync(() async {
+            for (final message in messages) {
+              h.ch.push(message);
+            }
+            // Let the real sync writer and repository drain AFTER the burst.
+            await Future<void>.delayed(const Duration(milliseconds: 50));
+          });
+          await tester.pump();
+        }
+
+        final intro = AgentChunk(
+          inReplyTo: 'turn',
+          delta: 'Explanation before asking',
+        );
+        if (requestBeforeTool) {
+          await burst([intro, request]);
+          expect(
+            tester.getBottomLeft(find.byType(StreamingBubble)).dy,
+            lessThan(tester.getTopLeft(card).dy),
+          );
+          await tester.enterText(
+            find.descendant(of: card, matching: find.byType(TextField)),
+            'Keep through anchoring',
+          );
+          await burst([tool]);
+          expect(find.text('Keep through anchoring'), findsOneWidget);
+        } else {
+          // Production order, with no artificial gap between chunk/tool/request.
+          await burst([intro, tool, request]);
+        }
+        void expectOrder({required bool toolVisible}) {
+          final introBubble = find.byWidgetPredicate(
+            (w) =>
+                w is AssistantBubble &&
+                w.message.text == 'Explanation before asking',
+          );
+          expect(
+            tester.getBottomLeft(introBubble).dy,
+            lessThan(tester.getTopLeft(card).dy),
+          );
+          if (toolVisible) {
+            expect(find.byType(ToolRequestCard), findsOneWidget);
+            expect(
+              tester.getBottomLeft(find.byType(ToolRequestCard)).dy,
+              lessThan(tester.getTopLeft(card).dy),
+            );
+          }
+          final later = find.byWidgetPredicate(
+            (w) => w is AssistantBubble && w.message.text == 'Later answer',
+          );
+          if (later.evaluate().isNotEmpty) {
+            expect(
+              tester.getBottomLeft(card).dy,
+              lessThan(tester.getTopLeft(later).dy),
+            );
+          }
+        }
+
+        expectOrder(toolVisible: true);
+        await burst([
+          const ExtensionUiRequest(
+            id: 'live',
+            method: ExtensionUiMethod.notify,
+          ),
+          ToolResult(toolCallId: 'ask-tool', result: 'done'),
+          AgentChunk(inReplyTo: 'turn', delta: 'Later answer'),
+        ]);
+        expect(
+          tester.getBottomLeft(card).dy,
+          lessThan(tester.getTopLeft(find.byType(StreamingBubble)).dy),
+        );
+        await burst([AgentDone(inReplyTo: 'turn')]);
+        expectOrder(toolVisible: true);
+        final replay = SessionHistory(
+          inReplyTo: 'sync',
+          sessionStartedAt: 1,
+          eos: true,
+          roomId: 'main',
+          events: const [
+            AgentMessageEvt(
+              ts: 1,
+              inReplyTo: 'turn',
+              text: 'Explanation before asking',
+            ),
+            ToolRequestEvt(
+              ts: 2,
+              toolCallId: 'ask-tool',
+              tool: 'ask_user',
+              args: {},
+            ),
+            ToolResultEvt(ts: 3, toolCallId: 'ask-tool', result: 'done'),
+            AgentMessageEvt(ts: 4, inReplyTo: 'turn', text: 'Later answer'),
+          ],
+        );
+        await burst([replay, request]);
+        expect(card, findsOneWidget);
+        expectOrder(toolVisible: true);
+        await h.prefs.setHideToolCalls(true);
+        await tester.pump();
+        expect(find.byType(ToolRequestCard), findsNothing);
+        expectOrder(toolVisible: false);
+        await h.prefs.setHideToolCalls(false);
+        await tester.pump();
+        expectOrder(toolVisible: true);
+        await burst([
+          SessionHistory(
+            inReplyTo: 'sync',
+            sessionStartedAt: 1,
+            eos: true,
+            roomId: 'main',
+            truncated: true,
+            events: const [
+              AgentMessageEvt(ts: 4, inReplyTo: 'turn', text: 'Later answer'),
+            ],
+          ),
+        ]);
+        // A resolved tool removed by truncation uses the existing fallback,
+        // not the provisional tail, which would drift after this later reply.
+        expect(
+          tester.getBottomLeft(card).dy,
+          lessThan(tester.getTopLeft(find.byType(AssistantBubble)).dy),
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    });
+  }
+
+  for (final outcome in [
+    'submitted',
+    'failed',
+    'rejected',
+    'cancelled',
+    'other client',
+    'late rejection',
+  ]) {
+    testWidgets('completed question shows only a local submission: $outcome', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(390, 1200));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MultiProvider(
+              providers: [
+                ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+                ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+                ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+                ChangeNotifierProvider<AttachmentViewModel>.value(
+                  value: attach,
+                ),
+              ],
+              child: const ChatPage(),
+            ),
+          ),
+        );
+        await deliver(tester, h.ch, _request('summary'));
+        final card = find.byType(ExtensionUiCard);
+        final custom = find.descendant(
+          of: card,
+          matching: find.byType(TextField),
+        );
+        await tester.tap(find.text('Alpha'));
+        await tester.enterText(custom, 'Submitted custom text');
+        if (outcome == 'failed') h.ch.sendError = StateError('offline');
+        if (outcome != 'other client') {
+          await tester.tap(
+            outcome == 'cancelled'
+                ? find.widgetWithText(OutlinedButton, 'Cancel')
+                : find.widgetWithText(FilledButton, 'Submit'),
+          );
+          await tester.pump();
+        }
+        h.ch.sendError = null;
+        if (outcome == 'rejected') {
+          await deliver(
+            tester,
+            h.ch,
+            const ExtensionUiRequest(
+              id: 'summary',
+              method: ExtensionUiMethod.notify,
+              notifyType: 'warning',
+              message: 'Rejected',
+            ),
+          );
+        }
+        if (outcome == 'submitted') {
+          // After the retry timeout, edits are drafts, NOT the sent payload.
+          await tester.pump(const Duration(seconds: 26));
+          await tester.enterText(custom, 'Unsubmitted later edit');
+        }
+        await deliver(
+          tester,
+          h.ch,
+          const ExtensionUiRequest(
+            id: 'summary',
+            method: ExtensionUiMethod.notify,
+          ),
+        );
+        if (outcome == 'late rejection') {
+          expect(find.text('Submitted on this device'), findsOneWidget);
+          await deliver(
+            tester,
+            h.ch,
+            const ExtensionUiRequest(
+              id: 'summary',
+              method: ExtensionUiMethod.notify,
+              notifyType: 'warning',
+              message: 'Flow is no longer active',
+            ),
+          );
+          expect(find.text('Flow is no longer active'), findsNothing);
+        }
+        expect(find.text('What is the goal?'), findsOneWidget);
+        expect(
+          find.descendant(of: card, matching: find.byType(TextField)),
+          findsNothing,
+        );
+        if (outcome == 'submitted') {
+          expect(find.text('Submitted on this device'), findsOneWidget);
+          expect(find.text('Alpha'), findsOneWidget);
+          expect(find.text('Submitted custom text'), findsOneWidget);
+          expect(find.text('Unsubmitted later edit'), findsNothing);
+        } else {
+          expect(find.text('Completed — answer not synced'), findsOneWidget);
+          expect(find.text('Submitted on this device'), findsNothing);
+          expect(find.text('Submitted custom text'), findsNothing);
+          expect(find.text('Alpha'), findsNothing);
+        }
+        await deliver(tester, h.ch, _request('summary'));
+        expect(card, findsOneWidget);
+        expect(
+          find.text(
+            outcome == 'submitted'
+                ? 'Submitted on this device'
+                : 'Completed — answer not synced',
+          ),
+          findsOneWidget,
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    });
   }
 
   testWidgets(

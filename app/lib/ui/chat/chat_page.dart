@@ -572,9 +572,9 @@ class _MessageList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // Anchor cards to exact committed rows, before filtering hidden tools.
-    // Streaming stays at the tail; append/replay updates cannot move a card to
-    // the newest position. Missing anchors (e.g. cleared history) go first.
+    // Resolve tool anchors before filtering hidden tools. Only requests whose
+    // tool has not reached the repository yet follow the current streaming tail.
+    // Resolved anchors never chase later messages; truncated anchors go first.
     final rows = chatMessageRows(messages).toList();
     final rowIds = rows.map((row) => row.id).toSet();
     final items = <Widget>[];
@@ -584,6 +584,7 @@ class _MessageList extends StatelessWidget {
           key: ValueKey(('extension-ui', flow.request.id)),
           request: flow.request,
           status: flow.status,
+          submittedResponse: flow.submittedResponse,
           errorRevision: uiErrorRevision,
           error: flow.status == ExtensionUiFlowStatus.pending ? uiError : null,
           onRespond: onRespond,
@@ -592,7 +593,9 @@ class _MessageList extends StatelessWidget {
     }
 
     for (final flow in uiFlows) {
-      if (!rowIds.contains(flow.afterMessageRowId)) addFlow(flow);
+      if (!flow.awaitingToolRow && !rowIds.contains(flow.afterMessageRowId)) {
+        addFlow(flow);
+      }
     }
     for (final row in rows) {
       final msg = row.message;
@@ -621,6 +624,9 @@ class _MessageList extends StatelessWidget {
           child: StreamingBubble(streaming!),
         ),
       );
+    }
+    for (final flow in uiFlows) {
+      if (flow.awaitingToolRow) addFlow(flow);
     }
     final newestFirst = items.reversed.toList();
     final indices = {
