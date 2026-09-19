@@ -393,6 +393,49 @@ void main() {
     },
   );
 
+  testWidgets('completed card renders a fallback-title question only once', (
+    tester,
+  ) async {
+    const prompt = 'Which direction should we take?';
+    const request = ExtensionUiRequest(
+      id: 'fallback-title',
+      method: ExtensionUiMethod.select,
+      title: prompt,
+      ask: AskEnrichmentWire(
+        flowId: 'fallback-title',
+        source: 'tool',
+        questions: [
+          AskQuestionWire(
+            id: 'direction',
+            label: '',
+            prompt: prompt,
+            type: AskQuestionWireType.single,
+            required: false,
+            options: [AskOptionWire(value: 'a', label: 'Alpha')],
+          ),
+        ],
+      ),
+    );
+    await pumpCard(
+      tester,
+      request: request,
+      status: ExtensionUiFlowStatus.completed,
+      submittedResponse: ExtensionUiResponse(
+        id: 'fallback-title',
+        ask: const AskResponseEnrichmentWire(
+          flowId: 'fallback-title',
+          answers: {
+            'direction': AskAnswerWire(values: ['a'], customText: 'My reason'),
+          },
+        ),
+      ),
+    );
+    expect(find.text(prompt), findsOneWidget);
+    expect(find.text('Alpha'), findsOneWidget);
+    expect(find.text('My reason'), findsOneWidget);
+    expect(find.byType(TextField), findsNothing);
+  });
+
   testWidgets('required question renders the advisory chip', (tester) async {
     await pumpCard(tester, request: _richRequest());
     expect(find.text('required'), findsOneWidget);

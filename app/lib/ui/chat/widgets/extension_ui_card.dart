@@ -212,6 +212,12 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
     final colors = context.colors;
     final ask = _ask;
     final title = widget.request.title ?? ask?.title ?? 'Clarification needed';
+    final completed = widget.status == ExtensionUiFlowStatus.completed;
+    // The bridge uses the first question as a fallback title. In the summary,
+    // keep that text with its answer rather than repeating it as a heading.
+    final repeatsQuestion =
+        completed &&
+        (ask?.questions.any((q) => q.prompt.trim() == title.trim()) ?? false);
     final border = switch (widget.status) {
       ExtensionUiFlowStatus.pending => colors.accent,
       ExtensionUiFlowStatus.completed => colors.success,
@@ -249,11 +255,18 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
               }, style: TextStyle(color: border)),
             ],
           ),
-          const SizedBox(height: 8),
-          Text(
-            title,
-            style: TextStyle(fontFamily: kMonoFamily, color: colors.text),
-          ),
+          if (!repeatsQuestion) ...[
+            const SizedBox(height: 8),
+            Text(
+              title,
+              style: completed
+                  ? context.typo.sansBody.copyWith(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                    )
+                  : TextStyle(fontFamily: kMonoFamily, color: colors.text),
+            ),
+          ],
           if (_closed) ...[
             if (widget.status == ExtensionUiFlowStatus.completed) ...[
               const SizedBox(height: 8),
@@ -261,23 +274,36 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
                 widget.submittedResponse == null
                     ? 'Completed — answer not synced'
                     : 'Submitted on this device',
+                style: context.typo.sansBody.copyWith(
+                  fontSize: 12,
+                  color: colors.muted2,
+                ),
               ),
             ],
             if (ask != null)
               for (final question in ask.questions) ...[
-                const SizedBox(height: 8),
-                Text(question.prompt),
-                if (widget.status == ExtensionUiFlowStatus.completed)
-                  ..._submittedAnswer(question),
+                SizedBox(height: completed ? 16 : 8),
+                Text(
+                  question.prompt,
+                  style: completed
+                      ? context.typo.sansBody.copyWith(
+                          fontWeight: FontWeight.w600,
+                        )
+                      : null,
+                ),
+                if (completed) ..._submittedAnswer(context, question),
               ]
-            else if (widget.status == ExtensionUiFlowStatus.completed &&
-                widget.submittedResponse != null) ...[
+            else if (completed &&
+                (widget.submittedResponse?.value != null ||
+                    widget.submittedResponse?.confirmed != null)) ...[
               const SizedBox(height: 8),
-              if (widget.submittedResponse!.value case final value?)
-                Text(value)
-              else if (widget.submittedResponse!.confirmed
-                  case final confirmed?)
-                Text(confirmed ? 'Yes' : 'No'),
+              _answerBlock(context, [
+                if (widget.submittedResponse!.value case final value?)
+                  Text(value)
+                else if (widget.submittedResponse!.confirmed
+                    case final confirmed?)
+                  Text(confirmed ? 'Yes' : 'No'),
+              ]),
             ],
           ] else ...[
             if (ask != null)
@@ -294,10 +320,13 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
     );
   }
 
-  List<Widget> _submittedAnswer(AskQuestionWire question) {
+  List<Widget> _submittedAnswer(
+    BuildContext context,
+    AskQuestionWire question,
+  ) {
     final answer = widget.submittedResponse?.ask?.answers[question.id];
     if (answer == null) return const [];
-    return [
+    final content = [
       for (final value in answer.values)
         Text(
           question.options.where((o) => o.value == value).firstOrNull?.label ??
@@ -305,6 +334,34 @@ class _ExtensionUiCardState extends State<ExtensionUiCard>
         ),
       if (answer.customText case final text?) Text(text),
     ];
+    if (content.isEmpty) return const [];
+    return [const SizedBox(height: 8), _answerBlock(context, content)];
+  }
+
+  Widget _answerBlock(BuildContext context, List<Widget> content) {
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: context.colors.userBubble,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: DefaultTextStyle(
+        style: context.typo.sansBody,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              'Answer',
+              style: context.typo.monoSmall.copyWith(
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            for (final item in content)
+              Padding(padding: const EdgeInsets.only(top: 8), child: item),
+          ],
+        ),
+      ),
+    );
   }
 
   Widget _buildQuestion(BuildContext context, AskQuestionWire q) {
