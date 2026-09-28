@@ -8,6 +8,7 @@ import 'package:app/data/sync/sync_events.dart';
 import 'package:app/data/sync/sync_service.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/background_progress.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/chat/states/chat_state.dart';
@@ -34,6 +35,8 @@ class ChatViewModel extends ViewModel<ChatState> {
   StreamSubscription<List<QueuedMsg>>? _queuedSub;
   StreamSubscription<SessionEvent>? _eventSub;
   StreamSubscription<ExtensionUiRequest>? _uiReqSub;
+  StreamSubscription<BackgroundProgress?>? _backgroundSub;
+  BackgroundProgress? _backgroundProgress;
   StreamSubscription<Map<String, List<RoomInfo>>>? _roomsSub;
   StreamSubscription<ConnectionStatus>? _statusSub;
 
@@ -68,6 +71,15 @@ class ChatViewModel extends ViewModel<ChatState> {
     _queuedSub = _sync.queuedStream.listen(_onQueued);
     _eventSub = _sync.events.listen(_onEvent);
     _uiReqSub = _sync.extensionUiRequestStream.listen(_onExtensionUiRequest);
+    _backgroundSub = _sync.backgroundProgressStream.listen((progress) {
+      if (_bootstrapping ||
+          _sync.activeEpk != _activePeer?.remoteEpk ||
+          _sync.activeRoomId != _activeRoomId) {
+        return;
+      }
+      _backgroundProgress = progress;
+      _recompute();
+    });
     _roomsSub = _conn.roomsStream.listen((_) => _recompute());
     _statusSub = _conn.statusStream.listen(_onStatus);
     // ignore: discarded_futures
@@ -177,6 +189,7 @@ class ChatViewModel extends ViewModel<ChatState> {
     _streaming = _sync.streaming;
     _working = _sync.isWorking;
     _queuedMessages = _sync.queuedMessages;
+    _backgroundProgress = _sync.backgroundProgress;
     _msgsSub = _read.watchMessages(epk, roomId).listen(_onMessages);
     _runtimeSub = _read.watchRuntime(epk, roomId).listen(_onRuntime);
 
@@ -346,6 +359,7 @@ class ChatViewModel extends ViewModel<ChatState> {
       peerPresence: peerPresence,
       isWorking: isWorking,
       queuedMessages: _queuedMessages,
+      backgroundProgress: _backgroundProgress,
       uiFlows: _uiFlows,
       pendingUiRequest: _pendingUiRequest,
       pendingUiError: _pendingUiError,
@@ -462,6 +476,7 @@ class ChatViewModel extends ViewModel<ChatState> {
     _queuedSub?.cancel();
     _eventSub?.cancel();
     _uiReqSub?.cancel();
+    _backgroundSub?.cancel();
     _roomsSub?.cancel();
     _statusSub?.cancel();
     super.dispose();

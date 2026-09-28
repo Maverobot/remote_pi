@@ -1,4 +1,5 @@
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/background_progress.dart';
 import 'package:app/protocol/protocol.dart';
 
 /// Turn IDs repeat across roles and assistant segments. Include assistant text
@@ -122,6 +123,7 @@ class ChatReady extends ChatState {
   /// else changed. See [ChatViewModel.isWorking].
   final bool isWorking;
   final List<QueuedMsg> queuedMessages;
+  final BackgroundProgress? backgroundProgress;
 
   /// Active upstream pi-ask request; cleared only on completion or replacement.
   final ExtensionUiRequest? pendingUiRequest;
@@ -143,6 +145,7 @@ class ChatReady extends ChatState {
     this.peerPresence = const PresenceUnknown(),
     this.isWorking = false,
     this.queuedMessages = const [],
+    this.backgroundProgress,
     this.pendingUiRequest,
     this.pendingUiError,
     this.pendingUiErrorRevision = 0,
@@ -158,6 +161,8 @@ class ChatReady extends ChatState {
     PresenceState? peerPresence,
     bool? isWorking,
     List<QueuedMsg>? queuedMessages,
+    BackgroundProgress? backgroundProgress,
+    bool clearBackgroundProgress = false,
     bool clearStreaming = false,
     bool clearPeerOffline = false,
     bool clearQueuedMessages = false,
@@ -169,6 +174,9 @@ class ChatReady extends ChatState {
     bool clearPendingUiError = false,
   }) => ChatReady(
     messages: messages ?? this.messages,
+    backgroundProgress: clearBackgroundProgress
+        ? null
+        : (backgroundProgress ?? this.backgroundProgress),
     uiFlows: uiFlows ?? this.uiFlows,
     pendingUiErrorRevision:
         pendingUiErrorRevision ?? this.pendingUiErrorRevision,
@@ -202,6 +210,7 @@ class ChatReady extends ChatState {
       other.peerPresence.runtimeType == peerPresence.runtimeType &&
       other.isWorking == isWorking &&
       other.queuedMessages == queuedMessages &&
+      other.backgroundProgress == backgroundProgress &&
       other.uiFlows == uiFlows &&
       other.pendingUiRequest == pendingUiRequest &&
       other.pendingUiError == pendingUiError &&
@@ -217,6 +226,7 @@ class ChatReady extends ChatState {
     peerPresence.runtimeType,
     isWorking,
     queuedMessages,
+    backgroundProgress,
     uiFlows,
     pendingUiRequest,
     pendingUiError,

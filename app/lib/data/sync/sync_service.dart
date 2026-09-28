@@ -20,6 +20,7 @@ import 'package:app/data/sync/sync_events.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/domain/contracts/service.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/background_progress.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/protocol/uuid7.dart';
 import 'package:flutter/foundation.dart';
@@ -27,6 +28,7 @@ import 'package:flutter/foundation.dart';
 class SyncService extends Service {
   final ConnectionManager _conn;
   final LocalBoxes _boxes;
+  bool _disposed = false;
 
   StreamSubscription<ConnectionStatus>? _connSub;
   StreamSubscription<ServerMessage>? _msgSub;
@@ -68,6 +70,22 @@ class SyncService extends Service {
   final StreamController<List<QueuedMsg>> _queuedController =
       StreamController<List<QueuedMsg>>.broadcast();
 
+  BackgroundProgress? _backgroundProgress;
+  BackgroundProgress? _backgroundBase;
+  final _backgroundClock = Stopwatch();
+  Timer? _backgroundTimer;
+  Timer? _backgroundRenewal;
+  Timer? _backgroundExpiry;
+  String? _backgroundRequestId;
+  int? _backgroundSessionStartedAt;
+  bool _backgroundRoomWasLive = false;
+  bool _backgroundRoomLost = false;
+  final _backgroundController =
+      StreamController<BackgroundProgress?>.broadcast();
+  BackgroundProgress? get backgroundProgress => _backgroundProgress;
+  Stream<BackgroundProgress?> get backgroundProgressStream =>
+      _backgroundController.stream;
+
   bool _pendingSyncRequest = false;
   Timer? _syncDebounce;
 
@@ -102,8 +120,12 @@ class SyncService extends Service {
     _roomsSub = _conn.roomsStream.listen((_) {
       _writeRuntime();
       _syncTurnStateFromRoomMeta();
+      _backgroundConnectivityChanged();
     });
-    _presenceSub = _conn.presenceStream.listen((_) => _writeRuntime());
+    _presenceSub = _conn.presenceStream.listen((_) {
+      _writeRuntime();
+      _backgroundConnectivityChanged();
+    });
     _onStatus(_conn.status); // replay current
   }
 
@@ -139,6 +161,7 @@ class SyncService extends Service {
   /// dedupe/seq index from it. Called by the chat when it mounts / switches
   /// rooms; also adopted automatically on the first StatusOnline.
   Future<void> activate(String epk, String roomId) async {
+    if (_disposed) return;
     final room = roomId.isEmpty ? 'main' : roomId;
     if (_activeEpk == epk && _activeRoomId == room && _indexLoaded) return;
     // Genuine session switch: drop the in-memory turn state so the
@@ -151,7 +174,10 @@ class SyncService extends Service {
     _resetTurnState();
     _activeEpk = epk;
     _activeRoomId = room;
+    // Room announcements may predate selection; bind to the current inventory.
+    _backgroundRoomWasLive = _conn.isRoomLive(epk, room);
     await _loadIndex();
+    if (_disposed) return;
     _writeRuntime();
   }
 
@@ -159,6 +185,10 @@ class SyncService extends Service {
   /// (emitting the cleared state so listeners update) WITHOUT touching the
   /// durable session index. Used on a session switch — see [activate].
   void _resetTurnState() {
+    _clearBackgroundProgress();
+    _backgroundSessionStartedAt = null;
+    _backgroundRoomWasLive = false;
+    _backgroundRoomLost = false;
     _flushTimer?.cancel();
     _flushTimer = null;
     _chunkBuffer.clear();
@@ -383,6 +413,7 @@ class SyncService extends Service {
   }
 
   void requestSync() {
+    if (_disposed) return;
     final ch = _conn.channel;
     if (ch == null || _activeEpk == null) {
       _pendingSyncRequest = true;
@@ -390,14 +421,59 @@ class SyncService extends Service {
     }
     _pendingSyncRequest = false;
     ch.send(SessionSync(id: _newId()));
+    _startBackgroundInterest();
+  }
+
+  bool get _canObserveBackground =>
+      !_disposed &&
+      _activeEpk != null &&
+      _conn.status is StatusOnline &&
+      _conn.activePeer?.remoteEpk == _activeEpk &&
+      _conn.activeRoomId == _activeRoomId &&
+      _conn.presenceFor(_activeEpk!) is! PresenceOffline &&
+      !_backgroundRoomLost;
+
+  void _endBackgroundInterest() {
+    _backgroundRenewal?.cancel();
+    _backgroundRenewal = null;
+    _backgroundRequestId = null;
+  }
+
+  void _startBackgroundInterest() {
+    _endBackgroundInterest();
+    if (!_canObserveBackground) {
+      _freezeBackground(BackgroundFreshness.offline);
+      return;
+    }
+    _freezeBackground(BackgroundFreshness.refreshing);
+    _backgroundRequestId = _newId();
+    void renew() {
+      if (!_canObserveBackground) {
+        _endBackgroundInterest();
+        _freezeBackground(BackgroundFreshness.offline);
+        return;
+      }
+      _conn.channel?.send(
+        Ping(id: _backgroundRequestId!, backgroundProgress: true),
+      );
+    }
+
+    renew();
+    // No session_history replay: renewal only extends the host's 15s lease.
+    _backgroundRenewal = Timer.periodic(
+      const Duration(seconds: 5),
+      (_) => renew(),
+    );
   }
 
   /// Plan/28 — `session_new` acked: wipe the active session's rows + index.
   Future<void> clearActiveSession() async {
+    if (_disposed) return;
     final epk = _activeEpk;
     if (epk == null) return;
     final room = _activeRoomId;
     // Session wiped → any optimistic sends/streaming/working state are moot.
+    _clearBackgroundProgress();
     _cancelAllSendTimers();
     _discardStreamingState();
     _setQueuedMessages(const []);
@@ -412,6 +488,103 @@ class SyncService extends Service {
       final idx = _boxes.sessionsIndexBox();
       await idx.delete(LocalBoxes.sessionKey(epk, room));
     });
+    if (_disposed) return;
+    if (_activeEpk == epk && _activeRoomId == room) requestSync();
+  }
+
+  void _emitBackground(BackgroundProgress? value) {
+    _backgroundProgress = value;
+    if (!_backgroundController.isClosed) _backgroundController.add(value);
+  }
+
+  void _clearBackgroundProgress() {
+    _endBackgroundInterest();
+    _backgroundExpiry?.cancel();
+    _backgroundExpiry = null;
+    _backgroundTimer?.cancel();
+    _backgroundTimer = null;
+    _backgroundClock.stop();
+    _backgroundClock.reset();
+    _backgroundBase = null;
+    _emitBackground(null);
+  }
+
+  void _freezeBackground(BackgroundFreshness freshness) {
+    _backgroundExpiry?.cancel();
+    _backgroundExpiry = null;
+    _backgroundTimer?.cancel();
+    _backgroundTimer = null;
+    _backgroundClock.stop();
+    final base = _backgroundBase;
+    if (base != null) {
+      final frozen = base.advance(
+        _backgroundClock.elapsed,
+        freshness: freshness,
+      );
+      _backgroundBase = frozen;
+      _emitBackground(frozen);
+    }
+    _backgroundClock.reset();
+  }
+
+  void _backgroundConnectivityChanged() {
+    final epk = _activeEpk;
+    if (epk == null) return;
+    final live = _conn.isRoomLive(epk, _activeRoomId);
+    if (_backgroundRoomWasLive && !live) _backgroundRoomLost = true;
+    if (live) _backgroundRoomLost = false;
+    _backgroundRoomWasLive = live;
+    if (!_canObserveBackground) {
+      _endBackgroundInterest();
+      _freezeBackground(BackgroundFreshness.offline);
+    } else if (_backgroundRequestId == null) {
+      _startBackgroundInterest();
+    }
+  }
+
+  void _receiveBackground(BackgroundProgressMessage message) {
+    if (_activeEpk == null || message.inReplyTo != _backgroundRequestId) return;
+    final sessionId = message.sessionId;
+    final epoch = message.epoch;
+    if (sessionId == null || epoch == null) {
+      _freezeBackground(BackgroundFreshness.unavailable);
+      return;
+    }
+    final previous = _backgroundProgress;
+    if (previous != null &&
+        (previous.sessionId != sessionId || previous.epoch != epoch)) {
+      // Only a valid identity can replace the parent/epoch of the current view.
+      _freezeBackground(BackgroundFreshness.refreshing);
+      _backgroundBase = null;
+      _emitBackground(null);
+    }
+    if (!message.available) {
+      _freezeBackground(BackgroundFreshness.unavailable);
+      return;
+    }
+    _backgroundTimer?.cancel();
+    _backgroundClock.stop();
+    _backgroundClock.reset();
+    final value = BackgroundProgress(
+      sessionId: sessionId,
+      epoch: epoch,
+      truncated: message.truncated,
+      freshness: BackgroundFreshness.fresh,
+      groups: message.groups,
+    );
+    _backgroundBase = value;
+    _emitBackground(value);
+    _backgroundExpiry?.cancel();
+    _backgroundExpiry = Timer(
+      const Duration(seconds: 15),
+      () => _freezeBackground(BackgroundFreshness.unavailable),
+    );
+    if (value.ticking) {
+      _backgroundClock.start();
+      _backgroundTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        _emitBackground(value.advance(_backgroundClock.elapsed));
+      });
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -421,6 +594,12 @@ class SyncService extends Service {
   void _onStatus(ConnectionStatus s) {
     _msgSub?.cancel();
     _msgSub = null;
+    _endBackgroundInterest();
+    _freezeBackground(
+      s is StatusOnline
+          ? BackgroundFreshness.refreshing
+          : BackgroundFreshness.offline,
+    );
     if (s is StatusOnline) {
       // Plan/32f — bind this stream's writes to the PEER that owns the
       // channel RIGHT NOW. After a `switchTo`, a late frame from the OLD
@@ -437,7 +616,10 @@ class SyncService extends Service {
       final originEpk = _conn.activePeer?.remoteEpk;
       _msgSub = s.channel.serverMessages.listen(
         (msg) => _onServerMessage(msg, originEpk),
-        onError: (Object _, StackTrace _) {},
+        onError: (Object _, StackTrace _) {
+          _endBackgroundInterest();
+          _freezeBackground(BackgroundFreshness.offline);
+        },
       );
       // ignore: discarded_futures
       _onlineActivated();
@@ -450,6 +632,7 @@ class SyncService extends Service {
     if (peer != null && _activeEpk == null) {
       await activate(peer.remoteEpk, _conn.activeRoomId);
     }
+    if (_disposed) return;
     _syncDebounce?.cancel();
     _syncDebounce = Timer(const Duration(milliseconds: 200), requestSync);
     if (_pendingSyncRequest) requestSync();
@@ -621,6 +804,8 @@ class SyncService extends Service {
         _setWorking(false);
 
       case Bye(:final rawReason):
+        _endBackgroundInterest();
+        _freezeBackground(BackgroundFreshness.offline);
         if (!_eventController.isClosed) {
           _eventController.add(PeerWentOffline(rawReason));
         }
@@ -634,6 +819,13 @@ class SyncService extends Service {
 
       case SessionHistory(:final roomId):
         if (!_isForActiveRoom(roomId)) break;
+        final startedAt = msg.sessionStartedAt;
+        if (_backgroundSessionStartedAt != null &&
+            _backgroundSessionStartedAt != startedAt) {
+          _clearBackgroundProgress();
+          requestSync();
+        }
+        _backgroundSessionStartedAt = startedAt;
         // ignore: discarded_futures
         _applyHistory(msg);
 
@@ -663,12 +855,16 @@ class SyncService extends Service {
       case Compaction(:final summary, :final tokensBefore, :final ts):
         _writeCompaction(summary, tokensBefore, ts);
 
+      case Pong():
+        if (msg.backgroundProgress != null) {
+          _receiveBackground(msg.backgroundProgress!);
+        }
+
       case ExtensionUiRequest():
         // Plan/57 — transient interactive prompt (ask_user via pi-ask).
         // Surface to the UI; never persist (it's a live request, not history).
         _extensionUiController.add(msg);
         break;
-      case Pong():
       case PairOk():
       case PairError():
       case ActionOk():
@@ -1243,6 +1439,11 @@ class SyncService extends Service {
 
   @override
   void dispose() {
+    if (_disposed) return;
+    // Fence pending activation/session-clear continuations before cancellation.
+    _disposed = true;
+    _clearBackgroundProgress();
+    _backgroundController.close();
     _flushTimer?.cancel();
     _syncDebounce?.cancel();
     _cancelAllSendTimers();

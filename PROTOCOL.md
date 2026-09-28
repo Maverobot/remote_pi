@@ -364,6 +364,75 @@ relay; restart perde o estado.
 
 ---
 
+## Background task observations (limited v1)
+
+Android renews a memory-only observation interest every 5 seconds with
+`{"type":"ping","id":"phone-interest-id","background_progress":true}`.
+The ID is unique to that phone's current selection/connection and remains stable
+across renewals. Interests expire after 15 seconds without renewal; expiry stops
+observation, not child execution, and never implies completion or failure.
+The extension retains at most 32 independent interests per Owner channel.
+Ordinary pings and `session_sync` neither renew nor cancel another interest;
+renewals do not replay history.
+
+The unchanged relay fans out to all phones sharing an Owner key. Observations
+therefore use the existing `pong` type with an optional `background_progress`
+payload, not a new server type. Legacy phones ignore that field; modern phones
+accept only their current interest ID in `in_reply_to`. Older extensions respond
+with ordinary pong and continue normal chat.
+
+```json
+{
+  "type": "pong",
+  "in_reply_to": "phone-interest-id",
+  "background_progress": {
+    "session_id": "parent-session-id",
+    "epoch": "session-runtime-generation",
+    "available": true,
+    "truncated": false,
+    "groups": [{
+      "id": "display-group-id",
+      "label": "Workflow",
+      "tasks": [{
+        "id": "display-task-id",
+        "label": "Reviewer",
+        "state": "running",
+        "elapsed_ms": 5200
+      }]
+    }]
+  }
+}
+```
+
+- Each available frame replaces the current provider-visible rows. Empty rows
+  mean none are exposed, not that every task completed. Counts describe observed
+  rows, never a complete fleet. `truncated` signals omitted detail, even if no
+  rows remain. Group labels appear only for proven workflow membership.
+- States are `queued`, `running`, `paused`, `waiting`, `partial`, or `unknown`.
+  Reported terminal rows are removed. Remote Pi adds no inactivity expiry or
+  failure inference. Missing `elapsed_ms` means unknown; otherwise it is a
+  host-derived duration, independent of the phone clock. Only fresh running
+  rows advance using local elapsed time.
+- `available:false`, malformed current-interest data, 15 seconds without a fresh
+  observation, or disconnect freezes the last observation as stale. Invalid
+  session/epoch fields do not replace its last valid identity. Foreign interest
+  IDs do not alter the view, and ordinary pong does not refresh task freshness.
+  Reconnect renews with a new interest ID and waits for fresh data. Parent/epoch,
+  room-selection, or new-session changes clear the previous view; room loss
+  retains stale rows. Progress is memory-only, shown in a collapsed-by-default
+  panel above the composer. The whole panel scrolls within the remaining space,
+  including with the keyboard visible. There are no task controls.
+- The extension queries the public pi-subagents 0.72.1 `ping` and untargeted
+  `status` RPC, not tool-result text or private artifacts. Status may invoke
+  the provider's existing lifecycle reconciliation. Pi restart can omit paused
+  tasks and their original groups; this version does not restore that history.
+- Display payloads contain at most 20 groups and 128 task rows, labels up to 160
+  characters, opaque display IDs, state, timing and scope metadata. Prompts,
+  paths, outputs, tools, tokens and activity are not forwarded. The existing
+  relay transport and its lack of end-to-end encryption are unchanged.
+
+---
+
 ## Pareamento
 
 QR code mostra Pi-pubkey + room hint + token de uso único.

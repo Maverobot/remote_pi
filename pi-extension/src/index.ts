@@ -75,6 +75,7 @@ import {
   createExtensionUiBridge,
   type ExtensionUiBridge,
 } from "./extension_ui_bridge.js";
+import { createBackgroundProgressBridge, type BackgroundProgressBridge } from "./background_progress.js";
 import { roomIdFor } from "./rooms.js";
 import { registerAgentTools } from "./session/tools.js";
 import { formatPeerInventory } from "./session/peer_inventory.js";
@@ -1141,6 +1142,7 @@ let _pi: ExtensionAPI | null = null;
 // Plan/57 — Bridge to pi-ask's clarification-flow events. null until the
 // extension factory wires it (and null if the SDK exposes no events bus).
 let _extensionUiBridge: ExtensionUiBridge | null = null;
+let _backgroundProgress: BackgroundProgressBridge | null = null;
 
 let _stopAutoListener: (() => void) | null = null;
 
@@ -1272,6 +1274,7 @@ function _attachPeerChannel(appPeerId: string, channel: PlainPeerChannel): void 
 function _detachPeerChannel(appPeerId: string): void {
   const ch = _activePeers.get(appPeerId);
   if (!ch) return;
+  _backgroundProgress?.unsubscribe(ch);
   try { ch.detach(); } catch { /* best-effort */ }
   _activePeers.delete(appPeerId);
   if (_peerShort === appPeerId.slice(0, 8)) {
@@ -1449,6 +1452,7 @@ function _goIdle(byeReason?: import("./protocol/types.js").ByeReason): void {
   if (_queuedItems.length > 0) _resetQueuedItems({ broadcast: true });
 
   // Tear down every per-owner channel and clear the map.
+  _backgroundProgress?.clear();
   for (const ch of _activePeers.values()) {
     try { ch.detach(); } catch { /* best-effort */ }
   }
@@ -1505,6 +1509,7 @@ function _onRelayClose(closedRelay: RelayClient): void {
   _stopAutoListener?.();
   _stopAutoListener = null;
 
+  _backgroundProgress?.clear();
   // Detach every per-owner channel — relay is gone, none can route. The
   // auto-listener re-attaches owners after `_attemptReconnect` succeeds
   // (via the same known-peer + pair_request paths used on first connect).
@@ -2118,6 +2123,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // factory re-run (new pi session) can't leak subscriptions or double-send.
   _extensionUiBridge?.dispose();
   _extensionUiBridge = createExtensionUiBridge(pi, _broadcastToActive);
+  _backgroundProgress?.dispose();
+  _backgroundProgress = pi.events ? createBackgroundProgressBridge(pi.events) : null;
 
   // Plano 19: ensure ~/.pi/remote/{sessions,skills}/ exist and deploy the
   // agent-network skill on first load. resources_discover lets Pi find it.
@@ -2383,6 +2390,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // bound to the current session.
   pi.on("session_start", (_event, ctx) => {
     _lastEventCtx = ctx;
+    if (!_backgroundProgress && pi.events) _backgroundProgress = createBackgroundProgressBridge(pi.events);
+    _backgroundProgress?.setSession(ctx.sessionManager.getSessionId());
     // session_shutdown disposes per-session pi-ask subscriptions. A host that
     // reuses this module instance does NOT re-run the factory, so rebind the
     // bridge here; fresh-module hosts already created theirs in the factory.
@@ -2494,6 +2503,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     // module instances create their bridge in the factory.
     _extensionUiBridge?.dispose();
     _extensionUiBridge = null;
+    _backgroundProgress?.dispose();
+    _backgroundProgress = null;
     _resetMeshMessageDrainState();
     // Drop captured ctxs immediately. On module-reuse hosts the same instance
     // survives session replacement; leaving `_lastCtx` pointing at the now-
@@ -4708,6 +4719,7 @@ export function _routeClientMessageFrom(
       break;
     case "ping":
       sender.send({ type: "pong", in_reply_to: msg.id });
+      if (msg.background_progress === true) _backgroundProgress?.renew(sender, msg.id);
       break;
     case "pair_request":
       // Already paired — ignore subsequent pair_request to maintain idempotency.

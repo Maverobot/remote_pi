@@ -187,7 +187,7 @@ export type ClientMessage =
   | { type: "queued_message_clear"; id: string; target_id?: string }
   | { type: "approve_tool"; id: string; tool_call_id: string; decision: "allow" | "deny" }
   | { type: "cancel"; id: string; target_id: string }
-  | { type: "ping"; id: string }
+  | { type: "ping"; id: string; background_progress?: true }
   | { type: "session_sync"; id: string; limit?: number }
   // Plan/28 — Typed app actions on the paired Pi session. Each carries a
   // structured payload (no string parsing) and gets either `action_ok` or
@@ -260,6 +260,22 @@ export type SessionHistoryEvent =
   // re-sync like images) so the app re-renders the "context compacted" notice.
   | { ts: number; type: "compaction"; summary: string; tokens_before: number };
 
+export interface BackgroundTaskWire {
+  id: string;
+  label: string;
+  state: "queued" | "running" | "paused" | "waiting" | "partial" | "unknown";
+  elapsed_ms?: number;
+}
+
+/** Ephemeral provider-visible rows, not a complete fleet or durable task history. */
+export interface BackgroundProgressWire {
+  session_id: string;
+  epoch: string;
+  available: boolean;
+  truncated: boolean;
+  groups: { id: string; label?: string; tasks: BackgroundTaskWire[] }[];
+}
+
 export type ServerMessage =
   | {
       type: "pair_ok";
@@ -313,7 +329,7 @@ export type ServerMessage =
   | { type: "tool_result"; tool_call_id: string; result?: unknown; error?: string }
   | { type: "error"; in_reply_to?: string; code: ErrorCode; message: string }
   | { type: "cancelled"; in_reply_to: string; target_id: string }
-  | { type: "pong"; in_reply_to: string }
+  | { type: "pong"; in_reply_to: string; background_progress?: BackgroundProgressWire }
   | { type: "bye"; reason: ByeReason }
   | {
       type: "session_history";

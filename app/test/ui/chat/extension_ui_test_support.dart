@@ -38,6 +38,7 @@ class ExtensionUiTestChannel implements IChannel, IControlLink {
   }
 
   void push(ServerMessage m) => _ctrl.add(m);
+  void pushControl(ControlInbound frame) => _control.add(frame);
 }
 
 class ExtensionUiTestSecureStorage implements FlutterSecureStorage {

@@ -2,7 +2,9 @@
 // channel adopted into a real ConnectionManager and asserts box contents.
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:app/data/local/boxes.dart';
 import 'package:app/data/local/records/message_record.dart';
@@ -11,10 +13,14 @@ import 'package:app/data/repositories/session_read_repository.dart';
 import 'package:app/data/sync/sync_service.dart';
 import 'package:app/data/transport/channel.dart';
 import 'package:app/data/transport/connection_manager.dart';
+import 'package:app/data/transport/peer_channel.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/background_progress.dart';
 import 'package:app/pairing/storage.dart';
+import 'package:app/pairing/pair_request_flow.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:hive/hive.dart';
 
 class _FakeChannel implements IChannel, IControlLink {
@@ -46,6 +52,58 @@ class _FakeChannel implements IChannel, IControlLink {
 
   void push(ServerMessage m) => _ctrl.add(m);
   void pushControl(ControlInbound m) => _control.add(m);
+}
+
+class _ByteTransport implements PeerTransport {
+  final incoming = StreamController<Uint8List>();
+  late final reader = StreamIterator(incoming.stream);
+  final sent = <Map<String, dynamic>>[];
+  @override
+  Future<void> send(Uint8List bytes) async =>
+      sent.add(jsonDecode(utf8.decode(bytes)) as Map<String, dynamic>);
+  @override
+  Future<Uint8List> receive() async {
+    if (await reader.moveNext()) return reader.current;
+    throw StateError('closed');
+  }
+
+  @override
+  Future<void> close() => incoming.close();
+  void push(Map<String, dynamic> message) =>
+      incoming.add(Uint8List.fromList(utf8.encode(jsonEncode(message))));
+}
+
+// Real in-memory Hive boxes let deferred storage and renewal timers run on the
+// same virtual clock, without disk timing or wall-clock sleeps in lifecycle tests.
+class _DeferredLocalBoxes extends LocalBoxes {
+  final Box<dynamic> messages;
+  final Box<dynamic> index;
+  final Box<dynamic> runtime;
+  _DeferredLocalBoxes(this.messages, this.index, this.runtime);
+
+  Completer<void>? _readStarted;
+  Completer<void>? _readRelease;
+  ({Future<void> started, Completer<void> release}) deferMessages() {
+    final started = _readStarted = Completer<void>();
+    final release = _readRelease = Completer<void>();
+    return (started: started.future, release: release);
+  }
+
+  @override
+  Future<Box<dynamic>> msgsBox(String epk, String roomId) async {
+    final release = _readRelease;
+    if (release != null) {
+      _readRelease = null;
+      _readStarted!.complete();
+      await release.future;
+    }
+    return messages;
+  }
+
+  @override
+  Box<dynamic> sessionsIndexBox() => index;
+  @override
+  Box<dynamic> runtimeBox() => runtime;
 }
 
 class _FakeStorage extends PairingStorage {
@@ -116,6 +174,503 @@ void main() {
         ? SessionIndexRecord.fromJson(raw.cast<String, dynamic>())
         : null;
   }
+
+  String interest(_FakeChannel channel) => channel.sent
+      .whereType<Ping>()
+      .lastWhere((ping) => ping.backgroundProgress)
+      .id;
+
+  Pong progress(
+    String token, {
+    String session = 'parent',
+    bool available = true,
+    bool empty = false,
+  }) => Pong(
+    inReplyTo: token,
+    backgroundProgress: BackgroundProgressMessage(
+      inReplyTo: token,
+      sessionId: session,
+      epoch: 'epoch',
+      available: available,
+      groups: empty
+          ? []
+          : [
+              BackgroundGroup(
+                id: 'dispatch',
+                label: 'Dispatch',
+                tasks: [
+                  const BackgroundTask(
+                    id: 'worker',
+                    label: 'Worker',
+                    state: BackgroundTaskState.running,
+                    elapsed: Duration(seconds: 5),
+                  ),
+                ],
+              ),
+            ],
+    ),
+  );
+
+  for (final clearing in [false, true]) {
+    for (final disposed in [false, true]) {
+      test(
+        'deferred ${clearing ? 'session clearing' : 'activation'} respects disposal=$disposed',
+        () async {
+          final epk = 'deferred_${++_counter}';
+          final boxes = _DeferredLocalBoxes(
+            await Hive.openBox<dynamic>('${epk}_messages', bytes: Uint8List(0)),
+            await Hive.openBox<dynamic>('${epk}_index', bytes: Uint8List(0)),
+            await Hive.openBox<dynamic>('${epk}_runtime', bytes: Uint8List(0)),
+          );
+          fakeAsync((clock) {
+            final ch = _FakeChannel();
+            final conn = ConnectionManager(
+              factory: (_, _) async => ch,
+              storage: _FakeStorage(),
+              emitDebounce: Duration.zero,
+            );
+            conn.adopt(
+              ch,
+              PeerRecord(
+                remoteEpk: epk,
+                sessionName: 'Pi',
+                relayUrl: 'ws://localhost',
+                pairedAt: '2026-01-01',
+              ),
+            );
+            clock.flushMicrotasks();
+            // Defer the initial read, or let activation finish before deferring
+            // the next session-clear read. No storage callback finishes by chance.
+            var blocked = clearing ? null : boxes.deferMessages();
+            final sync = SyncService(conn, boxes);
+            try {
+              clock.flushMicrotasks();
+              var clearCompleted = false;
+              if (clearing) {
+                clock.elapse(const Duration(seconds: 1));
+                ch.push(progress(interest(ch)));
+                clock.flushMicrotasks();
+                expect(sync.backgroundProgress?.observedCount, 1);
+                blocked = boxes.deferMessages();
+                sync.clearActiveSession().then((_) => clearCompleted = true);
+              }
+              var readStarted = false;
+              blocked!.started.then((_) => readStarted = true);
+              clock.flushMicrotasks();
+              expect(readStarted, isTrue);
+              final before = List<ClientMessage>.of(ch.sent);
+              final histories = ch.sent.whereType<SessionSync>().length;
+              if (disposed) sync.dispose();
+              blocked.release.complete();
+              clock.flushMicrotasks();
+              if (clearing) expect(clearCompleted, isTrue);
+              clock.elapse(const Duration(seconds: 1));
+              expect(conn.status, isA<StatusOnline>());
+              if (disposed) {
+                expect(ch.sent, before);
+                // Explicit requests must remain harmless too, even with a live
+                // connection and the old activation/session clear now completed.
+                sync.requestSync();
+                expect(ch.sent, before);
+              } else {
+                expect(ch.sent.whereType<SessionSync>().length, histories + 1);
+                ch.push(progress(interest(ch)));
+                clock.flushMicrotasks();
+                expect(
+                  sync.backgroundProgress?.freshness,
+                  BackgroundFreshness.fresh,
+                );
+              }
+              final afterCompletion = List<ClientMessage>.of(ch.sent);
+              clock.elapse(const Duration(seconds: 10));
+              if (disposed) {
+                expect(ch.sent, before);
+              } else {
+                expect(ch.sent.whereType<SessionSync>().length, histories + 1);
+                final renewals = ch.sent
+                    .skip(afterCompletion.length)
+                    .whereType<Ping>()
+                    .toList();
+                expect(renewals, hasLength(2));
+                expect(
+                  renewals.every(
+                    (ping) =>
+                        ping.backgroundProgress && ping.id == interest(ch),
+                  ),
+                  isTrue,
+                );
+              }
+            } finally {
+              sync.dispose();
+              conn.dispose();
+              clock.flushMicrotasks();
+            }
+          });
+        },
+      );
+    }
+  }
+
+  test(
+    'background launch completion cannot finish the observed worker; no task persistence',
+    () async {
+      final s = await setup();
+      s.sync.requestSync();
+      final token = interest(s.ch);
+      s.ch.push(progress(token));
+      s.ch.push(
+        ToolResult(toolCallId: 'launch', result: 'Async launch returned'),
+      );
+      await _settle();
+      expect(s.sync.backgroundProgress?.observedCount, 1);
+      expect(messages(s.epk).where((m) => m.role != MsgRole.tool), isEmpty);
+      s.ch.push(progress('other-parent-token', empty: true));
+      await _settle();
+      expect(s.sync.backgroundProgress?.observedCount, 1);
+      s.ch.push(progress(token, empty: true));
+      await _settle();
+      expect(s.sync.backgroundProgress?.visible, isFalse);
+      s.sync.dispose();
+      s.conn.dispose();
+    },
+  );
+
+  test(
+    'background offline and unavailable freeze time; reconnect requires a fresh token',
+    () async {
+      final s = await setup();
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      s.sync.requestSync();
+      final token = interest(s.ch);
+      s.ch.push(progress(token));
+      await _settle();
+      s.ch.push(progress(token, available: false));
+      await _settle();
+      final frozen =
+          s.sync.backgroundProgress!.groups.single.tasks.single.elapsed;
+      expect(
+        s.sync.backgroundProgress!.freshness,
+        BackgroundFreshness.unavailable,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 1100));
+      expect(
+        s.sync.backgroundProgress!.groups.single.tasks.single.elapsed,
+        frozen,
+      );
+      await s.conn.disconnect();
+      await _settle();
+      expect(s.sync.backgroundProgress!.freshness, BackgroundFreshness.offline);
+      final fresh = _FakeChannel();
+      s.conn.adopt(
+        fresh,
+        PeerRecord(
+          remoteEpk: s.epk,
+          sessionName: 'Pi',
+          relayUrl: 'ws://localhost',
+          pairedAt: '2026-01-01',
+        ),
+      );
+      await _settle();
+      s.sync.requestSync();
+      expect(
+        s.sync.backgroundProgress!.freshness,
+        BackgroundFreshness.refreshing,
+      );
+      fresh.push(progress(token, empty: true));
+      await _settle();
+      expect(s.sync.backgroundProgress!.observedCount, 1);
+      fresh.push(progress(interest(fresh)));
+      await _settle();
+      expect(s.sync.backgroundProgress!.freshness, BackgroundFreshness.fresh);
+      s.sync.dispose();
+      s.conn.dispose();
+    },
+  );
+
+  test(
+    'background room loss freezes progress while relay stays online',
+    () async {
+      final s = await setup();
+      // Let the existing startup history-sync debounce finish before reconnecting.
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      s.ch.pushControl(
+        RoomAnnounced(peer: s.epk, roomId: 'main', startedAt: 1),
+      );
+      await _settle();
+      s.sync.requestSync();
+      final token = interest(s.ch);
+      s.ch.push(progress(token));
+      await _settle();
+      s.ch.pushControl(RoomEnded(peer: s.epk, roomId: 'main', sinceTs: 2));
+      await _settle();
+      expect(s.conn.status, isA<StatusOnline>());
+      expect(s.sync.backgroundProgress?.freshness, BackgroundFreshness.offline);
+      s.ch.push(progress(token, empty: true));
+      await _settle();
+      expect(s.sync.backgroundProgress?.observedCount, 1);
+      s.ch.pushControl(
+        RoomAnnounced(peer: s.epk, roomId: 'main', startedAt: 1),
+      );
+      await _settle();
+      expect(
+        s.sync.backgroundProgress?.freshness,
+        BackgroundFreshness.refreshing,
+      );
+      s.ch.push(progress(interest(s.ch)));
+      await _settle();
+      expect(s.sync.backgroundProgress?.freshness, BackgroundFreshness.fresh);
+      s.sync.dispose();
+      s.conn.dispose();
+    },
+  );
+
+  test(
+    'background view cannot leak across rooms, parent replacement or new session',
+    () async {
+      final s = await setup();
+      s.sync.requestSync();
+      final token = interest(s.ch);
+      s.ch.push(progress(token));
+      await _settle();
+      s.ch.push(progress(token, session: 'replacement', available: false));
+      await _settle();
+      expect(s.sync.backgroundProgress, isNull);
+      s.ch.push(progress(token, session: 'replacement'));
+      await _settle();
+      s.conn.switchRoom('other-room');
+      await s.sync.activate(s.epk, 'other-room');
+      s.ch.push(progress(token));
+      await _settle();
+      expect(s.sync.backgroundProgress, isNull);
+      s.sync.requestSync();
+      s.ch.push(progress(interest(s.ch)));
+      await _settle();
+      expect(s.sync.backgroundProgress?.observedCount, 1);
+      await s.sync.clearActiveSession();
+      expect(s.sync.backgroundProgress, isNull);
+      s.ch.push(progress(token));
+      await _settle();
+      expect(s.sync.backgroundProgress, isNull);
+      s.sync.dispose();
+      s.conn.dispose();
+    },
+  );
+
+  test(
+    'preannounced room loss and presence-only recovery freeze then renew independently of history',
+    () async {
+      final s = await setup();
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+        s.ch.pushControl(
+          RoomAnnounced(peer: s.epk, roomId: 'main', startedAt: 1),
+        );
+        s.ch.pushControl(
+          RoomAnnounced(peer: s.epk, roomId: 'preannounced', startedAt: 2),
+        );
+        await _settle();
+        s.conn.switchRoom('preannounced');
+        await _settle();
+        await s.sync.activate(s.epk, 'preannounced');
+        s.sync.requestSync();
+        final token = interest(s.ch);
+        s.ch.push(progress(token));
+        await _settle();
+        s.ch.pushControl(
+          RoomEnded(peer: s.epk, roomId: 'preannounced', sinceTs: 3),
+        );
+        await _settle();
+        expect(
+          s.sync.backgroundProgress!.freshness,
+          BackgroundFreshness.offline,
+        );
+        final frozen =
+            s.sync.backgroundProgress!.groups.single.tasks.single.elapsed;
+        s.ch.push(progress(token, empty: true));
+        await Future<void>.delayed(const Duration(milliseconds: 1100));
+        expect(
+          s.sync.backgroundProgress!.groups.single.tasks.single.elapsed,
+          frozen,
+        );
+        s.ch.pushControl(
+          RoomAnnounced(peer: s.epk, roomId: 'preannounced', startedAt: 2),
+        );
+        await _settle();
+        expect(interest(s.ch), isNot(token));
+        s.ch.push(progress(interest(s.ch)));
+        await _settle();
+        s.ch.pushControl(PeerOffline(peer: s.epk, sinceTs: 4));
+        await _settle();
+        expect(
+          s.sync.backgroundProgress!.freshness,
+          BackgroundFreshness.offline,
+        );
+        final before = interest(s.ch);
+        final histories = s.ch.sent.whereType<SessionSync>().length;
+        s.ch.pushControl(PeerOnline(peer: s.epk));
+        await _settle();
+        expect(interest(s.ch), isNot(before));
+        expect(s.ch.sent.whereType<SessionSync>().length, histories);
+        expect(
+          s.sync.backgroundProgress!.freshness,
+          BackgroundFreshness.refreshing,
+        );
+        s.ch.push(progress(before, empty: true));
+        await _settle();
+        expect(s.sync.backgroundProgress!.observedCount, 1);
+        s.ch.push(progress(interest(s.ch)));
+        await _settle();
+        expect(s.sync.backgroundProgress!.freshness, BackgroundFreshness.fresh);
+      } finally {
+        s.sync.dispose();
+        s.conn.dispose();
+      }
+    },
+  );
+
+  test(
+    'background renewal never replays history and silence expires freshness without finishing tasks',
+    () async {
+      final s = await setup();
+      try {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        s.sync.requestSync();
+        final token = interest(s.ch);
+        final histories = s.ch.sent.whereType<SessionSync>().length;
+        s.ch.push(progress(token));
+        await _settle();
+        await Future<void>.delayed(const Duration(milliseconds: 16100));
+        final renewals = s.ch.sent.whereType<Ping>().where(
+          (m) => m.backgroundProgress && m.id == token,
+        );
+        expect(renewals.length, greaterThanOrEqualTo(4));
+        expect(s.ch.sent.whereType<SessionSync>().length, histories);
+        expect(
+          s.sync.backgroundProgress!.freshness,
+          BackgroundFreshness.unavailable,
+        );
+        expect(
+          s.sync.backgroundProgress!.groups.single.tasks.single.state,
+          BackgroundTaskState.running,
+        );
+        final frozen =
+            s.sync.backgroundProgress!.groups.single.tasks.single.elapsed;
+        s.ch.pushControl(PeerOffline(peer: s.epk, sinceTs: 1));
+        await _settle();
+        final count = s.ch.sent
+            .whereType<Ping>()
+            .where((m) => m.backgroundProgress)
+            .length;
+        await Future<void>.delayed(const Duration(milliseconds: 5100));
+        expect(
+          s.ch.sent.whereType<Ping>().where((m) => m.backgroundProgress).length,
+          count,
+        );
+        expect(
+          s.sync.backgroundProgress!.groups.single.tasks.single.elapsed,
+          frozen,
+        );
+      } finally {
+        s.sync.dispose();
+        s.conn.dispose();
+      }
+    },
+  );
+
+  test(
+    'malformed current-token scope freezes through byte codec without adopting invalid identity',
+    () async {
+      final bytes = _ByteTransport();
+      final channel = PlainPeerChannel(transport: bytes);
+      final conn = ConnectionManager(
+        factory: (_, _) async => channel,
+        storage: _FakeStorage(),
+      );
+      final sync = SyncService(conn, LocalBoxes());
+      try {
+        conn.adopt(
+          channel,
+          PeerRecord(
+            remoteEpk: 'byte_scope',
+            sessionName: 'Pi',
+            relayUrl: 'ws://localhost',
+            pairedAt: '2026-01-01',
+          ),
+        );
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        sync.requestSync();
+        await _settle();
+        final token = bytes.sent.lastWhere(
+          (m) => m['background_progress'] == true,
+        )['id'];
+        final observation = <String, dynamic>{
+          'session_id': 'parent',
+          'epoch': 'epoch',
+          'available': true,
+          'truncated': false,
+          'groups': [
+            {
+              'id': 'g',
+              'tasks': [
+                {
+                  'id': 't',
+                  'label': 'Worker',
+                  'state': 'running',
+                  'elapsed_ms': 5000,
+                },
+              ],
+            },
+          ],
+        };
+        void push(Object? payload, [Object? reply]) => bytes.push({
+          'type': 'pong',
+          'in_reply_to': reply ?? token,
+          'background_progress': payload,
+        });
+        for (final field in ['session_id', 'epoch']) {
+          for (final invalid in [null, '', 3, 'x' * 257]) {
+            push(observation);
+            await _settle();
+            expect(
+              sync.backgroundProgress!.freshness,
+              BackgroundFreshness.fresh,
+            );
+            push({...observation, field: invalid}, 'another-phone');
+            await _settle();
+            expect(
+              sync.backgroundProgress!.freshness,
+              BackgroundFreshness.fresh,
+            );
+            push({...observation, field: invalid});
+            await _settle();
+            expect(
+              sync.backgroundProgress!.freshness,
+              BackgroundFreshness.unavailable,
+            );
+            expect(sync.backgroundProgress!.sessionId, 'parent');
+            expect(sync.backgroundProgress!.epoch, 'epoch');
+            expect(sync.backgroundProgress!.observedCount, 1);
+          }
+        }
+        final frozen =
+            sync.backgroundProgress!.groups.single.tasks.single.elapsed;
+        await Future<void>.delayed(const Duration(milliseconds: 1100));
+        expect(
+          sync.backgroundProgress!.groups.single.tasks.single.elapsed,
+          frozen,
+        );
+        push(observation);
+        await _settle();
+        expect(sync.backgroundProgress!.freshness, BackgroundFreshness.fresh);
+        push({...observation, 'groups': []});
+        await _settle();
+        expect(sync.backgroundProgress!.visible, isFalse);
+      } finally {
+        sync.dispose();
+        conn.dispose();
+      }
+    },
+  );
 
   test(
     'user_message echo writes one MessageRecord + updates the index',

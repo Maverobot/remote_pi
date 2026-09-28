@@ -11,6 +11,7 @@ import 'package:app/ui/chat/viewmodels/chat_viewmodel.dart';
 import 'package:app/ui/chat/voice/viewmodels/voice_input_viewmodel.dart';
 import 'package:app/ui/chat/widgets/attach_sheet.dart';
 import 'package:app/ui/chat/widgets/input_bar.dart';
+import 'package:app/ui/chat/widgets/background_progress_panel.dart';
 import 'package:app/ui/chat/widgets/ask_user_prompt_card.dart';
 import 'package:app/ui/chat/widgets/message_bubble.dart';
 import 'package:app/ui/chat/widgets/streaming_bubble.dart';
@@ -75,7 +76,30 @@ class ChatPage extends StatelessWidget {
             // surfaces those, and stacking duplicates noise the surface.
             if (state is ChatReady && state.pairingRevoked)
               _RevokedBanner(onRePair: () => context.go('/pair')),
-            Expanded(child: _buildBody(context, state, vm)),
+            Expanded(
+              child: LayoutBuilder(
+                builder: (context, constraints) => Column(
+                  children: [
+                    Expanded(child: _buildBody(context, state, vm)),
+                    if (state is ChatReady &&
+                        (state.backgroundProgress?.visible ?? false))
+                      // The composer is measured first by the outer Column.
+                      // Bound the entire panel to the space actually left over.
+                      ConstrainedBox(
+                        constraints: BoxConstraints(
+                          maxHeight: constraints.maxHeight / 2,
+                        ),
+                        child: BackgroundProgressPanel(
+                          key: ValueKey(
+                            '${state.backgroundProgress!.sessionId}:${state.backgroundProgress!.epoch}',
+                          ),
+                          progress: state.backgroundProgress!,
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
             _buildInput(context, state, vm),
           ],
         ),

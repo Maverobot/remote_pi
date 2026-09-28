@@ -6,6 +6,8 @@
  */
 import { describe, expect, test, vi, beforeEach, afterEach } from "vitest";
 import { EventEmitter } from "node:events";
+import { decodeServer } from "./protocol/codec.js";
+import type { ServerMessage } from "./protocol/types.js";
 import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -269,7 +271,7 @@ function makeMockPi(): { pi: ExtensionAPI; registeredCommands: string[] } {
 }
 
 function makeMockCtx(cwd = "/home/user/projects/remote_pi") {
-  return { ui: { notify: vi.fn() }, cwd, abort: vi.fn() };
+  return { ui: { notify: vi.fn() }, cwd, abort: vi.fn(), sessionManager: { getSessionId: () => "test-parent" } };
 }
 
 function deferred<T>(): {
@@ -1024,7 +1026,7 @@ describe("agent-network mesh delivery", () => {
     ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-wake"
       && (options as { triggerTurn?: boolean }).triggerTurn === true,
   );
-  const liveContext = (isIdle: () => boolean) => ({ isIdle });
+  const liveContext = (isIdle: () => boolean) => ({ isIdle, sessionManager: { getSessionId: () => "test-parent" } });
   const startSession = (harness: ReturnType<typeof captureEventHarness>, isIdle: () => boolean) => {
     harness.handler("session_start")({ type: "session_start" }, liveContext(isIdle));
   };
@@ -1267,6 +1269,7 @@ function captureEventHandler(eventName: string): EventHandler {
 function captureEventHarness(): {
   handler: (eventName: string) => EventHandler;
   emitBus: (channel: string, data: unknown) => void;
+  onBus: (channel: string, listener: (data: unknown) => void) => () => void;
   busListenerCount: (channel: string) => number;
 } {
   const handlers = new Map<string, EventHandler>();
@@ -1303,6 +1306,7 @@ function captureEventHarness(): {
     emitBus(channel: string, data: unknown) {
       (pi.events as unknown as { emit: (channel: string, data: unknown) => void }).emit(channel, data);
     },
+    onBus(channel, listener) { return pi.events.on(channel, listener); },
     busListenerCount(channel: string) {
       return busHandlers.get(channel)?.length ?? 0;
     },
@@ -1488,6 +1492,60 @@ describe("multi-channel broadcast (W2D)", () => {
     const histories = sent.filter((d) => d.inner.type === "session_history");
     expect(histories).toHaveLength(1);
     expect(histories[0]!.peer).toBe("ownerA__1234567890");
+  });
+
+  test("same-Owner legacy and modern phones share safe pong frames without replacing each other's interests", async () => {
+    const owner = "ownerA__1234567890";
+    await _pairForTest(owner);
+    const harness = captureEventHarness();
+    harness.handler("session_start")({ type: "session_start" }, { isIdle: () => true, sessionManager: { getSessionId: () => "test-parent" } });
+    harness.onBus("subagents:rpc:v1:request", raw => {
+      const request = raw as { requestId: string; method: string };
+      harness.emitBus(`subagents:rpc:v1:reply:${request.requestId}`, {
+        version: 1, requestId: request.requestId, success: true,
+        data: request.method === "ping"
+          ? { capabilities: { asyncStatusSnapshot: { kind: "pi-subagents.async-status-snapshot", version: 1 } }, session: { sessionId: "test-parent" } }
+          : { asyncSnapshot: { kind: "pi-subagents.async-status-snapshot", version: 1, generatedAt: 10, omitted: { runs: 0, children: 0, byteLimitExceeded: false }, runs: [{ id: "worker", kind: "subagent", label: "Worker", state: "running" }] } },
+      });
+    });
+    // Exercise the real PlainPeerChannel and route handler. Like registry.rs,
+    // the relay delivers every Owner/main envelope to all that Owner's phones.
+    const legacy: ServerMessage[] = [], phoneA: ServerMessage[] = [], phoneB: ServerMessage[] = [];
+    let connected = true;
+    relayRef.current!.send.mockImplementation((line: string) => {
+      const frame = decodeSentCt(line);
+      expect(frame.peer).toBe(owner);
+      if (connected) for (const inbox of [legacy, phoneA, phoneB]) inbox.push(decodeServer(JSON.stringify(frame.inner)));
+    });
+    const send = (message: Record<string, unknown>) => relayRef.current!.emit("message", makeInnerLine(owner, message));
+    const settle = () => new Promise<void>(resolve => setImmediate(resolve));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      send({ type: "ping", id: "phone-A", background_progress: true }); await settle();
+      send({ type: "ping", id: "legacy-heartbeat" });
+      send({ type: "session_sync", id: "legacy-history" }); await settle();
+      expect(legacy.some(m => m.type === "pong" && m.in_reply_to === "legacy-heartbeat")).toBe(true);
+      expect(legacy.some(m => m.type === "session_history")).toBe(true);
+      expect(legacy.find(m => m.type === "pong" && m.background_progress)).toMatchObject({ type: "pong", in_reply_to: "phone-A", background_progress: { available: true, groups: [{ tasks: [{ label: "Worker" }] }] } });
+      send({ type: "ping", id: "phone-B", background_progress: true }); await settle();
+      phoneA.length = phoneB.length = 0;
+      await vi.advanceTimersByTimeAsync(2000);
+      const tokens = (frames: ServerMessage[]) => frames.flatMap(m => m.type === "pong" && m.background_progress ? [m.in_reply_to] : []);
+      expect(tokens(phoneA)).toEqual(["phone-A", "phone-B"]);
+      expect(tokens(phoneB)).toEqual(["phone-A", "phone-B"]);
+      const histories = legacy.filter(m => m.type === "session_history").length;
+      send({ type: "ping", id: "phone-A", background_progress: true }); await settle();
+      expect(legacy.filter(m => m.type === "session_history")).toHaveLength(histories);
+      // Silent relay delivery loss, not an artificial owner detach callback.
+      connected = false; await vi.advanceTimersByTimeAsync(16000);
+      expect(harness.busListenerCount("subagents:rpc:v1:ready")).toBe(0);
+      const count = relayRef.current!.send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(6000);
+      expect(relayRef.current!.send.mock.calls.length).toBe(count);
+      connected = true;
+      send({ type: "ping", id: "reconnected-A", background_progress: true }); await settle();
+      expect(tokens(phoneA).at(-1)).toBe("reconnected-A");
+    } finally { _onPeerDisconnect(owner); vi.useRealTimers(); }
   });
 
   test("revoke of owner A → A's channel closed, B keeps running", async () => {

@@ -1,5 +1,7 @@
 // ignore_for_file: lines_longer_than_80_chars
 
+import 'package:app/domain/background_progress.dart';
+
 // ---------------------------------------------------------------------------
 // Control frames (plano 12 — presence)
 //
@@ -540,10 +542,15 @@ class Cancel extends ClientMessage {
 
 class Ping extends ClientMessage {
   final String id;
-  Ping({required this.id});
+  final bool backgroundProgress;
+  Ping({required this.id, this.backgroundProgress = false});
 
   @override
-  Map<String, dynamic> toJson() => {'type': 'ping', 'id': id};
+  Map<String, dynamic> toJson() => {
+    'type': 'ping',
+    'id': id,
+    if (backgroundProgress) 'background_progress': true,
+  };
 }
 
 class PairRequest extends ClientMessage {
@@ -795,6 +802,132 @@ sealed class ServerMessage {
   }
 }
 
+/// Optional pong observation, scoped to a phone's renewable ping ID.
+/// Invalid scope is retained as null so the current phone can freeze its view.
+class BackgroundProgressMessage {
+  final String inReplyTo;
+  final String? sessionId;
+  final String? epoch;
+  final bool available;
+  final bool truncated;
+  final List<BackgroundGroup> groups;
+  const BackgroundProgressMessage({
+    required this.inReplyTo,
+    required this.sessionId,
+    required this.epoch,
+    required this.available,
+    this.truncated = false,
+    this.groups = const [],
+  });
+
+  factory BackgroundProgressMessage.fromJson(String reply, Object? payload) {
+    final json = payload is Map<String, dynamic>
+        ? payload
+        : <String, dynamic>{};
+    String text(Object? value, [int max = 160]) {
+      if (value is! String || value.trim().isEmpty || value.length > max) {
+        throw const FormatException('Invalid background progress text');
+      }
+      return value;
+    }
+
+    String? scope(Object? value) =>
+        value is String && value.trim().isNotEmpty && value.length <= 256
+        ? value
+        : null;
+    final session = scope(json['session_id']);
+    final epoch = scope(json['epoch']);
+    try {
+      if (session == null || epoch == null) {
+        throw const FormatException('Invalid background scope');
+      }
+      if (json['available'] is! bool ||
+          json['truncated'] is! bool ||
+          json['groups'] is! List) {
+        throw const FormatException('Invalid background progress');
+      }
+      final rawGroups = json['groups'] as List;
+      if (rawGroups.length > 20) {
+        throw const FormatException('Too many background groups');
+      }
+      final groups = <BackgroundGroup>[];
+      final ids = <String>{};
+      var count = 0;
+      for (final raw in rawGroups) {
+        if (raw is! Map<String, dynamic> || raw['tasks'] is! List) {
+          throw const FormatException('Invalid background group');
+        }
+        final groupId = text(raw['id']);
+        if (!ids.add('group:$groupId')) {
+          throw const FormatException('Duplicate background group');
+        }
+        final tasks = <BackgroundTask>[];
+        for (final task in raw['tasks'] as List) {
+          if (task is! Map<String, dynamic> || ++count > 128) {
+            throw const FormatException('Invalid background task');
+          }
+          final taskId = text(task['id']);
+          if (!ids.add('task:$taskId')) {
+            throw const FormatException('Duplicate background task');
+          }
+          final state = text(task['state'], 32);
+          final ms = task['elapsed_ms'];
+          if (ms != null && (ms is! int || ms < 0 || ms > 9007199254740991)) {
+            throw const FormatException('Invalid background duration');
+          }
+          // Tolerate future states, but never label them running or successful.
+          if (const [
+            'complete',
+            'failed',
+            'stopped',
+            'cancelled',
+            'rejected',
+          ].contains(state)) {
+            continue;
+          }
+          tasks.add(
+            BackgroundTask(
+              id: taskId,
+              label: text(task['label']),
+              state:
+                  BackgroundTaskState.values
+                      .where((value) => value.name == state)
+                      .firstOrNull ??
+                  BackgroundTaskState.unknown,
+              elapsed: ms == null ? null : Duration(milliseconds: ms as int),
+            ),
+          );
+        }
+        if (tasks.isNotEmpty) {
+          groups.add(
+            BackgroundGroup(
+              id: groupId,
+              label: raw['label'] == null ? null : text(raw['label']),
+              tasks: tasks,
+            ),
+          );
+        }
+      }
+      return BackgroundProgressMessage(
+        inReplyTo: reply,
+        sessionId: session,
+        epoch: epoch,
+        available: json['available'] as bool,
+        truncated: json['truncated'] as bool,
+        groups: List.unmodifiable(groups),
+      );
+    } on FormatException {
+      // A malformed observation must freeze the last view, not clear it.
+      return BackgroundProgressMessage(
+        inReplyTo: reply,
+        sessionId: session,
+        epoch: epoch,
+        available: false,
+      );
+    }
+  }
+}
+
 class AgentChunk extends ServerMessage {
   final String inReplyTo;
   final String delta;
@@ -875,10 +1008,18 @@ class Cancelled extends ServerMessage {
 
 class Pong extends ServerMessage {
   final String inReplyTo;
-  Pong({required this.inReplyTo});
+  final BackgroundProgressMessage? backgroundProgress;
+  Pong({required this.inReplyTo, this.backgroundProgress});
 
-  factory Pong.fromJson(Map<String, dynamic> j) =>
-      Pong(inReplyTo: j['in_reply_to'] as String);
+  factory Pong.fromJson(Map<String, dynamic> j) {
+    final reply = j['in_reply_to'] as String;
+    return Pong(
+      inReplyTo: reply,
+      backgroundProgress: j.containsKey('background_progress')
+          ? BackgroundProgressMessage.fromJson(reply, j['background_progress'])
+          : null,
+    );
+  }
 }
 
 /// Plan/27 Wave A — identifies the agent harness the paired PC is
@@ -1486,21 +1627,20 @@ class AskQuestionWire {
   });
 
   factory AskQuestionWire.fromJson(Map<String, dynamic> j) => AskQuestionWire(
-        id: j['id'] as String? ?? '',
-        label: (j['label'] as String?) ?? (j['prompt'] as String?) ?? '',
-        prompt: j['prompt'] as String? ?? '',
-        type: AskQuestionWireType.fromWire(j['type'] as String?) ??
-            AskQuestionWireType.single,
-        required: (j['required'] as bool?) ?? false,
-        presentedType:
-            AskQuestionWireType.fromWire(j['presentedType'] as String?),
-        requestedType:
-            AskQuestionWireType.fromWire(j['requestedType'] as String?),
-        options: (j['options'] as List<dynamic>? ?? const <dynamic>[])
-            .whereType<Map>()
-            .map((m) => AskOptionWire.fromJson(m.cast<String, dynamic>()))
-            .toList(growable: false),
-      );
+    id: j['id'] as String? ?? '',
+    label: (j['label'] as String?) ?? (j['prompt'] as String?) ?? '',
+    prompt: j['prompt'] as String? ?? '',
+    type:
+        AskQuestionWireType.fromWire(j['type'] as String?) ??
+        AskQuestionWireType.single,
+    required: (j['required'] as bool?) ?? false,
+    presentedType: AskQuestionWireType.fromWire(j['presentedType'] as String?),
+    requestedType: AskQuestionWireType.fromWire(j['requestedType'] as String?),
+    options: (j['options'] as List<dynamic>? ?? const <dynamic>[])
+        .whereType<Map>()
+        .map((m) => AskOptionWire.fromJson(m.cast<String, dynamic>()))
+        .toList(growable: false),
+  );
 }
 
 /// Optional pi-ask enrichment on an `extension_ui_request`. When present, the
@@ -1521,7 +1661,8 @@ class AskEnrichmentWire {
     this.questions = const <AskQuestionWire>[],
   });
 
-  factory AskEnrichmentWire.fromJson(Map<String, dynamic> j) => AskEnrichmentWire(
+  factory AskEnrichmentWire.fromJson(Map<String, dynamic> j) =>
+      AskEnrichmentWire(
         flowId: j['flow_id'] as String? ?? '',
         toolCallId: j['tool_call_id'] as String?,
         source: (j['source'] as String?) ?? 'tool',
@@ -1561,7 +1702,8 @@ class ExtensionUiRequest extends ServerMessage {
   factory ExtensionUiRequest.fromJson(Map<String, dynamic> j) =>
       ExtensionUiRequest(
         id: j['id'] as String? ?? '',
-        method: ExtensionUiMethod.fromWire(j['method'] as String?) ??
+        method:
+            ExtensionUiMethod.fromWire(j['method'] as String?) ??
             ExtensionUiMethod.select,
         title: j['title'] as String?,
         message: j['message'] as String?,
@@ -1594,7 +1736,9 @@ class AskAnswerWire {
   Map<String, dynamic> toJson() {
     final m = <String, dynamic>{};
     if (values.isNotEmpty) m['values'] = values;
-    if (customText != null && customText!.isNotEmpty) m['customText'] = customText;
+    if (customText != null && customText!.isNotEmpty) {
+      m['customText'] = customText;
+    }
     if (note != null && note!.isNotEmpty) m['note'] = note;
     if (optionNotes.isNotEmpty) m['optionNotes'] = optionNotes;
     return m;
@@ -1606,6 +1750,7 @@ class AskAnswerWire {
 class AskResponseEnrichmentWire {
   final String flowId;
   final bool isCancel;
+
   /// 'submit' | 'elaborate' (null when cancel). Raw string for forward-compat.
   final String? mode;
   final Map<String, AskAnswerWire> answers;
