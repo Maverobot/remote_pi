@@ -10,6 +10,7 @@ import 'package:app/protocol/protocol.dart';
 import 'package:app/data/transport/peer_channel.dart';
 import 'package:app/pairing/pair_request_flow.dart';
 import 'package:app/pairing/storage.dart';
+import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 // ---------------------------------------------------------------------------
@@ -1030,6 +1031,200 @@ void main() {
       },
     );
   });
+  // -------------------------------------------------------------------------
+  // onForeground — returning from the background should not wait out a backoff
+  // that was scheduled for a socket loss the user never saw.
+  // -------------------------------------------------------------------------
+  group('onForeground', () {
+    test('is a no-op after disposal with an active peer', () {
+      fakeAsync((clock) {
+        var attempts = 0;
+        final cm = ConnectionManager(
+          factory: (_, token) async {
+            attempts++;
+            throw StateError('offline');
+          },
+          storage: _FakeStorage([]),
+        );
+        unawaited(cm.connectTo(_fakePeer()));
+        clock.flushMicrotasks();
+        expect(cm.status, isA<StatusRetrying>());
+        final status = cm.status;
+
+        cm.dispose();
+        cm.onForeground();
+        clock.flushMicrotasks();
+        clock.elapse(const Duration(seconds: 31));
+
+        expect(attempts, 1);
+        expect(cm.status, same(status));
+        expect(clock.pendingTimers, isEmpty);
+      });
+    });
+
+    test('cancels a pending backoff and retries at once', () async {
+      var attempts = 0;
+      final cm = ConnectionManager(
+        factory: (_, token) async {
+          attempts++;
+          if (attempts == 1) throw Exception('first attempt fails');
+          return _makeChannel();
+        },
+        storage: _FakeStorage([_fakePeer()]),
+        emitDebounce: Duration.zero,
+      );
+
+      await cm.boot();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(cm.status, isA<StatusRetrying>());
+      expect(attempts, 1);
+
+      cm.onForeground();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(
+        attempts,
+        2,
+        reason: 'resume connects immediately instead of waiting out _kBackoff',
+      );
+      expect(cm.status, isA<StatusOnline>());
+      cm.dispose();
+    });
+
+    test('leaves a live socket alone — no duplicate connection', () async {
+      var attempts = 0;
+      final cm = ConnectionManager(
+        factory: (_, token) async {
+          attempts++;
+          return _makeChannel();
+        },
+        storage: _FakeStorage([_fakePeer()]),
+        emitDebounce: Duration.zero,
+      );
+
+      await cm.boot();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+      expect(cm.status, isA<StatusOnline>());
+      expect(attempts, 1);
+
+      cm.onForeground();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(
+        attempts,
+        1,
+        reason: 'an app switch must not open a second socket for the same room',
+      );
+      cm.dispose();
+    });
+
+    test('is a no-op with no active peer', () async {
+      final cm = ConnectionManager(
+        factory: (_, token) async => _makeChannel(),
+        storage: _FakeStorage([]),
+        emitDebounce: Duration.zero,
+      );
+
+      await cm.boot();
+      cm.onForeground();
+
+      expect(cm.status, isA<StatusNoPeer>());
+      cm.dispose();
+    });
+  });
+
+  test('dispose cancels a pending factory and closes its late channel', () {
+    fakeAsync((clock) {
+      final pending = Completer<IChannel>();
+      final ch = _ThrowingControlChannel();
+      late CancelToken token;
+      final cm = ConnectionManager(
+        factory: (_, cancel) {
+          token = cancel;
+          return pending.future;
+        },
+        storage: _FakeStorage([]),
+      );
+      unawaited(cm.connectTo(_fakePeer()));
+      expect(cm.status, isA<StatusConnecting>());
+
+      cm.dispose();
+      expect(token.isCancelled, isTrue);
+      pending.complete(ch);
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(seconds: 31));
+
+      expect(ch.closeCalls, 1);
+      expect(cm.status, isA<StatusConnecting>());
+      expect(clock.pendingTimers, isEmpty);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Activation failure. Everything between the factory returning and
+  // `_replaySubscriptions()` finishing can throw, and the channel is already
+  // authenticated on the relay by then — so failing to close it leaks a live
+  // socket that the relay sees as connected-but-silent. It used to be dropped
+  // on the floor. (Observed for real as a socket with rx_text=0 rx_control=0
+  // tx_text=0 overlapping a healthy one, both reset in the same instant.)
+  // -------------------------------------------------------------------------
+  group('connect — activation failure', () {
+    test('disposal during delayed close prevents retries', () {
+      fakeAsync((clock) {
+        final ch = _DelayedCloseThrowingControlChannel();
+        var attempts = 0;
+        late CancelToken token;
+        final cm = ConnectionManager(
+          factory: (_, cancel) async {
+            attempts++;
+            token = cancel;
+            return ch;
+          },
+          storage: _FakeStorage([]),
+          emitDebounce: Duration.zero,
+        );
+        cm.subscribeToPeers(const ['epk_other']);
+        var connectCompleted = false;
+        unawaited(cm.connectTo(_fakePeer()).then((_) => connectCompleted = true));
+        clock.flushMicrotasks();
+        expect(ch.closeStarted, isTrue);
+        expect(connectCompleted, isFalse);
+        expect(attempts, 1);
+
+        cm.dispose();
+        ch.releaseClose.complete();
+        clock.flushMicrotasks();
+        expect(connectCompleted, isTrue);
+        clock.elapse(const Duration(seconds: 2));
+
+        expect(attempts, 1, reason: 'cleanup must not reconnect after disposal');
+        expect(clock.pendingTimers, isEmpty);
+        expect(token.isCancelled, isTrue);
+      });
+    });
+
+    test('closes the channel instead of leaking it', () async {
+      final ch = _ThrowingControlChannel();
+      final cm = ConnectionManager(
+        factory: (_, token) async => ch,
+        storage: _FakeStorage([_fakePeer()]),
+        emitDebounce: Duration.zero,
+      );
+
+      // Populates the subscription list while there is no channel yet, so the
+      // failure lands in _replaySubscriptions — i.e. after the WS handshake.
+      cm.subscribeToPeers(const ['epk_other']);
+      await cm.boot();
+      await Future<void>.delayed(const Duration(milliseconds: 30));
+
+      expect(
+        ch.closeCalls,
+        greaterThan(0),
+        reason: 'an authenticated channel that failed activation must be closed',
+      );
+      cm.dispose();
+    });
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1038,6 +1233,46 @@ void main() {
 // tests. Also implements [IControlLink] so presence tests can inject
 // frames and inspect outbound `subscribe_presence`/`presence_check`.
 // ---------------------------------------------------------------------------
+
+/// A channel whose control frames throw, simulating activation failing *after*
+/// the WebSocket handshake has already succeeded on the relay.
+class _ThrowingControlChannel implements IChannel, IControlLink {
+  int closeCalls = 0;
+  final _ctrl = StreamController<ServerMessage>.broadcast();
+  final _controlCtrl = StreamController<ControlInbound>.broadcast();
+
+  @override
+  Stream<ServerMessage> get serverMessages => _ctrl.stream;
+
+  @override
+  Stream<ControlInbound> get controlFrames => _controlCtrl.stream;
+
+  @override
+  Future<void> send(ClientMessage msg) async {}
+
+  @override
+  void sendControl(Map<String, dynamic> json) =>
+      throw StateError('activation failed');
+
+  @override
+  Future<void> close() async {
+    closeCalls++;
+    if (!_ctrl.isClosed) await _ctrl.close();
+    if (!_controlCtrl.isClosed) await _controlCtrl.close();
+  }
+}
+
+class _DelayedCloseThrowingControlChannel extends _ThrowingControlChannel {
+  final releaseClose = Completer<void>();
+  bool closeStarted = false;
+
+  @override
+  Future<void> close() async {
+    closeStarted = true;
+    await releaseClose.future;
+    await super.close();
+  }
+}
 
 class _ControllableChannel implements IChannel, IControlLink {
   final _ctrl = StreamController<ServerMessage>.broadcast();
