@@ -1217,6 +1217,17 @@ function _getSyncLimit(): number {
 const RECONNECT_BACKOFFS_MS = [1_000, 2_000, 5_000, 10_000, 30_000];
 let _reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let _reconnectAttempt = 0;
+// Initial-connect retry: a FAILED first `relay.connect()` (boot-time DNS not
+// ready, relay briefly down, …) must not strand the agent offline forever.
+// Distinct from `_reconnectTimer` (which only handles post-close reconnects)
+// because the failed lifecycle never reached `_state === "started"`.
+let _initialConnectRetryTimer: {
+  handle: ReturnType<typeof setTimeout>;
+  lifecycleGeneration: number;
+} | null = null;
+let _initialConnectRetryAttempt = 0;
+// Retain retry intent while its timer has fired but the new handshake is pending.
+let _initialConnectRetryGeneration: number | null = null;
 // Every initial connect/reconnect candidate captures this generation. Stop,
 // relay-off, and an unexpected close invalidate older async continuations.
 let _relayLifecycleGeneration = 0;
@@ -1481,6 +1492,8 @@ function _goIdle(
     _reconnectTimer = null;
   }
   _reconnectAttempt = 0;
+  // Same for a pending initial-connect retry (stop wins over retry).
+  _cancelInitialConnectRetry();
 
   _stopAutoListener?.();
   _stopAutoListener = null;
@@ -1608,6 +1621,75 @@ function _scheduleReconnect(
     if (!_isCurrentReconnect(lifecycleGeneration, url)) return;
     void _attemptReconnect(lifecycleGeneration, url);
   }, delay);
+}
+
+function _clearInitialConnectRetryTimer(): void {
+  if (_initialConnectRetryTimer !== null) {
+    clearTimeout(_initialConnectRetryTimer.handle);
+    _initialConnectRetryTimer = null;
+  }
+}
+
+function _cancelInitialConnectRetry(): void {
+  _clearInitialConnectRetryTimer();
+  _initialConnectRetryAttempt = 0;
+  _initialConnectRetryGeneration = null;
+}
+
+/**
+ * Retry loop for a FAILED INITIAL `relay.connect()`. The close-driven
+ * reconnect path (`_scheduleReconnect`) only exists once a connection was
+ * established; before this, a boot-time DNS/TUN race or a briefly down relay
+ * stranded daemons offline until manual restart. Re-entering `_cmdStart` as a
+ * whole (rather than publishing a relay-less "started" state) keeps every
+ * post-connect invariant — SelfRevoke producer, bridge attach, footer —
+ * identical to a manual `/remote-pi` retry.
+ *
+ * Invalidation mirrors `_scheduleReconnect`: `_goIdle` and any newer
+ * `_cmdStart`/stop cycle bump `_relayLifecycleGeneration`, which stale timers
+ * observe before acting. `ctx` is captured the same way a user re-running the
+ * command would re-supply it; daemon ctxs are stable for the process lifetime.
+ */
+function _scheduleInitialConnectRetry(
+  lifecycleGeneration: number,
+  ctx: Pick<ExtensionContext, "ui" | "cwd">,
+): void {
+  _initialConnectRetryGeneration = lifecycleGeneration;
+  if (_initialConnectRetryTimer?.lifecycleGeneration === lifecycleGeneration) return;
+  if (_initialConnectRetryTimer !== null) clearTimeout(_initialConnectRetryTimer.handle);
+
+  const idx = Math.min(_initialConnectRetryAttempt, RECONNECT_BACKOFFS_MS.length - 1);
+  const delay = RECONNECT_BACKOFFS_MS[idx]!;
+  _initialConnectRetryAttempt += 1;
+
+  const timer = {
+    lifecycleGeneration,
+    handle: setTimeout(() => {
+      // A callback already queued before cancellation must not clear its successor.
+      if (_initialConnectRetryTimer !== timer) return;
+      _initialConnectRetryTimer = null;
+      if (lifecycleGeneration !== _relayLifecycleGeneration) return; // stopped/replaced
+      if (_disposed || _state !== "idle" || _relay !== null) return;
+      void _cmdStart(ctx);
+    }, delay),
+  };
+  _initialConnectRetryTimer = timer;
+}
+
+/** Name reservation can temporarily exclude a retry without replacing its lifecycle. */
+function _resumeInitialConnectRetryAfterNameOperation(
+  lifecycleGeneration: number,
+  ctx: Pick<ExtensionContext, "ui" | "cwd">,
+): void {
+  const resources = _activeNameResources;
+  if (resources === null || _initialConnectRetryGeneration !== lifecycleGeneration) return;
+  void resources.then(() => {
+    // A committed rename, newer start, stop/off, or shutdown owns the outcome.
+    if (_disposed || lifecycleGeneration !== _relayLifecycleGeneration ||
+      _initialConnectRetryGeneration !== lifecycleGeneration ||
+      _state !== "idle" || _relay !== null) return;
+    _scheduleInitialConnectRetry(lifecycleGeneration, ctx);
+  });
 }
 
 async function _attemptReconnect(
@@ -1751,6 +1833,7 @@ export async function _handleControl(cmd: string): Promise<void> {
       _emitRelayState(true);
       return;
     case "relay:off":
+      _cancelInitialConnectRetry();
       if (_getState() !== "idle") _goIdle("peer_stop");
       else {
         _rootLifecycleGeneration += 1;
@@ -1833,9 +1916,9 @@ async function _reconcileName(
   if (!connect && !_cwdLock) {
     if (persist) {
       _persistName(ctx.cwd, requestedName);
-      const wasStarted = _state !== "idle";
+      const restartRelay = _state !== "idle" || _initialConnectRetryGeneration === _relayLifecycleGeneration;
       _goIdle("peer_stop", false);
-      if (wasStarted && isCurrent()) await _cmdStart(ctx);
+      if (restartRelay && isCurrent()) await _cmdStart(ctx);
     }
     return true;
   }
@@ -1883,7 +1966,7 @@ async function _reconcileName(
     // An external edit during reservation remains pending for the next explicit
     // command; never overwrite it or commit an obsolete desired name.
     if (!persist && _configuredName(ctx.cwd) !== requestedName) return false;
-    const wasStarted = _state !== "idle";
+    const restartRelay = _state !== "idle" || _initialConnectRetryGeneration === _relayLifecycleGeneration;
     try {
       // Idle does not mean no relay handshake is in flight. Retire every
       // old-identity producer before changing registration or reservation.
@@ -1941,7 +2024,7 @@ async function _reconcileName(
         _publishMesh(committed.peer, committed.assigned, requestedName, ctx);
       }
       finishResources();
-      if (wasStarted && isCurrent()) {
+      if (restartRelay && isCurrent()) {
         try { await _cmdStart(ctx); } catch (err) {
           if (isCurrent()) ctx.ui.notify(`[remote-pi] Name changed, but relay restart failed: ${String(err)}`, "error");
         }
@@ -2676,6 +2759,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     // generations keep queued work stale even if a same-module session_start
     // clears `_disposed` before its promises settle.
     _disposed = true;
+    _cancelInitialConnectRetry();
     _rootLifecycleGeneration += 1;
     _relayLifecycleGeneration += 1;
     _meshJoinGeneration += 1;
@@ -3026,6 +3110,7 @@ async function _cmdSetup(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
 
 async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
   if (_activeNameResources !== null) {
+    _resumeInitialConnectRetryAfterNameOperation(_relayLifecycleGeneration, ctx);
     ctx.ui.notify("[remote-pi] Name change in progress. Run /remote-pi to retry.", "warning");
     return;
   }
@@ -3033,7 +3118,12 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
     ctx.ui.notify("[remote-pi] Already started.", "warning");
     return;
   }
+  // Explicit starts supersede a pending retry; automatic retries already
+  // released their timer. Keep the backoff ladder until success or teardown.
+  _clearInitialConnectRetryTimer();
+  const retryRequested = _initialConnectRetryGeneration === _relayLifecycleGeneration;
   const lifecycleGeneration = ++_relayLifecycleGeneration;
+  _initialConnectRetryGeneration = retryRequested ? lifecycleGeneration : null;
   const isCurrentCandidate = (): boolean => (
     !_disposed &&
     lifecycleGeneration === _relayLifecycleGeneration &&
@@ -3049,7 +3139,11 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
     // Identity lookup is part of the candidate lifecycle. A later stop/off or
     // session replacement must silence its stale rejection before any UI or
     // error propagation touches the superseded context.
-    if (!isCurrentCandidate()) return;
+    if (!isCurrentCandidate()) {
+      _resumeInitialConnectRetryAfterNameOperation(lifecycleGeneration, ctx);
+      return;
+    }
+    _cancelInitialConnectRetry();
     if (err instanceof KeyringUnavailableError) {
       // The platform keyring (macOS Keychain / Windows Credential Manager) is
       // locked/denied and there's no file identity to fall back to. We refuse
@@ -3087,7 +3181,10 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   // Re-check immediately after the first await, before cache/config/model/UI
   // mutation or Relay construction. `_disposed` alone is insufficient because
   // same-module session_start intentionally clears it for the replacement.
-  if (!isCurrentCandidate()) return;
+  if (!isCurrentCandidate()) {
+    _resumeInitialConnectRetryAfterNameOperation(lifecycleGeneration, ctx);
+    return;
+  }
   _cachedEd25519 = edKp;
 
   const { url: relayUrl, source } = resolveRelayUrl();
@@ -3177,15 +3274,26 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
     // A stop, shutdown/replacement, relay-off, or newer start may supersede a
     // candidate before its rejection arrives. Keep the outgoing context silent;
     // only the authoritative attempt may report an error.
-    if (!isCurrentCandidate()) return;
+    if (!isCurrentCandidate()) {
+      _resumeInitialConnectRetryAfterNameOperation(lifecycleGeneration, ctx);
+      return;
+    }
     if (err instanceof RoomAlreadyOpenError) {
+      _cancelInitialConnectRetry();
       ctx.ui.notify(
         "[remote-pi] Already running in this cwd. Stop the other terminal first.",
         "error",
       );
       return;
     }
-    ctx.ui.notify(`[remote-pi] relay connect failed: ${String(err)}`, "error");
+    // Not RoomAlreadyOpenError (deterministic conflict, stays fatal above):
+    // keep retrying in the background so a transient DNS/network/relay outage
+    // at process start cannot strand a daemon offline until manual restart.
+    ctx.ui.notify(
+      `[remote-pi] relay connect failed: ${String(err)} — retrying in the background`,
+      "error",
+    );
+    _scheduleInitialConnectRetry(lifecycleGeneration, ctx);
     return;
   }
 
@@ -3194,6 +3302,7 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   // was pending; never let that stale continuation resurrect the Relay.
   if (!isCurrentCandidate()) {
     _closePendingRelayCandidate(relay);
+    _resumeInitialConnectRetryAfterNameOperation(lifecycleGeneration, ctx);
     return;
   }
 
@@ -3203,6 +3312,8 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   _peerShort = myShort;
   _myRoomId = roomId;
   _state = "started";
+  // A successful start settles the initial-connect retry loop.
+  _cancelInitialConnectRetry();
   // Set _sessionStartedAt ONLY on first /remote-pi start since process boot.
   // Subsequent start cycles (after stop) preserve the original epoch so the
   // app keeps treating it as the same session (and merges new events from
@@ -3398,6 +3509,7 @@ async function _cmdPair(ctx: Pick<ExtensionContext, "ui" | "cwd">, args = ""): P
  * `/remote-pi` again.
  */
 async function _cmdStop(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
+  _cancelInitialConnectRetry();
   // Invalidate queued root work and local async candidates even when none has
   // published yet.
   _rootLifecycleGeneration += 1;
@@ -3635,6 +3747,9 @@ async function _cmdRelay(arg: string, ctx: ExtensionContext): Promise<void> {
     case "stop":
     case "off":
       if (_getState() === "idle") {
+        _cancelInitialConnectRetry();
+        _rootLifecycleGeneration += 1;
+        _relayLifecycleGeneration += 1;
         ctx.ui.notify("[remote-pi] Relay already disconnected.", "info");
       } else {
         _goIdle("peer_stop");

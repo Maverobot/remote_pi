@@ -4906,6 +4906,187 @@ describe("name-lock consistency on explicit reconnect", () => {
     }
   });
 
+  test.each(
+    ["pending timer", "rejected retry", "resolved retry"].flatMap((phase) =>
+      ["none", "stop", "control off", "relay off", "shutdown"].map((cancellation) => ({ phase, cancellation }))),
+  )("initial retry survives reservation exclusion ($phase, $cancellation)", async ({ phase, cancellation }) => {
+    const reservationEntered = deferred<void>();
+    const reservation = deferred<void>();
+    const retry = deferred<void>();
+    const lockModule = await import("./session/cwd_lock.js");
+    const reserve = vi.spyOn(lockModule, "acquireCwdLock").mockImplementation(async () => {
+      reservationEntered.resolve();
+      await reservation.promise;
+      return { ok: false, lockPath: join(cwd, "refused.sock") };
+    });
+    // A daemon refuses the first occupied name rather than trying suffixes.
+    vi.stubEnv("REMOTE_PI_DAEMON", "1");
+    vi.useFakeTimers();
+    let renaming: Promise<void> | undefined;
+    let cancelling: Promise<unknown> | undefined;
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      await root("relay start", makeMockCtx(cwd));
+      if (phase !== "pending timer") {
+        _defaultConnectImpl = () => retry.promise;
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      const interruptedRelay = relayRef.current!;
+      const attempts = relayInstances.length;
+      const ctx = makeMockCtx(cwd);
+      renaming = root("rename Taken", ctx);
+      await reservationEntered.promise;
+      if (phase === "pending timer") await vi.advanceTimersByTimeAsync(1_000);
+      else {
+        if (phase === "rejected retry") retry.reject(new Error("ECONNRESET"));
+        else retry.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+        expect(interruptedRelay.close).toHaveBeenCalledTimes(1);
+      }
+      _defaultConnectImpl = async () => undefined;
+      // Exclusion must still prevent an old-identity candidate publishing.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances).toHaveLength(attempts);
+      expect(_getState()).toBe("idle");
+      if (cancellation === "control off") cancelling = _handleControl("relay:off");
+      else if (cancellation === "shutdown") {
+        cancelling = captureEventHarness().handler("session_shutdown")({ type: "session_shutdown", reason: "reload" });
+      } else if (cancellation !== "none") cancelling = root(cancellation, makeMockCtx(cwd));
+      await vi.advanceTimersByTimeAsync(0);
+      reservation.resolve();
+      await renaming;
+      await cancelling;
+      reserve.mockRestore();
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      await vi.advanceTimersByTimeAsync(60_000);
+      if (cancellation === "none") {
+        expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining('already owns "Taken"'), "warning");
+        expect(relayInstances).toHaveLength(attempts + 1);
+        expect(_getState()).toBe("started");
+        expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Original" } });
+        expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+        expect(await nameIsReserved("Original")).toBe(true);
+      } else {
+        expect(relayInstances).toHaveLength(attempts);
+        expect(_getState()).toBe("idle");
+      }
+    } finally {
+      retry.resolve();
+      reservation.resolve();
+      await renaming;
+      await cancelling;
+      reserve.mockRestore();
+      await root("stop", makeMockCtx(cwd));
+      _setDisposedForTest(false);
+      vi.useRealTimers();
+    }
+  });
+
+  test.each([
+    { phase: "pending", reservation: "online" },
+    { phase: "in flight", reservation: "online" },
+    { phase: "pending", reservation: "stopped" },
+    { phase: "in flight", reservation: "stopped" },
+    { phase: "pending", reservation: "none" },
+    { phase: "in flight", reservation: "none" },
+  ])("rename preserves initial retry intent $phase ($reservation)", async ({ phase, reservation }) => {
+    if (reservation !== "online") await root("stop", makeMockCtx(cwd));
+    if (reservation === "none") _resetCwdLockForTest();
+    const retry = deferred<void>();
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      await root("relay start", makeMockCtx(cwd));
+      expect(_getState()).toBe("idle");
+      let staleRelay: MockRelay | undefined;
+      if (phase === "in flight") {
+        _defaultConnectImpl = () => retry.promise;
+        await vi.advanceTimersByTimeAsync(1_000);
+        staleRelay = relayRef.current!;
+      }
+      const attempts = relayInstances.length;
+      _defaultConnectImpl = async () => undefined;
+      const ctx = makeMockCtx(cwd);
+      await root("rename Retrying", ctx);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Retrying");
+      expect(relayInstances).toHaveLength(attempts + 1);
+      const { roomIdFor } = await import("./rooms.js");
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({
+        roomId: roomIdFor(cwd, "Retrying"), roomMeta: { name: "Retrying" },
+      });
+      expect(_getState()).toBe("started");
+      expect(ctx.ui.notify).not.toHaveBeenCalledWith(expect.stringContaining("Name change in progress"), "warning");
+      retry.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances).toHaveLength(attempts + 1);
+      expect(_getState()).toBe("started");
+      if (staleRelay) expect(staleRelay.close).toHaveBeenCalledTimes(1);
+    } finally {
+      retry.resolve();
+      await root("stop", makeMockCtx(cwd));
+      vi.useRealTimers();
+    }
+  });
+
+  test.each([
+    ["pending", "stop"], ["in flight", "stop"],
+    ["pending", "control off"], ["in flight", "control off"],
+    ["pending", "relay off"], ["in flight", "relay off"],
+    ["pending", "replacement"], ["in flight", "replacement"],
+  ])("%s initial retry stays cancelled after %s and rename", async (phase, cancellation) => {
+    const retry = deferred<void>();
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      await root("relay start", makeMockCtx(cwd));
+      if (phase === "in flight") {
+        _defaultConnectImpl = () => retry.promise;
+        await vi.advanceTimersByTimeAsync(1_000);
+      }
+      const attempts = relayInstances.length;
+      if (cancellation === "control off") await _handleControl("relay:off");
+      else if (cancellation === "replacement") {
+        const harness = captureEventHarness();
+        await harness.handler("session_shutdown")({ type: "session_shutdown", reason: "reload" });
+        harness.handler("session_start")({ type: "session_start" }, makeMockCtx(cwd));
+        // Replacement restores only the configured local mesh, not relay intent.
+        await vi.waitFor(() => expect(_hasMeshNodeForTest()).toBe(true));
+      } else await root(cancellation, makeMockCtx(cwd));
+      _defaultConnectImpl = async () => undefined;
+      retry.resolve();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances).toHaveLength(attempts);
+      expect(_getState()).toBe("idle");
+      await root("rename Offline", makeMockCtx(cwd));
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Offline");
+      expect(relayInstances).toHaveLength(attempts);
+      expect(_getState()).toBe("idle");
+    } finally {
+      retry.resolve();
+      await root("stop", makeMockCtx(cwd));
+      vi.useRealTimers();
+    }
+  });
+
+  test("config reconciliation preserves a pending initial retry with local-only config", async () => {
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      await root("relay start", makeMockCtx(cwd));
+      const attempts = relayInstances.length;
+      saveLocalConfig(cwd, { agent_name: "Edited", auto_start_relay: false });
+      _defaultConnectImpl = async () => undefined;
+      await root("", makeMockCtx(cwd));
+      expect(relayInstances).toHaveLength(attempts + 1);
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Edited" } });
+      expect(_getState()).toBe("started");
+    } finally {
+      await root("stop", makeMockCtx(cwd));
+      vi.useRealTimers();
+    }
+  });
+
   test.each([
     { command: "pair", reservation: "online" },
     { command: "relay start", reservation: "online" },
@@ -6430,6 +6611,147 @@ describe("relay reconnect", () => {
       // Advance well past the largest backoff — no new attempt
       await vi.advanceTimersByTimeAsync(60_000);
       expect(relayInstances).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("initial relay.connect failure schedules a start retry; retry success starts normally", async () => {
+    vi.useFakeTimers();
+    try {
+      // First connect fails (boot-time DNS/TUN race, relay briefly down, …).
+      _defaultConnectImpl = () => Promise.reject(new Error("getaddrinfo ENOTFOUND relay.example"));
+      captureHandler("remote-pi");
+      const ctx = makeMockCtx();
+      await _connectForTest(ctx);
+
+      expect(relayInstances).toHaveLength(1);
+      // Not half-started: no relay, but a retry is pending.
+      expect(_getState()).toBe("idle");
+      expect(ctx.ui.notify).toHaveBeenCalledWith(
+        expect.stringContaining("retrying in the background"),
+        "error",
+      );
+
+      // Network recovers before the first backoff fires.
+      _defaultConnectImpl = async () => undefined;
+      await vi.advanceTimersByTimeAsync(1_000);
+
+      // Retry re-ran the full start: new RelayClient, fully started.
+      expect(relayInstances).toHaveLength(2);
+      expect(_getState()).toBe("started");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("initial retry ownership follows a newer explicit start", async () => {
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      captureHandler("remote-pi");
+      const ctx = makeMockCtx();
+      await _connectForTest(ctx);
+      await vi.advanceTimersByTimeAsync(100);
+      await indexModule._startRelayForTest(ctx);
+      expect(relayInstances).toHaveLength(2);
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances.length).toBeGreaterThan(2);
+      expect(_getState()).toBe("idle");
+    } finally {
+      await captureHandler("remote-pi stop")("", makeMockCtx());
+      vi.useRealTimers();
+    }
+  });
+
+  test("stale initial retry callback cannot clear a newer timer handle", async () => {
+    vi.useFakeTimers();
+    const timers = vi.spyOn(globalThis, "setTimeout");
+    const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      _defaultConnectImpl = async () => { throw new Error("ENOTFOUND"); };
+      captureHandler("remote-pi");
+      const ctx = makeMockCtx();
+      await indexModule._startRelayForTest(ctx);
+      const staleCallback = timers.mock.calls.find((call) => call[1] === 1_000)![0] as () => void;
+      await indexModule._startRelayForTest(ctx);
+      const newerIndex = timers.mock.calls.findIndex((call) => call[1] === 2_000);
+      expect(newerIndex).toBeGreaterThanOrEqual(0);
+      const newerHandle = timers.mock.results[newerIndex]!.value;
+
+      // Emulate a callback queued before clearTimeout took effect.
+      staleCallback();
+      await indexModule._startRelayForTest(ctx);
+      expect(clearTimer).toHaveBeenCalledWith(newerHandle);
+      expect(relayInstances).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(4_999);
+      expect(relayInstances).toHaveLength(3);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(relayInstances).toHaveLength(4);
+    } finally {
+      await captureHandler("remote-pi stop")("", makeMockCtx());
+      timers.mockRestore();
+      clearTimer.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("initial connect keeps retrying with backoff while the relay stays down", async () => {
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = () => Promise.reject(new Error("ECONNREFUSED"));
+      captureHandler("remote-pi");
+      await _connectForTest(makeMockCtx());
+      expect(relayInstances).toHaveLength(1);
+      expect(_getState()).toBe("idle");
+
+      let prevCount = relayInstances.length;
+      for (const delay of [1_000, 2_000, 5_000, 10_000, 30_000, 30_000]) {
+        await vi.advanceTimersByTimeAsync(delay);
+        expect(relayInstances.length).toBe(prevCount + 1);
+        expect(relayInstances.at(-1)!.close).toHaveBeenCalledTimes(1);
+        expect(_getState()).toBe("idle");
+        prevCount = relayInstances.length;
+      }
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("RoomAlreadyOpenError on initial connect does NOT schedule a start retry", async () => {
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = async () => {
+        throw new MockRoomAlreadyOpenError("AbCdEfGhIjKl");
+      };
+      captureHandler("remote-pi");
+      await _connectForTest(makeMockCtx("/tmp/remote-pi-dup-initial"));
+      expect(relayInstances).toHaveLength(1);
+
+      // Retrying a deterministic room conflict would fight the incumbent.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances).toHaveLength(1);
+      expect(_getState()).toBe("idle");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  test("/remote-pi stop during the initial-retry window cancels the pending retry", async () => {
+    vi.useFakeTimers();
+    try {
+      _defaultConnectImpl = () => Promise.reject(new Error("ENOTFOUND"));
+      captureHandler("remote-pi");
+      await _connectForTest(makeMockCtx());
+      expect(relayInstances).toHaveLength(1);
+
+      const stop = captureHandler("remote-pi stop");
+      await stop("", makeMockCtx());
+
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(relayInstances).toHaveLength(1);
+      expect(_getState()).toBe("idle");
     } finally {
       vi.useRealTimers();
     }
