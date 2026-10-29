@@ -652,6 +652,10 @@ function _isReceivedImageContextMessage(message: unknown): boolean {
  * pure-data event we add later is covered by construction. Events meant for the
  * human (`remote-pi:mesh-message`, `remote-pi:mesh-revoked`, …) set
  * `display: true` and pass through untouched.
+ *
+ * Telemetry senders pass `{ triggerTurn: false }` to avoid steering or starting
+ * a turn on the host. The filtered `remote-pi:mesh-wake` is intentionally
+ * different: it triggers a turn after mesh messages have been appended.
  */
 function _isPureDataContextMessage(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false;
@@ -1682,6 +1686,7 @@ function _emitRelayState(force = false): void {
   // uncaughtException and exits pi. Swallow it here: the next relay-state
   // change re-emits, so connectivity is eventually consistent. See issue #55.
   try {
+    // Pi 1.4 queues non-triggering telemetry until a safe turn boundary; idle sends stay idle.
     _pi?.sendMessage({
       customType: "remote-pi:relay-state",
       content: `Relay ${status}`,
@@ -1692,7 +1697,7 @@ function _emitRelayState(force = false): void {
         ...(_myRoomId ? { room: _myRoomId } : {}),
       },
       display: false,
-    });
+    }, { triggerTurn: false });
   } catch {
     // _pi stale (session replaced) or extension runtime not yet bound.
   }
@@ -2229,12 +2234,13 @@ async function _handlePairRequest(
   // Notify local RPC clients (e.g. Cockpit) that pairing completed, so they can
   // close the QR screen and show the new device. Pure data event (display:false)
   // — still emitted to the RPC stdout via the session stream.
+  // Pi 1.4 queues non-triggering telemetry until a safe turn boundary; idle sends stay idle.
   _pi?.sendMessage({
     customType: "remote-pi:paired",
     content: `Paired with ${inner.device_name}`,
     details: { name: inner.device_name, peerId: appPeerId, pairedAt },
     display: false,
-  });
+  }, { triggerTurn: false });
 }
 
 // ── Extension factory (default export) ───────────────────────────────────────
@@ -4691,6 +4697,7 @@ function _publishMesh(
   _sessionPeerCount = 1;
   _refreshSessionPeerCount(peer, ctx);
   // Persisted intent stays suffix-free; clients receive the effective name.
+  // Pi 1.4 queues non-triggering telemetry until a safe turn boundary; idle sends stay idle.
   _pi?.sendMessage({
     customType: "remote-pi:name-assigned",
     content: assigned === requestedName
@@ -4698,7 +4705,7 @@ function _publishMesh(
       : `Mesh name reassigned: "${requestedName}" → "${assigned}" (collision)`,
     details: { requested: requestedName, assigned, changed: assigned !== requestedName },
     display: false,
-  });
+  }, { triggerTurn: false });
   ctx.ui.notify(`[remote-pi] Joined local mesh as "${assigned}" (${peer.currentRole()})`, "info");
   _refreshFooter(ctx);
   _attachBridgeIfReady();

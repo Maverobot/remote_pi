@@ -468,6 +468,8 @@ describe("state machine + pair_request flow", () => {
     const APP_PEER_ID = "valid-app-peer-base64";
 
     captureHandler("remote-pi");
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
     await _connectForTest(makeMockCtx());
     expect(_getState()).toBe("started");
 
@@ -479,6 +481,9 @@ describe("state machine + pair_request flow", () => {
     }));
 
     await vi.waitFor(() => expect(_getState()).toBe("paired"), { timeout: 2000 });
+
+    const pairedCall = sendMessage.mock.calls.find((c) => c[0]?.customType === "remote-pi:paired");
+    expect(pairedCall?.[1]).toEqual({ triggerTurn: false });
 
     // pair_ok must have been sent back to the app peer
     const sent = relayRef.current!.send.mock.calls.map((c) => c[0] as string);
@@ -4816,6 +4821,8 @@ describe("remote-pi:name-assigned event", () => {
     expect(ev).toBeDefined();
     expect(ev!.display).toBe(false);
     expect(ev!.details).toMatchObject({ changed: false });
+    const call = sendMessage.mock.calls.find((c) => c[0]?.customType === "remote-pi:name-assigned");
+    expect(call?.[1]).toEqual({ triggerTurn: false });
     expect(typeof ev!.details!["requested"]).toBe("string");
     // No collision in this isolated broker → assigned === requested.
     expect(ev!.details!["assigned"]).toBe(ev!.details!["requested"]);
@@ -5766,6 +5773,10 @@ describe("relay control channel + relay-state event", () => {
     expect(ev).toBeDefined();
     expect(ev!.display).toBe(false);
     expect(ev!.details).toMatchObject({ status: "disconnected", connected: false });
+    // Pure-data events are stripped from LLM context, so they must never start
+    // or extend a turn (a mid-stream steer would leave a trailing assistant message).
+    const call = sendMessage.mock.calls.find((c) => c[0]?.customType === "remote-pi:relay-state");
+    expect(call?.[1]).toEqual({ triggerTurn: false });
   });
 
   test("relay:on → relay up + 'connected'; relay:off → relay down + 'disconnected'", async () => {
