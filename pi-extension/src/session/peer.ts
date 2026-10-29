@@ -25,6 +25,14 @@ import { Broker } from "./broker.js";
 export type MessageHandler = (env: Envelope) => void;
 export type ReconnectHandler = () => void;
 
+/** A lock-backed peer cannot use a different automatic registration identity. */
+export class ReconnectNameConflictError extends Error {
+  constructor(readonly expectedName: string, readonly assignedName: string) {
+    super(`broker assigned "${assignedName}" instead of reserved name "${expectedName}"`);
+    this.name = "ReconnectNameConflictError";
+  }
+}
+
 export interface SessionPeerOptions {
   sockPath: string;
   name: string;
@@ -147,6 +155,12 @@ export class SessionPeer {
   private readonly handlers = new Set<MessageHandler>();
   private readonly reconnectHandlers = new Set<ReconnectHandler>();
   private leftFlag = false;
+  private ready = false;
+  private pinnedName: string | null = null;
+  private connectionGeneration = 0;
+  private connectionAttempt: Promise<string> | null = null;
+  private rejectRegistration: ((error: Error) => void) | null = null;
+  private readonly reconnectRejectedHandlers = new Set<(error: ReconnectNameConflictError) => void>();
 
   constructor(opts: SessionPeerOptions) {
     this.opts = opts;
@@ -164,6 +178,22 @@ export class SessionPeer {
   /** Returns the clean leaf name as assigned by the broker (after any `#N`). */
   name(): string {
     return this.assignedName;
+  }
+
+  /** Keep future registrations on the effective identity the caller now owns. */
+  pinAssignedName(): void {
+    this.opts.name = this.assignedName;
+    this.pinnedName = this.assignedName;
+  }
+
+  isConnected(): boolean {
+    return this.ready && !this.leftFlag && this.socket !== null && !this.socket.destroyed;
+  }
+
+  /** Failure-only signal, after attempt cleanup; handlers may safely close us. */
+  onReconnectRejected(handler: (error: ReconnectNameConflictError) => void): () => void {
+    this.reconnectRejectedHandlers.add(handler);
+    return () => this.reconnectRejectedHandlers.delete(handler);
   }
 
   /** Returns the canonical address (`[<pc>:]<cwd>@<nome>`) assigned by the
@@ -290,110 +320,164 @@ export class SessionPeer {
    * a soft rejoin: leaves & rejoins with the new name.
    */
   async rename(newName: string): Promise<string> {
-    await this._teardownConn();
+    await this._cancelConnectionAttempt();
+    if (this.leftFlag) throw new Error("peer left");
     this.opts.name = newName;
-    this.assignedName = newName;
     return this._joinOrLead();
   }
 
   async leave(): Promise<void> {
     this.leftFlag = true;
-    await this._teardownConn();
+    await this._cancelConnectionAttempt();
   }
 
-  // ── join / failover loop ──────────────────────────────────────────────────
+  private async _cancelConnectionAttempt(): Promise<void> {
+    this.connectionGeneration += 1;
+    const attempt = this.connectionAttempt;
+    // Reject registration synchronously before draining its connection attempt.
+    const closing = this._teardownConn();
+    try { await attempt; } catch { /* canceled/failed attempts still drain */ }
+    await closing;
+  }
 
-  private async _joinOrLead(): Promise<string> {
-    const result: ElectionResult = await joinOrLead(this.opts.sockPath);
-    if (result.role === "leader") {
-      this.role = "leader";
-      this.broker = new Broker({
-        server: result.server,
-        auditPath: this.opts.auditPath,
+  // Track only connection-producing work, never consumer callbacks. Otherwise a
+  // rejection handler that calls leave() would await its own notification.
+  private _joinOrLead(): Promise<string> {
+    if (this.leftFlag) return Promise.reject(new Error("peer left"));
+    if (this.connectionAttempt) return this.connectionAttempt;
+    const generation = ++this.connectionGeneration;
+    const attempt = this._connectOnce(generation)
+      .catch(async (error: unknown) => {
+        if (generation === this.connectionGeneration) await this._teardownConn();
+        throw error;
+      })
+      .finally(() => {
+        if (this.connectionAttempt === attempt) this.connectionAttempt = null;
       });
-      // Leader also registers itself as a peer so other followers see it +
-      // can address it. We create a self-loopback socket via the broker's
-      // internal API: easiest is to open a real client connection back to
-      // our own server.
-      return this._registerAsClient();
-    } else {
-      this.role = "follower";
-      this._wireSocket(result.socket);
-      return this._registerOver(result.socket);
-    }
+    this.connectionAttempt = attempt;
+    return attempt;
   }
 
-  private async _registerAsClient(): Promise<string> {
+  private _canConnect(generation: number): boolean {
+    return !this.leftFlag && generation === this.connectionGeneration;
+  }
+
+  private async _connectOnce(generation: number): Promise<string> {
+    const result: ElectionResult = await joinOrLead(this.opts.sockPath);
+    if (!this._canConnect(generation)) {
+      if (result.role === "follower") result.socket.destroy();
+      else await new Promise<void>((resolve) => result.server.close(() => resolve()));
+      throw new Error("peer connection canceled");
+    }
+    this.role = result.role;
+    if (result.role === "leader") {
+      this.broker = new Broker({ server: result.server, auditPath: this.opts.auditPath });
+      return this._registerAsClient(generation);
+    }
+    this._wireSocket(result.socket);
+    return this._registerOver(result.socket);
+  }
+
+  private async _registerAsClient(generation: number): Promise<string> {
     const { createConnection } = await import("node:net");
+    if (!this._canConnect(generation)) throw new Error("peer connection canceled");
     const sock = createConnection(this.opts.sockPath);
-    await new Promise<void>((resolve, reject) => {
-      sock.once("connect", () => resolve());
-      sock.once("error", reject);
-    });
+    // Own even a connecting loopback socket so leave() can destroy it.
     this._wireSocket(sock);
+    await new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        sock.off("connect", connected);
+        sock.off("error", failed);
+        sock.off("close", closed);
+      };
+      const connected = () => { cleanup(); resolve(); };
+      const failed = (error: Error) => { cleanup(); reject(error); };
+      const closed = () => failed(new Error("peer connection closed"));
+      sock.once("connect", connected);
+      sock.once("error", failed);
+      sock.once("close", closed);
+    });
+    if (!this._canConnect(generation)) {
+      sock.destroy();
+      throw new Error("peer connection canceled");
+    }
     return this._registerOver(sock);
   }
 
   private _wireSocket(sock: Socket): void {
     this.socket = sock;
+    this.ready = false;
     this.buf = "";
     sock.setEncoding("utf8");
-    sock.on("data", (chunk: string) => this._onData(chunk));
-    sock.on("close", () => this._onSocketClose(sock));
+    sock.on("data", (chunk: string) => this._onData(sock, chunk));
+    sock.on("close", () => { void this._onSocketClose(sock); });
     sock.on("error", () => { /* close will follow */ });
   }
 
   private _registerOver(sock: Socket): Promise<string> {
     return new Promise<string>((resolve, reject) => {
-      // The first inbound line MUST be the register_ack. Buffer-aware.
-      const wait = setTimeout(() => reject(new Error("register_ack timeout")), 5_000);
-      const onceListener = (raw: unknown) => {
+      const clearWaiter = () => {
         clearTimeout(wait);
-        // plan/38: a new broker returns `address_assigned` (canonical key) +
-        // `name_assigned` (clean leaf). Read both with cross-fallback so we work
-        // against either a new broker OR a legacy one (only `name_assigned`,
-        // where address == name).
+        if (this._preAckListener === receiveAck) this._preAckListener = null;
+        if (this.rejectRegistration === fail) this.rejectRegistration = null;
+      };
+      const fail = (error: Error) => {
+        clearWaiter();
+        reject(error);
+      };
+      const wait = setTimeout(() => fail(new Error("register_ack timeout")), 5_000);
+      const receiveAck = (raw: unknown) => {
         const ack = raw as { type?: string; name_assigned?: string; address_assigned?: string };
         const name = typeof ack?.name_assigned === "string" ? ack.name_assigned : ack?.address_assigned;
         const address = typeof ack?.address_assigned === "string" ? ack.address_assigned : ack?.name_assigned;
-        if (ack && ack.type === "register_ack" && typeof name === "string" && typeof address === "string") {
-          this.assignedName = name;
-          this.assignedAddress = address;
-          this._preAckListener = null;
-          resolve(name);
-        } else {
-          reject(new Error(`expected register_ack, got: ${JSON.stringify(raw)}`));
+        if (!ack || ack.type !== "register_ack" || typeof name !== "string" || typeof address !== "string") {
+          fail(new Error(`expected register_ack, got: ${JSON.stringify(raw)}`));
+          return;
         }
+        if (this.leftFlag || this.socket !== sock) {
+          fail(new Error("peer registration canceled"));
+          return;
+        }
+        // Synchronous acceptance precedes identity publication and any following
+        // envelope in the SAME data chunk. No async lock-transfer hook here.
+        if (this.pinnedName !== null && name !== this.pinnedName) {
+          fail(new ReconnectNameConflictError(this.pinnedName, name));
+          return;
+        }
+        clearWaiter();
+        this.assignedName = name;
+        this.assignedAddress = address;
+        this.ready = true;
+        resolve(name);
       };
-      this._preAckListener = onceListener;
+      this._preAckListener = receiveAck;
+      this.rejectRegistration = fail;
       const req = JSON.stringify({
         type: "register",
         name: this.opts.name,
-        // Only include cwd when set — keeps the wire identical to the legacy
-        // payload for callers that don't supply it (broker treats absent cwd
-        // as "no take-over", i.e. the old #N behavior).
         ...(this.opts.cwd !== undefined ? { cwd: this.opts.cwd } : {}),
         ...(this.opts.takeoverExisting === true ? { takeover: true } : {}),
       }) + "\n";
-      try {
-        sock.write(req);
-      } catch (e) {
-        clearTimeout(wait);
-        reject(e as Error);
+      try { sock.write(req); } catch (error) {
+        fail(error instanceof Error ? error : new Error(String(error)));
       }
     });
   }
 
   private _preAckListener: ((raw: unknown) => void) | null = null;
 
-  private _onData(chunk: string): void {
+  private _onData(sock: Socket, chunk: string): void {
+    if (this.socket !== sock || this.leftFlag) return;
     this.buf += chunk;
     let nl: number;
     while ((nl = this.buf.indexOf("\n")) >= 0) {
+      if (this.socket !== sock || (!this.ready && !this._preAckListener)) {
+        this.buf = "";
+        return;
+      }
       const line = this.buf.slice(0, nl);
       this.buf = this.buf.slice(nl + 1);
-      if (!line) continue;
-      this._handleLine(line);
+      if (line) this._handleLine(line);
     }
   }
 
@@ -502,38 +586,40 @@ export class SessionPeer {
   }
 
   private async _writeEnvelope(env: Envelope): Promise<void> {
-    if (!this.socket || this.socket.destroyed) {
+    if (!this.socket || this.socket.destroyed || this.leftFlag || (this.pinnedName !== null && !this.ready)) {
       throw new Error("session peer not connected");
     }
     this.socket.write(serialize(env));
   }
 
   private async _onSocketClose(closedSock: Socket): Promise<void> {
-    if (this.leftFlag) return;  // intentional leave
-    // Only the CURRENT socket dying is a real failover. A close from a socket
-    // we've already replaced — `rename()` (teardown + rejoin) or a prior
-    // reconnect — must NOT trigger another `_joinOrLead`, or we'd double-
-    // register (the broker suffixes the second as `#N`) and leave an orphaned
-    // still-open socket as a ghost peer. `this.socket` is null mid-rename
-    // (teardown done, rejoin in flight) or already the new socket — either way
-    // `!== closedSock`, so we skip. Genuine leader death: `this.socket` is still
-    // the (now-closed) follower socket → identity matches → we re-elect.
     if (this.socket !== closedSock) return;
-    // Attempt to re-elect once. New leader will bind sockPath; we either
-    // become leader ourselves or rejoin as follower.
+    const wasReady = this.ready;
+    this.ready = false;
+    this.rejectRegistration?.(new Error("peer registration connection closed"));
+    if (this.leftFlag || !wasReady) return;
     await delay(FAILOVER_RETRY_MS);
     if (this.leftFlag || this.socket !== closedSock) return;
     try {
       await this._joinOrLead();
-      // The new broker's peers map starts fresh — consumers must re-query
-      // any cached state (peer count, etc.) that depended on the old broker.
-      for (const h of this.reconnectHandlers) {
-        try { h(); } catch { /* handler errors don't break peer */ }
+      if (!this.isConnected()) return;
+      for (const handler of this.reconnectHandlers) {
+        try { handler(); } catch { /* handler errors don't break peer */ }
       }
-    } catch { /* election failed; peer stuck in disconnected state */ }
+    } catch (error) {
+      // The tracked attempt (including resource cleanup) has already settled.
+      // A consumer may now close/leave without a self-await cycle.
+      if (!this.leftFlag && error instanceof ReconnectNameConflictError) {
+        for (const handler of this.reconnectRejectedHandlers) {
+          try { handler(error); } catch { /* handler errors don't break peer */ }
+        }
+      }
+    }
   }
 
   private async _teardownConn(): Promise<void> {
+    this.ready = false;
+    this.rejectRegistration?.(new Error("peer leaving"));
     for (const [id, slot] of this.pending) {
       clearTimeout(slot.timer);
       this.pending.delete(id);
@@ -549,9 +635,10 @@ export class SessionPeer {
       try { this.socket.destroy(); } catch { /* ignored */ }
       this.socket = null;
     }
-    if (this.broker) {
-      try { await this.broker.close(); } catch { /* ignored */ }
-      this.broker = null;
+    const broker = this.broker;
+    this.broker = null;
+    if (broker) {
+      try { await broker.close(); } catch { /* ignored */ }
     }
   }
 }

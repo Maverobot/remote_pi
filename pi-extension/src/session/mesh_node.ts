@@ -1,4 +1,4 @@
-import { SessionPeer, type AckResult, type SessionPeerOptions } from "./peer.js";
+import { SessionPeer, type AckResult, type SessionPeerOptions, type ReconnectNameConflictError } from "./peer.js";
 import type { Envelope } from "./envelope.js";
 import type { Broker } from "./broker.js";
 import type { BrokerRemote } from "./broker_remote.js";
@@ -307,6 +307,7 @@ export class MeshNode {
     if (this.reconnectWired) return;
     this.reconnectWired = true;
     this.peer_.onReconnect(() => { void this._onReconnect(); });
+    this.peer_.onReconnectRejected(() => { this.detachBridge(); });
   }
 
   private async _onReconnect(): Promise<void> {
@@ -648,9 +649,22 @@ export class MeshNode {
     return this.peer_.onReconnect(handler);
   }
 
+  onReconnectRejected(handler: (error: ReconnectNameConflictError) => void): () => void {
+    return this.peer_.onReconnectRejected(handler);
+  }
+
+  isConnected(): boolean {
+    return !this.closed && this.peer_.isConnected();
+  }
+
   /** Assigned clean mesh name (after any #N collision suffix). */
   name(): string {
     return this.peer_.name();
+  }
+
+  /** Called only after the extension owns the assigned name's real lock. */
+  pinAssignedName(): void {
+    this.peer_.pinAssignedName();
   }
 
   /** Canonical mesh address (`[<pc>:]<cwd>@<nome>`) — echo, never compose. */

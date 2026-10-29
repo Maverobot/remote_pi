@@ -9,7 +9,7 @@ import { EventEmitter } from "node:events";
 import { decodeServer } from "./protocol/codec.js";
 import type { ServerMessage } from "./protocol/types.js";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -254,6 +254,8 @@ const {
   CTRL_PREFIX,
 } = indexModule;
 const { acquireCwdLock } = await import("./session/cwd_lock.js");
+const { loadLocalConfig, saveLocalConfig } = await import("./session/local_config.js");
+const { LOCAL_SESSION_NAME, sessionSockPath } = await import("./session/global_config.js");
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -4415,12 +4417,13 @@ describe("session_shutdown teardown", () => {
     let outgoingRoot: Promise<void> | undefined;
     let outgoingCloseSpy: ReturnType<typeof vi.spyOn> | undefined;
     const meshNodeModule = await import("./session/mesh_node.js");
+    const connect = meshNodeModule.MeshNode.prototype.connect;
     const connectSpy = vi.spyOn(meshNodeModule.MeshNode.prototype, "connect")
-      .mockImplementation(() => {
+      .mockImplementation(function (this: InstanceType<typeof meshNodeModule.MeshNode>) {
         connectAttempts += 1;
         return connectAttempts === 1
           ? firstJoin.promise
-          : Promise.resolve("session-mesh-success");
+          : connect.call(this);
       });
     const cwd = `/tmp/remote-pi-session-mesh-success-${process.pid}-${Date.now()}`;
     const outgoingCtx = makeMockCtx(cwd);
@@ -4439,12 +4442,14 @@ describe("session_shutdown teardown", () => {
       outgoingCloseSpy = vi.spyOn(outgoingCandidate, "close").mockResolvedValue(undefined);
 
       const shutdown = captureEventHandler("session_shutdown");
-      await shutdown({ type: "session_shutdown", reason: "resume" });
-      const sessionStart = captureEventHandler("session_start");
-      void sessionStart({ type: "session_start" }, replacementCtx);
+      const shuttingDown = shutdown({ type: "session_shutdown", reason: "resume" });
 
       firstSettled = true;
       firstJoin.resolve("session-mesh-success");
+      await shuttingDown;
+      const sessionStart = captureEventHandler("session_start");
+      void sessionStart({ type: "session_start" }, replacementCtx);
+
       await outgoingRoot;
 
       await vi.waitFor(() => {
@@ -4474,12 +4479,13 @@ describe("session_shutdown teardown", () => {
     let outgoingRoot: Promise<void> | undefined;
     let outgoingCloseSpy: ReturnType<typeof vi.spyOn> | undefined;
     const meshNodeModule = await import("./session/mesh_node.js");
+    const connect = meshNodeModule.MeshNode.prototype.connect;
     const connectSpy = vi.spyOn(meshNodeModule.MeshNode.prototype, "connect")
-      .mockImplementation(() => {
+      .mockImplementation(function (this: InstanceType<typeof meshNodeModule.MeshNode>) {
         connectAttempts += 1;
         return connectAttempts === 1
           ? firstJoin.promise
-          : Promise.resolve("session-mesh-reject");
+          : connect.call(this);
       });
     const cwd = `/tmp/remote-pi-session-mesh-reject-${process.pid}-${Date.now()}`;
     const outgoingCtx = makeMockCtx(cwd);
@@ -4498,12 +4504,14 @@ describe("session_shutdown teardown", () => {
       outgoingCloseSpy = vi.spyOn(outgoingCandidate, "close").mockResolvedValue(undefined);
 
       const shutdown = captureEventHandler("session_shutdown");
-      await shutdown({ type: "session_shutdown", reason: "resume" });
-      const sessionStart = captureEventHandler("session_start");
-      void sessionStart({ type: "session_start" }, replacementCtx);
+      const shuttingDown = shutdown({ type: "session_shutdown", reason: "resume" });
 
       firstSettled = true;
       firstJoin.reject(new Error("outgoing mesh join failed late"));
+      await shuttingDown;
+      const sessionStart = captureEventHandler("session_start");
+      void sessionStart({ type: "session_start" }, replacementCtx);
+
       await outgoingRoot;
 
       await vi.waitFor(() => {
@@ -4567,12 +4575,14 @@ describe("session_shutdown teardown", () => {
       await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledTimes(1));
 
       const shutdown = captureEventHandler("session_shutdown");
-      await shutdown({ type: "session_shutdown", reason: "resume" });
-      const sessionStart = captureEventHandler("session_start");
-      void sessionStart({ type: "session_start" }, replacementCtx);
+      const shuttingDown = shutdown({ type: "session_shutdown", reason: "resume" });
 
       firstLockSettled = true;
       firstLockGate.reject(outgoingFailure);
+      await shuttingDown;
+      const sessionStart = captureEventHandler("session_start");
+      void sessionStart({ type: "session_start" }, replacementCtx);
+
       await expect(observedOutgoing).resolves.toEqual({
         status: "rejected",
         error: outgoingFailure,
@@ -4720,12 +4730,14 @@ describe("session_shutdown teardown", () => {
       await vi.waitFor(() => expect(acquireSpy).toHaveBeenCalledTimes(1));
 
       const secondShutdown = captureEventHandler("session_shutdown");
-      await secondShutdown({ type: "session_shutdown", reason: "resume" });
-      const secondSessionStart = captureEventHandler("session_start");
-      void secondSessionStart({ type: "session_start" }, newestReplacementCtx);
+      const shuttingDown = secondShutdown({ type: "session_shutdown", reason: "resume" });
 
       firstLockSettled = true;
       firstLockGate.resolve({ ok: true, release: releaseSupersededLock });
+      await shuttingDown;
+      const secondSessionStart = captureEventHandler("session_start");
+      void secondSessionStart({ type: "session_start" }, newestReplacementCtx);
+
 
       await vi.waitFor(() => {
         expect(releaseSupersededLock).toHaveBeenCalledTimes(1);
@@ -4829,6 +4841,871 @@ describe("local config owns mesh name", () => {
   });
 });
 
+// ── Requested name, live registration, and lock stay aligned ──────────────────
+
+describe("name-lock consistency on explicit reconnect", () => {
+  let cwd: string;
+  let root: CmdHandler;
+  let sendMessage: ReturnType<typeof vi.fn>;
+  let restoreCwd: () => void;
+
+  const lastAssignedName = () => sendMessage.mock.calls
+    .map((call) => call[0] as { customType?: string; details?: Record<string, unknown> })
+    .filter((message) => message.customType === "remote-pi:name-assigned")
+    .at(-1)?.details;
+
+  async function nameIsReserved(name: string): Promise<boolean> {
+    const contender = await acquireCwdLock(cwd, name);
+    if (contender.ok) contender.release();
+    return !contender.ok;
+  }
+
+  async function registeredPeers(): Promise<string[] | null> {
+    return indexModule.probeListPeers(sessionSockPath(LOCAL_SESSION_NAME));
+  }
+
+  beforeEach(async () => {
+    cwd = realpathSync(mkdtempSync(join(tmpdir(), "pi-name-lock-")));
+    // Also isolate the launch-cwd fallback used by control-channel commands.
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(cwd);
+    restoreCwd = () => cwdSpy.mockRestore();
+    vi.stubEnv("REMOTE_PI_DIRECT_CONFIG", undefined);
+    vi.stubEnv("REMOTE_PI_DAEMON", undefined);
+    _knownPeers.length = 0;
+    _meshOwnerDiscoveryEnabled = false;
+    _defaultConnectImpl = async () => undefined;
+    _setDisposedForTest(false);
+    root = captureHandler("remote-pi");
+    await root("stop", makeMockCtx(cwd));
+    _resetCwdLockForTest();
+    sendMessage = vi.fn();
+    _setPiForTest({ ...makeMockPi().pi, sendMessage });
+    saveLocalConfig(cwd, { agent_name: "Original", auto_start_relay: false });
+
+    await root("", makeMockCtx(cwd));
+    expect(lastAssignedName()).toMatchObject({ requested: "Original", assigned: "Original" });
+    expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+    expect(await nameIsReserved("Original")).toBe(true);
+  });
+
+  afterEach(async () => {
+    try {
+      await root("stop", makeMockCtx(cwd));
+    } finally {
+      _resetCwdLockForTest();
+      restoreCwd();
+      vi.unstubAllEnvs();
+      rmSync(cwd, { recursive: true, force: true });
+    }
+  });
+
+  test.each([
+    { command: "pair", reservation: "online" },
+    { command: "relay start", reservation: "online" },
+    { command: "relay start", reservation: "stopped" },
+    { command: "relay start", reservation: "none" },
+  ])("rename cancels a pending old-name $command relay startup ($reservation)", async ({ command, reservation }) => {
+    if (reservation !== "online") await root("stop", makeMockCtx(cwd));
+    if (reservation === "none") _resetCwdLockForTest();
+    const entered = deferred<void>();
+    const resume = deferred<void>();
+    _defaultConnectImpl = async () => { entered.resolve(); await resume.promise; };
+    const starting = root(command, makeMockCtx(cwd));
+    try {
+      await entered.promise;
+      const oldRelay = relayRef.current!;
+      expect(oldRelay.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Original" } });
+      await root("rename Renamed", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual(reservation === "online" ? [`${cwd}@Renamed`] : null);
+      expect(await nameIsReserved("Original")).toBe(false);
+      expect(await nameIsReserved("Renamed")).toBe(reservation !== "none");
+      expect.soft(oldRelay.isOpen()).toBe(false);
+      resume.resolve();
+      await starting;
+      expect.soft(oldRelay.isOpen()).toBe(false);
+      expect.soft(_getState()).toBe("idle");
+      _defaultConnectImpl = async () => undefined;
+      await root("relay start", makeMockCtx(cwd));
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Renamed" } });
+    } finally {
+      resume.resolve();
+      await starting;
+    }
+  });
+
+  test("relay-only cycling follows the held effective name without starting a stopped mesh", async () => {
+    await root("stop", makeMockCtx(cwd));
+    await root("relay start", makeMockCtx(cwd));
+    const oldRelay = relayRef.current!;
+    const incumbent = await acquireCwdLock(cwd, "Taken");
+    expect(incumbent.ok).toBe(true);
+    try {
+      await root("rename Taken", makeMockCtx(cwd));
+      expect(oldRelay.isOpen()).toBe(false);
+      expect(_getState()).toBe("started");
+      expect(await registeredPeers()).toBeNull();
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Taken#2" } });
+      expect(await nameIsReserved("Taken#2")).toBe(true);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Taken");
+    } finally {
+      if (incumbent.ok) incumbent.release();
+    }
+  });
+
+  test("a relay start during mesh retirement cannot publish the retiring identity", async () => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const close = MeshNode.prototype.close;
+    const retired = deferred<void>();
+    const resume = deferred<void>();
+    const closeSpy = vi.spyOn(MeshNode.prototype, "close").mockImplementationOnce(async function (this: InstanceType<typeof MeshNode>) {
+      await close.call(this);
+      retired.resolve();
+      await resume.promise;
+    });
+    const renaming = root("rename Renamed", makeMockCtx(cwd));
+    try {
+      await retired.promise;
+      await root("relay start", makeMockCtx(cwd));
+      expect.soft(_getState()).toBe("idle");
+      resume.resolve();
+      await renaming;
+      expect.soft(_getState()).toBe("idle");
+      expect(await registeredPeers()).toEqual([`${cwd}@Renamed`]);
+      await root("relay start", makeMockCtx(cwd));
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomMeta: { name: "Renamed" } });
+    } finally {
+      resume.resolve();
+      await renaming;
+      closeSpy.mockRestore();
+    }
+  });
+
+  test("command rename retains the new name and its lock after stop then root", async () => {
+    await root("rename Renamed", makeMockCtx(cwd));
+    expect(loadLocalConfig(cwd).agent_name).toBe("Renamed");
+    expect(lastAssignedName()).toMatchObject({ requested: "Renamed", assigned: "Renamed", changed: false });
+    expect(await registeredPeers()).toEqual([`${cwd}@Renamed`]);
+    expect.soft(await nameIsReserved("Renamed"), "live renamed name must have a real lock").toBe(true);
+    expect.soft(await nameIsReserved("Original"), "rename must release the old name").toBe(false);
+
+    await root("stop", makeMockCtx(cwd));
+    await root("", makeMockCtx(cwd));
+
+    expect(loadLocalConfig(cwd).agent_name).toBe("Renamed");
+    expect.soft(lastAssignedName()).toMatchObject({ requested: "Renamed", assigned: "Renamed", changed: false });
+    expect.soft(await registeredPeers()).toEqual([`${cwd}@Renamed`]);
+    expect.soft(await nameIsReserved("Renamed"), "reconnected name must have a real lock").toBe(true);
+    expect.soft(await nameIsReserved("Original"), "reconnect must not reserve the stale name").toBe(false);
+  });
+
+  test.each(["stopped", "running"])("external config rename while %s is applied by explicit root", async (state) => {
+    if (state === "stopped") await root("stop", makeMockCtx(cwd));
+    saveLocalConfig(cwd, { agent_name: "Configured" });
+
+    await root("", makeMockCtx(cwd));
+
+    expect(loadLocalConfig(cwd).agent_name).toBe("Configured");
+    expect.soft(lastAssignedName()).toMatchObject({ requested: "Configured", assigned: "Configured", changed: false });
+    expect.soft(await registeredPeers()).toEqual([`${cwd}@Configured`]);
+    expect.soft(await nameIsReserved("Configured"), "configured name must have a real lock").toBe(true);
+    expect.soft(await nameIsReserved("Original"), "explicit connect must release the stale name").toBe(false);
+  });
+
+  test("a stopped rename transfers the reservation without starting networking", async () => {
+    await root("stop", makeMockCtx(cwd));
+    await root("rename Stopped", makeMockCtx(cwd));
+    expect(loadLocalConfig(cwd).agent_name).toBe("Stopped");
+    expect(await registeredPeers()).toBeNull();
+    expect(_getState()).toBe("idle");
+    expect(await nameIsReserved("Stopped")).toBe(true);
+    expect(await nameIsReserved("Original")).toBe(false);
+    await root("", makeMockCtx(cwd));
+    expect(await registeredPeers()).toEqual([`${cwd}@Stopped`]);
+  });
+
+  test("rename without a reservation only persists config in the command cwd", async () => {
+    await root("stop", makeMockCtx(cwd));
+    _resetCwdLockForTest();
+    const otherCwd = mkdtempSync(join(tmpdir(), "pi-name-config-"));
+    try {
+      await root("rename ConfigOnly", makeMockCtx(otherCwd));
+      expect(loadLocalConfig(otherCwd).agent_name).toBe("ConfigOnly");
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      expect(await registeredPeers()).toBeNull();
+      const contender = await acquireCwdLock(otherCwd, "ConfigOnly");
+      if (contender.ok) contender.release();
+      expect(contender.ok).toBe(true);
+    } finally {
+      rmSync(otherCwd, { recursive: true, force: true });
+    }
+  });
+
+  test("interactive rename suffix stays runtime-only and stable across reconnect", async () => {
+    const incumbent = await acquireCwdLock(cwd, "Taken");
+    expect(incumbent.ok).toBe(true);
+    try {
+      await root("rename Taken", makeMockCtx(cwd));
+      expect(lastAssignedName()).toMatchObject({ requested: "Taken", assigned: "Taken#2", changed: true });
+      expect(loadLocalConfig(cwd).agent_name).toBe("Taken");
+      expect(await registeredPeers()).toEqual([`${cwd}@Taken#2`]);
+      expect(await nameIsReserved("Taken#2")).toBe(true);
+      expect(await nameIsReserved("Original")).toBe(false);
+      await root("stop", makeMockCtx(cwd));
+      await root("", makeMockCtx(cwd));
+      await root("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@Taken#2`]);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Taken");
+      expect(await nameIsReserved("Taken#3")).toBe(false);
+    } finally {
+      if (incumbent.ok) incumbent.release();
+    }
+  });
+
+  // Lead from the incumbent so retiring this extension cannot trigger a broker
+  // failover in the middle of a collision assertion. No takeover or fake lock.
+  async function startIncumbent(name: string) {
+    await root("stop", makeMockCtx(cwd));
+    const { SessionPeer } = await import("./session/peer.js");
+    const peer = new SessionPeer({ sockPath: sessionSockPath(LOCAL_SESSION_NAME), cwd, name });
+    await peer.start();
+    await root("", makeMockCtx(cwd));
+    return peer;
+  }
+
+  test.each(["reconnected", "disconnected"])("a %s candidate cannot commit its stale ACK after exact-lock acquisition", async (state) => {
+    const incumbent = await startIncumbent("Taken");
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const lockModule = await import("./session/cwd_lock.js");
+    const connect = MeshNode.prototype.connect;
+    const acquire = lockModule.acquireCwdLock;
+    const acquired = deferred<void>();
+    const resume = deferred<void>();
+    let candidate: InstanceType<typeof MeshNode> | undefined;
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockImplementationOnce(async function (this: InstanceType<typeof MeshNode>) {
+      const assigned = await connect.call(this);
+      candidate = this;
+      return assigned;
+    });
+    const acquireSpy = vi.spyOn(lockModule, "acquireCwdLock").mockImplementation(async (dir, name) => {
+      const result = await acquire(dir, name);
+      if (name === "Taken#2") { acquired.resolve(); await resume.promise; }
+      return result;
+    });
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    const renaming = root("rename Taken", ctx);
+    try {
+      await acquired.promise;
+      expect(candidate!.name()).toBe("Taken#2");
+      if (state === "reconnected") {
+        await incumbent.leave();
+        await vi.waitFor(() => {
+          expect(candidate!.isConnected()).toBe(true);
+          expect(candidate!.name()).toBe("Taken");
+        });
+        expect(await candidate!.request("broker", { type: "list_peers" })).toMatchObject({ body: { peers: [`${cwd}@Taken`] } });
+      } else {
+        await candidate!.close();
+      }
+      resume.resolve();
+      await renaming;
+      expect.soft(loadLocalConfig(cwd).agent_name).toBe("Original");
+      expect.soft(lastAssignedName()).toBeUndefined();
+      expect.soft(_hasMeshNodeForTest()).toBe(false);
+      expect.soft(await registeredPeers()).toEqual(state === "reconnected" ? null : [`${cwd}@Taken`]);
+      expect.soft(await nameIsReserved("Original")).toBe(true);
+      expect.soft(await nameIsReserved("Taken")).toBe(false);
+      expect.soft(await nameIsReserved("Taken#2")).toBe(false);
+      await expect.soft(candidate!.request("broker", { type: "list_peers" })).rejects.toThrow();
+      expect.soft(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Run /remote-pi to retry"), "error");
+      // Recover through a real command rather than restoring cached names.
+      await root("", makeMockCtx(cwd));
+      expect((await registeredPeers())?.includes(`${cwd}@Original`)).toBe(true);
+    } finally {
+      resume.resolve();
+      await renaming;
+      await root("stop", makeMockCtx(cwd));
+      await incumbent.leave();
+      acquireSpy.mockRestore();
+      connectSpy.mockRestore();
+    }
+  });
+
+  test("broker-only collision reserves the exact ACK name and releases the provisional base", async () => {
+    const incumbent = await startIncumbent("Taken");
+    try {
+      await root("rename Taken", makeMockCtx(cwd));
+      expect(lastAssignedName()).toMatchObject({ requested: "Taken", assigned: "Taken#2", changed: true });
+      expect((await registeredPeers())?.sort()).toEqual([`${cwd}@Taken`, `${cwd}@Taken#2`].sort());
+      expect(loadLocalConfig(cwd).agent_name).toBe("Taken");
+      expect(await nameIsReserved("Taken#2")).toBe(true);
+      expect(await nameIsReserved("Taken")).toBe(false);
+      await root("stop", makeMockCtx(cwd));
+      await root("", makeMockCtx(cwd));
+      expect((await registeredPeers())?.sort()).toEqual([`${cwd}@Taken`, `${cwd}@Taken#2`].sort());
+      await incumbent.leave();
+      await vi.waitFor(async () => expect(await registeredPeers()).toEqual([`${cwd}@Taken#2`]));
+      await root("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@Taken#2`]);
+      expect(await nameIsReserved("Taken#2")).toBe(true);
+      expect(await nameIsReserved("Taken")).toBe(false);
+    } finally {
+      await root("stop", makeMockCtx(cwd));
+      await incumbent.leave();
+    }
+  });
+
+  test.each([false, true])("unexpected reconnect ACK requires explicit retry (daemon=%s)", async (daemon) => {
+    vi.stubEnv("REMOTE_PI_DAEMON", daemon ? "1" : undefined);
+    const incumbent = await startIncumbent("Observer");
+    const { SessionPeer } = await import("./session/peer.js");
+    const successor = new SessionPeer({ sockPath: sessionSockPath(LOCAL_SESSION_NAME), cwd, name: "Original" });
+    const ctx = makeMockCtx(cwd);
+    const sessionStart = captureEventHandler("session_start");
+    _setAutoInitedForTest(true);
+    sessionStart({ type: "session_start" }, ctx);
+    _setPiForTest({ ...makeMockPi().pi, sendMessage });
+    await _startRelayForTest(ctx);
+    const relay = relayRef.current!;
+    sendMessage.mockClear();
+    try {
+      // The replacement broker owns Original before the follower's delayed
+      // re-election. Its real ACK therefore assigns Original#2 to this peer.
+      await incumbent.leave();
+      await successor.start();
+      await vi.waitFor(() => expect(_hasMeshNodeForTest()).toBe(false));
+      expect(_getState()).toBe("idle");
+      expect(relay.isOpen()).toBe(false);
+      expect(lastAssignedName()).toBeUndefined();
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringMatching(/Stopped communicating.*unowned.*Run \/remote-pi to retry/), "error");
+      expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Original#2")).toBe(false);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+
+      await root("", ctx);
+      if (daemon) {
+        expect(lastAssignedName()).toBeUndefined();
+        expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+        expect(await nameIsReserved("Original")).toBe(true);
+        expect(await nameIsReserved("Original#2")).toBe(false);
+        expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Daemon not started"), "error");
+      } else {
+        expect(lastAssignedName()).toMatchObject({ requested: "Original", assigned: "Original#2", changed: true });
+        expect((await registeredPeers())?.sort()).toEqual([`${cwd}@Original`, `${cwd}@Original#2`].sort());
+        expect(await nameIsReserved("Original#2")).toBe(true);
+        expect(await nameIsReserved("Original")).toBe(false);
+      }
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+    } finally {
+      await root("stop", ctx);
+      await successor.leave();
+      await incumbent.leave();
+      _setAutoInitedForTest(false);
+    }
+  });
+
+  test("a retired peer's reconnect rejection cannot stop its replacement", async () => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const { ReconnectNameConflictError } = await import("./session/peer.js");
+    const subscribe = vi.spyOn(MeshNode.prototype, "onReconnectRejected");
+    try {
+      await root("rename Retired", makeMockCtx(cwd));
+      const rejectRetired = subscribe.mock.calls[0]![0];
+      await root("rename Current", makeMockCtx(cwd));
+      await _startRelayForTest(makeMockCtx(cwd));
+      rejectRetired(new ReconnectNameConflictError("Retired", "Unowned"));
+      expect(_getState()).toBe("started");
+      expect(await registeredPeers()).toEqual([`${cwd}@Current`]);
+      expect(await nameIsReserved("Current")).toBe(true);
+      expect(await nameIsReserved("Unowned")).toBe(false);
+    } finally {
+      subscribe.mockRestore();
+    }
+  });
+
+  test.each(["stop", "shutdown"])("%s drains an automatic reconnect before returning", async (action) => {
+    const incumbent = await startIncumbent("Observer");
+    const election = await import("./session/leader_election.js");
+    const joinOrLead = election.joinOrLead;
+    const acquired = deferred<void>();
+    const resume = deferred<void>();
+    const electionSpy = vi.spyOn(election, "joinOrLead").mockImplementationOnce(async (path) => {
+      const result = await joinOrLead(path);
+      acquired.resolve();
+      await resume.promise;
+      return result;
+    });
+    const shutdown = captureEventHandler("session_shutdown");
+    _setPiForTest({ ...makeMockPi().pi, sendMessage });
+    await _startRelayForTest(makeMockCtx(cwd));
+    sendMessage.mockClear();
+    let stopping: Promise<unknown> | undefined;
+    try {
+      await incumbent.leave();
+      await acquired.promise;
+      let stopped = false;
+      stopping = (action === "stop"
+        ? root("stop", makeMockCtx(cwd))
+        : Promise.resolve(shutdown({ type: "session_shutdown", reason: "quit" })))
+        .then(() => { stopped = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect.soft(stopped).toBe(false);
+      resume.resolve();
+      await stopping;
+      expect(await registeredPeers()).toBeNull();
+      expect(_getState()).toBe("idle");
+      expect(lastAssignedName()).toBeUndefined();
+      expect(await nameIsReserved("Original")).toBe(action === "stop");
+    } finally {
+      resume.resolve();
+      await stopping;
+      electionSpy.mockRestore();
+      await incumbent.leave();
+    }
+  });
+
+  test("a busy exact ACK lock aborts without substituting a different suffix", async () => {
+    const incumbent = await startIncumbent("Taken");
+    const ackLock = await acquireCwdLock(cwd, "Taken#2");
+    expect(ackLock.ok).toBe(true);
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    try {
+      await root("rename Taken", ctx);
+      expect(lastAssignedName()).toBeUndefined();
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      await vi.waitFor(async () => expect(await registeredPeers()).toEqual([`${cwd}@Taken`]));
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Taken")).toBe(false);
+      expect(await nameIsReserved("Taken#2")).toBe(true);
+      expect(await nameIsReserved("Taken#3")).toBe(false);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("already locked"), "error");
+    } finally {
+      if (ackLock.ok) ackLock.release();
+      await incumbent.leave();
+    }
+  });
+
+  test("daemon lock refusal preserves the old connection and requested config", async () => {
+    vi.stubEnv("REMOTE_PI_DAEMON", "1");
+    const incumbent = await acquireCwdLock(cwd, "Taken");
+    expect(incumbent.ok).toBe(true);
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    try {
+      await root("rename Taken", ctx);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+      expect(lastAssignedName()).toBeUndefined();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Taken#2")).toBe(false);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Daemon not started"), "warning");
+    } finally {
+      if (incumbent.ok) incumbent.release();
+    }
+  });
+
+  test("daemon broker-only collision does not evict the incumbent or accept a suffix", async () => {
+    const incumbent = await startIncumbent("Taken");
+    vi.stubEnv("REMOTE_PI_DAEMON", "1");
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    try {
+      await root("rename Taken", ctx);
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      expect(lastAssignedName()).toBeUndefined();
+      await vi.waitFor(async () => expect(await registeredPeers()).toEqual([`${cwd}@Taken`]));
+      // The original peer can still make requests, not merely appear in a cache.
+      await expect(incumbent.request("broker", { type: "list_peers" })).resolves.toBeDefined();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Taken")).toBe(false);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("Daemon not started"), "error");
+    } finally {
+      await incumbent.leave();
+    }
+  });
+
+  test("registration failure leaves the old reservation recoverable without false success", async () => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockRejectedValueOnce(new Error("registration rejected"));
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    try {
+      await root("rename Rejected", ctx);
+      expect(lastAssignedName()).toBeUndefined();
+      expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Rejected")).toBe(false);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("registration rejected"), "error");
+      connectSpy.mockRestore();
+      await root("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+    } finally {
+      connectSpy.mockRestore();
+    }
+  });
+
+  test("failed external-config reconciliation leaves the new intent pending for explicit retry", async () => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockRejectedValueOnce(new Error("registration rejected"));
+    saveLocalConfig(cwd, { agent_name: "Configured" });
+    sendMessage.mockClear();
+    try {
+      await root("", makeMockCtx(cwd));
+      expect(loadLocalConfig(cwd).agent_name).toBe("Configured");
+      expect(lastAssignedName()).toBeUndefined();
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Configured")).toBe(false);
+      connectSpy.mockRestore();
+      await root("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@Configured`]);
+      expect(await nameIsReserved("Original")).toBe(false);
+      expect(await nameIsReserved("Configured")).toBe(true);
+    } finally {
+      connectSpy.mockRestore();
+    }
+  });
+
+  test("persistence failure retires the candidate and retains old ownership for retry", async () => {
+    const configPath = join(cwd, ".pi", "remote-pi", "config.json");
+    // EISDIR is deterministic even when tests run as root or on Windows.
+    rmSync(configPath);
+    mkdirSync(configPath);
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    try {
+      await root("rename Unsaved", ctx);
+      expect(lastAssignedName()).toBeUndefined();
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Unsaved")).toBe(false);
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("could not persist"), "error");
+    } finally {
+      rmSync(configPath, { recursive: true });
+      saveLocalConfig(cwd, { agent_name: "Original", auto_start_relay: false });
+    }
+    await root("rename Saved", makeMockCtx(cwd));
+    expect(loadLocalConfig(cwd).agent_name).toBe("Saved");
+    expect(await registeredPeers()).toBeNull();
+    expect(await nameIsReserved("Saved")).toBe(true);
+  });
+
+  test.each(['{"agent_name":"Inline"}', '{}'])("parseable direct config %s rejects a masked rename before disconnect", async (inline) => {
+    vi.stubEnv("REMOTE_PI_DIRECT_CONFIG", inline);
+    sendMessage.mockClear();
+    const ctx = makeMockCtx(cwd);
+    await root("rename Masked", ctx);
+    expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+    expect(lastAssignedName()).toBeUndefined();
+    expect(await nameIsReserved("Original")).toBe(true);
+    expect(await nameIsReserved("Masked")).toBe(false);
+    expect(JSON.parse(readFileSync(join(cwd, ".pi/remote-pi/config.json"), "utf8")).agent_name).toBe("Original");
+    expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("REMOTE_PI_DIRECT_CONFIG"), "error");
+  });
+
+  test("malformed inline config permits a normalized rename that survives readback", async () => {
+    vi.stubEnv("REMOTE_PI_DIRECT_CONFIG", "{invalid");
+    await root("rename Team / New#2", makeMockCtx(cwd));
+    expect(loadLocalConfig(cwd).agent_name).toBe("Team-New-2");
+    expect(await registeredPeers()).toEqual([`${cwd}@Team-New-2`]);
+    expect(await nameIsReserved("Team-New-2")).toBe(true);
+    await root("stop", makeMockCtx(cwd));
+    await root("", makeMockCtx(cwd));
+    expect(await registeredPeers()).toEqual([`${cwd}@Team-New-2`]);
+  });
+
+  test("queued rename and root commands converge on the latest requested name", async () => {
+    await Promise.all([
+      root("rename First", makeMockCtx(cwd)),
+      root("", makeMockCtx(cwd)),
+      root("rename Last", makeMockCtx(cwd)),
+      root("", makeMockCtx(cwd)),
+    ]);
+    expect(loadLocalConfig(cwd).agent_name).toBe("Last");
+    expect(await registeredPeers()).toEqual([`${cwd}@Last`]);
+    expect(await nameIsReserved("Last")).toBe(true);
+    expect(await nameIsReserved("Original")).toBe(false);
+    expect(await nameIsReserved("First")).toBe(false);
+  });
+
+  test.each(["stop", "shutdown"])("%s cancels name changes at reservation, registration, and exact ACK acquisition", async (action) => {
+    const lockModule = await import("./session/cwd_lock.js");
+    const { MeshNode } = await import("./session/mesh_node.js");
+    for (const boundary of ["reservation", "registration", "ack-lock"] as const) {
+      // A fresh committed Original for each boundary; shutdown deliberately
+      // releases it, while ordinary stop deliberately retains it.
+      _setDisposedForTest(false);
+      await root("", makeMockCtx(cwd));
+      const incumbent = boundary === "ack-lock" ? await startIncumbent("Pending") : null;
+      const shutdown = captureEventHandler("session_shutdown");
+      _setPiForTest({ ...makeMockPi().pi, sendMessage });
+      await _startRelayForTest(makeMockCtx(cwd));
+      const relayCount = relayInstances.length;
+      sendMessage.mockClear();
+      const reached = deferred<void>();
+      const resume = deferred<void>();
+      const acquire = lockModule.acquireCwdLock;
+      const connect = MeshNode.prototype.connect;
+      const acquireSpy = vi.spyOn(lockModule, "acquireCwdLock").mockImplementation(async (dir, name) => {
+        const result = await acquire(dir, name);
+        if ((boundary === "reservation" && name === "Pending") || (boundary === "ack-lock" && name === "Pending#2")) {
+          reached.resolve();
+          await resume.promise;
+        }
+        return result;
+      });
+      const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockImplementation(async function (this: InstanceType<typeof MeshNode>) {
+        const assigned = await connect.call(this);
+        if (boundary === "registration") {
+          reached.resolve();
+          await resume.promise;
+        }
+        return assigned;
+      });
+      const pending = root("rename Pending", makeMockCtx(cwd));
+      const queuedRename = root("rename Queued", makeMockCtx(cwd));
+      const queuedRoot = root("", makeMockCtx(cwd));
+      try {
+        await reached.promise;
+        let shutdownDone = false;
+        const stopping = action === "stop"
+          ? root("stop", makeMockCtx(cwd))
+          : Promise.resolve(shutdown({ type: "session_shutdown", reason: "quit" })).then(() => { shutdownDone = true; });
+        await new Promise<void>((resolve) => setImmediate(resolve));
+        if (action === "shutdown") expect.soft(shutdownDone).toBe(false);
+        resume.resolve();
+        await stopping;
+        await Promise.all([pending, queuedRename, queuedRoot]);
+        expect(lastAssignedName()).toBeUndefined();
+        expect(loadLocalConfig(cwd).agent_name).toBe("Original");
+        expect(_getState()).toBe("idle");
+        expect(relayInstances).toHaveLength(relayCount);
+        await vi.waitFor(async () => expect(await registeredPeers()).toEqual(incumbent ? [`${cwd}@Pending`] : null));
+        expect(await nameIsReserved("Original")).toBe(action === "stop");
+        expect(await nameIsReserved("Pending")).toBe(false);
+        expect(await nameIsReserved("Pending#2")).toBe(false);
+        expect(await nameIsReserved("Queued")).toBe(false);
+      } finally {
+        resume.resolve();
+        await Promise.all([pending, queuedRename, queuedRoot]);
+        acquireSpy.mockRestore();
+        connectSpy.mockRestore();
+        if (incumbent) await incumbent.leave();
+      }
+    }
+  });
+
+  test.each(["pair", "revoke missing"])("%s bootstrap reconciles edited config with both stopped and online mesh", async (command) => {
+    for (const stopped of [true, false]) {
+      if (stopped) await root("stop", makeMockCtx(cwd));
+      else await _handleControl("relay:off");
+      const requested = stopped ? "StoppedConfig" : "OnlineConfig";
+      saveLocalConfig(cwd, { agent_name: requested });
+      await root(command, makeMockCtx(cwd));
+      expect(loadLocalConfig(cwd).agent_name).toBe(requested);
+      expect(await registeredPeers()).toEqual([`${cwd}@${requested}`]);
+      expect(await nameIsReserved(requested)).toBe(true);
+      expect(await nameIsReserved("Original")).toBe(false);
+      expect(_getState()).toBe("started");
+    }
+  });
+
+  test.each(["pair", "revoke missing"])("%s bootstrap does not start relay after failed reconciliation", async (command) => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockRejectedValueOnce(new Error("bootstrap rejected"));
+    saveLocalConfig(cwd, { agent_name: "Rejected" });
+    try {
+      await root(command, makeMockCtx(cwd));
+      expect(_getState()).toBe("idle");
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Rejected")).toBe(false);
+    } finally {
+      connectSpy.mockRestore();
+    }
+  });
+
+  test.each(["pair", "revoke missing"])("stop cancels %s bootstrap before relay startup", async (command) => {
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const connect = MeshNode.prototype.connect;
+    const registered = deferred<void>();
+    const resume = deferred<void>();
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockImplementationOnce(async function (this: InstanceType<typeof MeshNode>) {
+      const assigned = await connect.call(this);
+      registered.resolve();
+      await resume.promise;
+      return assigned;
+    });
+    saveLocalConfig(cwd, { agent_name: "Canceled" });
+    const pending = root(command, makeMockCtx(cwd));
+    try {
+      await registered.promise;
+      await root("stop", makeMockCtx(cwd));
+      resume.resolve();
+      await pending;
+      expect(_getState()).toBe("idle");
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(true);
+      expect(await nameIsReserved("Canceled")).toBe(false);
+    } finally {
+      resume.resolve();
+      await pending;
+      connectSpy.mockRestore();
+    }
+  });
+
+  test("setup normalizes explicit input before saving and subsequent connection", async () => {
+    const ctx = { ...makeMockCtx(cwd), ui: {
+      notify: vi.fn(), input: vi.fn().mockResolvedValue("Team / New#2"),
+      select: vi.fn().mockResolvedValueOnce("No").mockResolvedValueOnce("Yes"),
+    } };
+    await root("setup", ctx);
+    expect(loadLocalConfig(cwd).agent_name).toBe("Team-New-2");
+    await root("", ctx);
+    expect(await registeredPeers()).toEqual([`${cwd}@Team-New-2`]);
+    expect(await nameIsReserved("Team-New-2")).toBe(true);
+  });
+
+  test("symlink default collides with the physical default room reservation", async () => {
+    const alias = `${cwd}-alias`;
+    symlinkSync(cwd, alias, "dir");
+    const incumbent = await acquireCwdLock(cwd, basename(cwd));
+    expect(incumbent.ok).toBe(true);
+    try {
+      saveLocalConfig(cwd, { agent_name: basename(alias) });
+      await root("", makeMockCtx(alias));
+      const assigned = `${basename(alias)}#2`;
+      expect(lastAssignedName()).toMatchObject({ assigned });
+      expect(await registeredPeers()).toEqual([`${cwd}@${assigned}`]);
+      const contender = await acquireCwdLock(alias, assigned);
+      if (contender.ok) contender.release();
+      expect(contender.ok).toBe(false);
+      await _startRelayForTest(makeMockCtx(alias));
+      const { roomIdFor } = await import("./rooms.js");
+      expect(relayRef.current!.connect.mock.calls[0]?.[0]).toMatchObject({ roomId: roomIdFor(alias, assigned) });
+      expect(roomIdFor(alias, assigned)).not.toBe(roomIdFor(cwd, basename(cwd)));
+    } finally {
+      if (incumbent.ok) incumbent.release();
+      rmSync(alias);
+    }
+  });
+
+  test("reservation reuse respects the original cwd default-name interpretation", async () => {
+    const alias = `${cwd}-alias`;
+    symlinkSync(cwd, alias, "dir");
+    const requested = basename(alias);
+    try {
+      saveLocalConfig(cwd, { agent_name: requested });
+      await root("", makeMockCtx(alias));
+      const defaultContender = await acquireCwdLock(cwd, basename(cwd));
+      if (defaultContender.ok) defaultContender.release();
+      expect.soft(defaultContender.ok).toBe(false);
+      // Same canonical cwd and requested name, but now the name is custom:
+      // the reservation must move from the legacy room to the name-scoped room.
+      await root("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@${requested}`]);
+      expect(await nameIsReserved(requested)).toBe(true);
+      expect(await nameIsReserved(basename(cwd))).toBe(false);
+    } finally {
+      rmSync(alias);
+    }
+  });
+
+  test("shutdown ignores an unanswered wizard with no resource-owning phase", async () => {
+    await root("stop", makeMockCtx(cwd));
+    _resetCwdLockForTest();
+    rmSync(join(cwd, ".pi/remote-pi/config.json"));
+    const answer = deferred<string | undefined>();
+    const entered = deferred<void>();
+    const ctx = { ...makeMockCtx(cwd), ui: { notify: vi.fn(), select: vi.fn(), input: () => {
+      entered.resolve();
+      return answer.promise;
+    } } };
+    const shutdown = captureEventHandler("session_shutdown");
+    const pending = root("", ctx);
+    try {
+      await entered.promise;
+      await shutdown({ type: "session_shutdown", reason: "quit" });
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved(basename(cwd))).toBe(false);
+    } finally {
+      answer.resolve(undefined);
+      await pending;
+    }
+  });
+
+  test("awaited shutdown drains a real candidate before a fresh daemon module connects", async () => {
+    await root("stop", makeMockCtx(cwd));
+    _resetCwdLockForTest();
+    vi.stubEnv("REMOTE_PI_DAEMON", "1");
+    const { MeshNode } = await import("./session/mesh_node.js");
+    const connect = MeshNode.prototype.connect;
+    const registered = deferred<void>();
+    const resume = deferred<void>();
+    const connectSpy = vi.spyOn(MeshNode.prototype, "connect").mockImplementationOnce(async function (this: InstanceType<typeof MeshNode>) {
+      const assigned = await connect.call(this);
+      registered.resolve();
+      await resume.promise;
+      return assigned;
+    });
+    const shutdown = captureEventHandler("session_shutdown");
+    const pending = root("", makeMockCtx(cwd));
+    let replacement: typeof indexModule | undefined;
+    let replacementRoot: CmdHandler | undefined;
+    let shuttingDown: Promise<void> | undefined;
+    try {
+      await registered.promise;
+      let shutdownDone = false;
+      shuttingDown = Promise.resolve(shutdown({ type: "session_shutdown", reason: "resume" })).then(() => { shutdownDone = true; });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect.soft(shutdownDone).toBe(false);
+      resume.resolve();
+      await shuttingDown;
+      expect(await registeredPeers()).toBeNull();
+      expect(await nameIsReserved("Original")).toBe(false);
+      connectSpy.mockRestore();
+      // A distinct module, not same-module rearming, models SDK replacement.
+      replacement = await import("./index.js?name-lock-fresh-daemon");
+      expect(replacement).not.toBe(indexModule);
+      replacement.default({ ...makeMockPi().pi, registerCommand(name: string, opts: { handler: CmdHandler }) {
+        if (name === "remote-pi") replacementRoot = opts.handler;
+      } } as unknown as ExtensionAPI);
+      await replacementRoot!("", makeMockCtx(cwd));
+      expect(await registeredPeers()).toEqual([`${cwd}@Original`]);
+      expect(await nameIsReserved("Original")).toBe(true);
+    } finally {
+      resume.resolve();
+      await shuttingDown;
+      await pending;
+      connectSpy.mockRestore();
+      if (replacementRoot) await replacementRoot("stop", makeMockCtx(cwd));
+      replacement?._resetCwdLockForTest();
+    }
+  });
+
+  test.each([true, false])("wizard resolves the selected name before reserving (confirm=%s)", async (confirm) => {
+    await root("stop", makeMockCtx(cwd));
+    _resetCwdLockForTest();
+    rmSync(join(cwd, ".pi/remote-pi/config.json"));
+    const ctx = {
+      ...makeMockCtx(cwd),
+      ui: {
+        notify: vi.fn(),
+        input: vi.fn().mockResolvedValue("Team / New#2"),
+        select: vi.fn().mockResolvedValueOnce("No").mockResolvedValueOnce(confirm ? "Yes" : "No"),
+      },
+    };
+    await root("", ctx);
+    expect(await nameIsReserved(basename(cwd))).toBe(false);
+    expect(await nameIsReserved("Team-New-2")).toBe(confirm);
+    expect(await registeredPeers()).toEqual(confirm ? [`${cwd}@Team-New-2`] : null);
+  });
+
+});
+
 // ── relay control channel + relay-state event (Cockpit on/off button) ──────────
 
 describe("relay control channel + relay-state event", () => {
@@ -4917,34 +5794,43 @@ describe("relay control channel + relay-state event", () => {
   });
 
   test("rename:<name> renames live (broker re-register + relay swap), process/session survive", async () => {
-    const sendMessage = vi.fn();
-    captureHandler("remote-pi");
-    _setPiForTest(makeSpyPi(sendMessage));
-    await _connectForTest(makeMockCtx());
-    expect(_getState()).toBe("started");
-    expect(_hasMeshNodeForTest()).toBe(true);
+    const cwd = mkdtempSync(join(tmpdir(), "pi-control-rename-"));
+    const cwdSpy = vi.spyOn(process, "cwd").mockReturnValue(cwd);
+    vi.stubEnv("REMOTE_PI_DIRECT_CONFIG", undefined);
+    try {
+      const sendMessage = vi.fn();
+      captureHandler("remote-pi");
+      _setPiForTest(makeSpyPi(sendMessage));
+      await _connectForTest(makeMockCtx(cwd));
+      expect(_getState()).toBe("started");
+      expect(_hasMeshNodeForTest()).toBe(true);
 
-    sendMessage.mockClear();
-    await _handleControl("rename:Renamed");
+      sendMessage.mockClear();
+      await _handleControl("rename:Renamed");
 
-    // The mesh node + relay survive (no process restart); relay back up.
-    expect(_hasMeshNodeForTest()).toBe(true);
-    expect(_getState()).toBe("started");
-    // Cockpit is told the new effective name via remote-pi:name-assigned.
-    const ev = sendMessage.mock.calls
-      .map((c) => c[0] as { customType?: string; display?: boolean; details?: Record<string, unknown> })
-      .reverse()
-      .find((m) => m?.customType === "remote-pi:name-assigned");
-    expect(ev).toBeDefined();
-    expect(ev!.display).toBe(false);
-    expect(ev!.details).toMatchObject({ requested: "Renamed", assigned: "Renamed", changed: false });
+      // The mesh node + relay survive (no process restart); relay back up.
+      expect(_hasMeshNodeForTest()).toBe(true);
+      expect(_getState()).toBe("started");
+      // Cockpit is told the new effective name via remote-pi:name-assigned.
+      const ev = sendMessage.mock.calls
+        .map((c) => c[0] as { customType?: string; display?: boolean; details?: Record<string, unknown> })
+        .reverse()
+        .find((m) => m?.customType === "remote-pi:name-assigned");
+      expect(ev).toBeDefined();
+      expect(ev!.display).toBe(false);
+      expect(ev!.details).toMatchObject({ requested: "Renamed", assigned: "Renamed", changed: false });
 
-    // Clean up: rename churns the real UDS broker (leave+rejoin) and leaves the
-    // mesh/relay live — tear down so it can't leak into later tests (an orphaned
-    // broker socket makes a subsequent bind flaky).
-    const stop = captureHandler("remote-pi stop");
-    await stop("", makeMockCtx());
-    _resetCwdLockForTest();
+      // Clean up: rename churns the real UDS broker (leave+rejoin) and leaves the
+      // mesh/relay live — tear down so it can't leak into later tests (an orphaned
+      // broker socket makes a subsequent bind flaky).
+    } finally {
+      const stop = captureHandler("remote-pi stop");
+      await stop("", makeMockCtx(cwd));
+      _resetCwdLockForTest();
+      cwdSpy.mockRestore();
+      vi.unstubAllEnvs();
+      rmSync(cwd, { recursive: true, force: true });
+    }
   });
 
   test("empty rename is a no-op", async () => {

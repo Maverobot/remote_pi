@@ -1,4 +1,4 @@
-import type { LocalConfig } from "./local_config.js";
+import { sanitizeSegment, type LocalConfig } from "./local_config.js";
 
 /**
  * Pi SDK UI surface needed by the wizard. Subset of `ExtensionUIContext` —
@@ -45,12 +45,17 @@ export async function runSetupWizard(
   ui: WizardUI,
   defaults: WizardDefaults,
 ): Promise<LocalConfig | null> {
-  const agent_name = await _askText(
+  const rawName = await _askText(
     ui,
     "Agent name:",
     defaults.agent_name,
   );
-  if (agent_name === null) return null;
+  if (rawName === null) return null;
+  const agent_name = sanitizeSegment(rawName);
+  if (!agent_name) {
+    ui.notify?.("Choose a non-reserved mesh name.", "error");
+    return null;
+  }
 
   ui.notify?.(
     "The relay forwards encrypted messages to the Remote Pi mobile app and other PCs in your mesh. Skip this if you only want a local-only mesh on this machine.",

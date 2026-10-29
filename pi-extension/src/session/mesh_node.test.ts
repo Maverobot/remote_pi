@@ -60,6 +60,8 @@ const peerHarness = vi.hoisted(() => {
     role: "leader" | "follower";
     broker: object | null;
     readonly reconnectHandlers = new Set<() => void>();
+    readonly onReconnectRejected = vi.fn(() => () => undefined);
+    isConnected(): boolean { return true; }
     readonly start = vi.fn(async () => this.assignedName);
     readonly send = vi.fn(async () => undefined);
     readonly sendWithAck = vi.fn(async () => ({ status: "received", id: "ack" }));

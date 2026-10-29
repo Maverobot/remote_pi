@@ -417,9 +417,25 @@ Useful commands:
 | `/remote-pi rename <new>` | Rename this agent in the current session |
 | `/remote-pi stop` | Leave the local mesh and disconnect the relay |
 
-Name collisions inside a session get a numeric suffix automatically
-(`backend`, `backend#2`, `backend#3`). The broker assigns it and returns the
-real name to the peer.
+Interactive name collisions get a runtime suffix (`backend`, `backend#2`,
+`backend#3`); the suffix is not saved in configuration. Supervised daemons
+refuse collisions rather than replacing another live peer.
+
+`rename` saves the requested name and transfers its reservation. If connected,
+it briefly rejoins the mesh and restarts an active relay; if stopped, it stays
+stopped. Ordinary `stop` retains the reservation for reconnect. Changes made
+through setup or directly in local config apply on the next `/remote-pi`, even
+when already connected. Pairing and revocation also apply pending name changes
+when they bootstrap the relay. A rename masked by `REMOTE_PI_DIRECT_CONFIG` is rejected;
+update that inline configuration instead. If registration or persistence fails
+after disconnecting, the agent reports the failure and retains its previous
+reservation. Correct the error and run `/remote-pi` to retry.
+
+Automatic reconnect requests the reserved effective name. If the broker assigns
+a different name, the client stops communicating under that unowned new name
+and disconnects mesh and relay. The old reservation stays held; run `/remote-pi`
+to retry. The broker may briefly advertise the registration before the client
+rejects it.
 
 ---
 

@@ -107,6 +107,11 @@ function directConfig(): LocalConfig | null {
   return parseLocalConfig(raw);
 }
 
+/** Whether a parseable inline object masks the entire on-disk config. */
+export function hasDirectConfig(): boolean {
+  return directConfig() !== null;
+}
+
 /**
  * True when a local config is available for this cwd — either inline via
  * `REMOTE_PI_DIRECT_CONFIG` or as `<cwd>/.pi/remote-pi/config.json` on disk.
@@ -130,7 +135,8 @@ export function loadLocalConfig(cwd: string): LocalConfig {
   }
 }
 
-export function saveLocalConfig(cwd: string, patch: Partial<LocalConfig>): void {
+/** Best-effort, nonthrowing write. False lets explicit operations report failure. */
+export function saveLocalConfig(cwd: string, patch: Partial<LocalConfig>): boolean {
   const p = pathFor(cwd);
   const current = loadLocalConfig(cwd);
   const next: LocalConfig = { ...current, ...patch };
@@ -138,20 +144,17 @@ export function saveLocalConfig(cwd: string, patch: Partial<LocalConfig>): void 
   // never need to guess. Backward-compat: legacy files without the field
   // are treated as true on read; we lock that intent in on first save.
   if (typeof next.auto_start_relay !== "boolean") next.auto_start_relay = true;
-  // Best-effort persistence: a read-only config.json is a legitimate deployment
-  // (NixOS/Home Manager symlink into the immutable Nix store, read-only root,
-  // EPERM). The name/config sync is cosmetic — it must NEVER crash the pi
-  // process with an uncaughtException. `saveLocalConfig` is reached via
-  // fire-and-forget async paths (`void _syncNameFromPi()` from `turn_start` /
-  // `session_start`), so a sync throw from `mkdirSync`/`writeFileSync` sails
-  // past the runner's per-handler try/catch and takes down pi. Guard both fs
-  // calls together so a partial attempt can't throw past the caller.
+  // Read-only config is a legitimate deployment (e.g. a Nix store symlink).
+  // Keep best-effort callers nonthrowing; explicit name changes check the
+  // result and effective readback before committing runtime ownership.
   try {
     mkdirSync(dirname(p), { recursive: true });
     writeFileSync(p, JSON.stringify(next, null, 2));
+    return true;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`[remote-pi] could not persist local config ${p}: ${message}`);
+    return false;
   }
 }
 

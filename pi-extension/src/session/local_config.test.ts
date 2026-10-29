@@ -144,8 +144,14 @@ describe("saveLocalConfig — unaffected by env (still writes the file)", () => 
   });
 
   test("auto_start_relay defaults to true on save", () => {
-    saveLocalConfig(cwd, { agent_name: "saved" });
+    expect(saveLocalConfig(cwd, { agent_name: "saved" })).toBe(true);
     delete process.env[ENV]; // ensure we read the file back, not any env
     expect(loadLocalConfig(cwd)).toEqual({ agent_name: "saved", auto_start_relay: true });
+  });
+
+  test("an unwritable config target returns false without throwing", () => {
+    mkdirSync(join(cwd, ".pi", "remote-pi", "config.json"), { recursive: true });
+    expect(saveLocalConfig(cwd, { agent_name: "unsaved" })).toBe(false);
+    expect(loadLocalConfig(cwd)).toEqual({});
   });
 });

@@ -95,6 +95,7 @@ import {
   sessionSockPath,
   skillsDir,
 } from "./session/global_config.js";
+import { sanitizeMeshName } from "./session/broker.js";
 import { acquireCwdLock, type AcquiredLock } from "./session/cwd_lock.js";
 import { addDaemon, listDaemons, removeDaemon } from "./daemon/registry.js";
 import { callSupervisor, supervisorOnline, SupervisorOfflineError } from "./daemon/client.js";
@@ -104,6 +105,8 @@ import { installService, uninstallService, linkCliBinaries, unlinkCliBinaries, L
 import {
   defaultAgentName,
   effectiveAutoStartRelay,
+  hasDirectConfig,
+  sanitizeSegment,
   loadLocalConfig,
   localConfigExists,
   saveLocalConfig,
@@ -219,6 +222,15 @@ function _isStrictBase64(data: string): boolean {
   }
 
   return true;
+}
+
+// Initial starts and reconnects are local until their handshake completes.
+// Identity retirement must close these too, even while _state is still idle.
+const _pendingRelayCandidates = new Set<RelayClient>();
+
+function _closePendingRelayCandidate(relay: RelayClient): void {
+  if (!_pendingRelayCandidates.delete(relay)) return;
+  try { relay.close(); } catch { /* best-effort candidate cleanup */ }
 }
 
 let _myRoomId: string | null = null;   // this Pi's room id (derived from cwd)
@@ -1002,8 +1014,7 @@ function _maybeDrainQueuedItem(): void {
  */
 export async function _connectForTest(ctx: unknown): Promise<void> {
   const real = ctx as Parameters<typeof _cmdJoin>[0];
-  await _cmdJoin(real);
-  await _cmdStart(real);
+  if (await _cmdJoin(real)) await _cmdStart(real);
 }
 
 /** Test-only: tear everything down (mirrors `/remote-pi stop`). */
@@ -1044,6 +1055,8 @@ export function _resetCwdLockForTest(): void {
   try { _cwdLock?.release(); } catch { /* ignored */ }
   _cwdLock = null;
   _lockedName = null;
+  _lockedRoomId = null;
+  _lockedRequestedName = null;
 }
 
 /**
@@ -1157,17 +1170,30 @@ let _selfRevokeEpoch = 0;
 let _selfRevokeTopologyReadyEpoch = -1;
 let _selfRevokeTopology: MeshTopologySnapshot | null = null;
 
-// Per-cwd lock acquired by the first `/remote-pi` invocation in this
-// process. Holds the UDS socket open until the process exits (OS auto-
-// releases on crash too). Stays held across `/remote-pi stop` cycles —
-// only released when the Node process itself dies.
+// Committed reservation survives ordinary stop; rename/reconciliation transfers
+// it only after the new registration and explicit persistence have succeeded.
 let _cwdLock: AcquiredLock | null = null;
-// Effective mesh name this instance locked. Equals the configured/derived name,
-// OR a `#N`-suffixed variant when another agent already holds that (cwd, name)
-// in this folder (same-name agents coexist instead of being refused). `_cmdJoin`
-// registers under this name; the broker confirms it (and may bump it again under
-// a live race). Null until the lock is acquired.
 let _lockedName: string | null = null;
+let _lockedRoomId: string | null = null;
+// User intent is separate from the effective name (which may end in #N).
+let _lockedRequestedName: string | null = null;
+let _nameOperation: Promise<void> = Promise.resolve();
+// Only the phase that can own provisional locks/connections, not wizard input,
+// queued commands, or post-commit relay startup. Awaited shutdown drains it.
+let _activeNameResources: Promise<void> | null = null;
+// Unpublished peers may be waiting for an ACK. Stop/shutdown can now cancel
+// their drained connection attempts instead of waiting for the ACK timeout.
+const _meshCandidates = new Map<MeshNode, () => Promise<void>>();
+
+async function _closeMeshCandidates(): Promise<void> {
+  await Promise.all([..._meshCandidates.values()].map((close) => close().catch(() => undefined)));
+}
+
+function _serializeNameOperation(run: () => Promise<void>): Promise<void> {
+  const next = _nameOperation.then(run);
+  _nameOperation = next.catch(() => undefined);
+  return next;
+}
 
 // ── Session sync limit (mirror cache cap) ─────────────────────────────────────
 //
@@ -1307,6 +1333,7 @@ function _detachPeerChannel(appPeerId: string): void {
  */
 function _displayName(cwd: string): string {
   if (_meshNode) return _meshNode.name();
+  if (_lockedName !== null && _lockedRoomId === roomIdFor(cwd, _lockedName)) return _lockedName;
   const local = loadLocalConfig(cwd);
   return local.agent_name || defaultAgentName(cwd);
 }
@@ -1428,9 +1455,14 @@ async function _findKnownPeer(appPeerIdStd: string): Promise<PeerRecord | null> 
  * if the WS already failed (e.g., `relay.on("close")` callback) skip it
  * by omitting the reason; app falls back to ping miss naturally.
  */
-function _goIdle(byeReason?: import("./protocol/types.js").ByeReason): void {
-  _rootLifecycleGeneration += 1;
+function _goIdle(
+  byeReason?: import("./protocol/types.js").ByeReason,
+  invalidateRoot = true,
+): void {
+  // Internal room recycling keeps the serialized name operation's authority.
+  if (invalidateRoot) _rootLifecycleGeneration += 1;
   _relayLifecycleGeneration += 1;
+  for (const relay of _pendingRelayCandidates) _closePendingRelayCandidate(relay);
 
   // Broadcast bye to every still-attached owner so each app surfaces
   // "offline" immediately instead of waiting ~50s for a ping miss.
@@ -1586,6 +1618,7 @@ async function _attemptReconnect(
   // WS boundary, same as _cmdStart.
   const relay = new RelayClient(toWebSocketUrl(url), edKp);
 
+  _pendingRelayCandidates.add(relay);
   try {
     // Replay the same room identity from _cmdStart. Without this the relay
     // would log this WS as a default-room peer and the app would see a
@@ -1597,17 +1630,18 @@ async function _attemptReconnect(
   } catch {
     // A reconnect candidate stays local until publication; every rejected
     // candidate is deterministically closed before stale-return or retry.
-    try { relay.close(); } catch { /* best-effort rejected candidate cleanup */ }
+    _closePendingRelayCandidate(relay);
     if (!_isCurrentReconnect(lifecycleGeneration, url)) return;
     _scheduleReconnect(lifecycleGeneration, url);
     return;
   }
 
   if (!_isCurrentReconnect(lifecycleGeneration, url)) {
-    try { relay.close(); } catch { /* best-effort stale candidate cleanup */ }
+    _closePendingRelayCandidate(relay);
     return;
   }
 
+  _pendingRelayCandidates.delete(relay);
   _relay = relay;
   _reconnectAttempt = 0;
 
@@ -1734,54 +1768,191 @@ export async function _handleControl(cmd: string): Promise<void> {
   }
 }
 
-/**
- * Rename the agent LIVE (plan/38/41), without restarting the process or losing
- * the SDK session/conversation. Touches two layers:
- *   1. **Broker (mesh)**: `MeshNode.rename` does a soft leave+rejoin → new
- *      address `<cwd>@<newName>` (broker may add `#N` on a same-(cwd,name)
- *      collision — we use the assigned result).
- *   2. **Relay room (App↔Pi)**: the room is keyed by `(cwd, name)`, so the new
- *      name = a new room. We cycle the relay (`_goIdle` → `_cmdStart`) so the
- *      room follows; the app re-keys the conversation onto the new tile (the
- *      inherent cost of room-per-name). Skipped when the relay was off.
- * Finally re-emits `remote-pi:name-assigned` so the Cockpit updates its label.
- *
- * The explicit name IS persisted (decision E only skips the runtime `#N`).
- */
-async function _renameAgent(newName: string): Promise<void> {
-  if (!newName) return;  // empty rename → no-op
-  const ctx = _controlCtx();
-  const cwd = process.cwd();
-  saveLocalConfig(cwd, { agent_name: newName });
-
-  if (!_meshNode) {
-    // Not on the mesh yet — config persisted; applies on the next join.
-    return;
-  }
-
-  // Relay room is derived from the name → cycle it so it follows. Tear down
-  // first (also detaches the bridge) so the broker re-register below starts
-  // clean; bring it back up after with the new name.
-  const wasStarted = _getState() !== "idle";
-  if (wasStarted) _goIdle("peer_stop");
-
-  let assigned = newName;
-  try {
-    assigned = await _meshNode.rename(newName);  // broker soft rejoin
-  } catch (err) {
-    ctx.ui.notify(`[remote-pi] rename failed: ${String(err)}`, "error");
-  }
-
-  if (wasStarted && !_disposed) await _cmdStart(ctx);  // relay back up → roomIdFor(cwd, assigned)
-
-  _pi?.sendMessage({
-    customType: "remote-pi:name-assigned",
-    content: assigned === newName
-      ? `Mesh name: ${assigned}`
-      : `Mesh name reassigned: "${newName}" → "${assigned}" (collision)`,
-    details: { requested: newName, assigned, changed: assigned !== newName },
-    display: false,
+/** Rename intent and real ownership together; never start a stopped mesh. */
+async function _renameAgent(
+  newName: string,
+  ctx: Pick<ExtensionContext, "ui" | "cwd"> = _controlCtx(),
+): Promise<void> {
+  if (!newName) return;
+  const generation = _rootLifecycleGeneration;
+  await _serializeNameOperation(async () => {
+    if (!_isCurrentRootLifecycle(generation)) return;
+    const requestedName = sanitizeSegment(newName);
+    if (!requestedName) {
+      ctx.ui.notify("[remote-pi] rename failed: choose a non-reserved mesh name.", "error");
+      return;
+    }
+    try {
+      await _reconcileName(ctx, requestedName, generation, true, _meshNode !== null);
+    } catch (err) {
+      if (_isCurrentRootLifecycle(generation)) {
+        ctx.ui.notify(`[remote-pi] rename failed: ${String(err)}`, "error");
+      }
+    }
   });
+}
+
+function _canonicalCwd(cwd: string): string {
+  try { return realpathSync(cwd); } catch { return cwd; }
+}
+
+function _configuredName(cwd: string): string {
+  return loadLocalConfig(cwd).agent_name || defaultAgentName(cwd);
+}
+
+function _persistName(cwd: string, requestedName: string): void {
+  if (!saveLocalConfig(cwd, { agent_name: requestedName }) ||
+      loadLocalConfig(cwd).agent_name !== requestedName) {
+    throw new Error("could not persist the requested agent name");
+  }
+}
+
+/**
+ * Reserve before disconnecting. Until the synchronous commit, the old lock is
+ * authoritative and every candidate is local to this operation. A failed rejoin
+ * leaves us disconnected with the old reservation, not falsely rolled back.
+ */
+async function _reconcileName(
+  ctx: Pick<ExtensionContext, "ui" | "cwd">,
+  requestedName: string,
+  generation: number,
+  persist: boolean,
+  connect: boolean,
+): Promise<boolean> {
+  const isCurrent = () => _isCurrentRootLifecycle(generation);
+  if (!isCurrent()) return false;
+  const cwd = ctx.cwd;
+  if (persist && hasDirectConfig() && loadLocalConfig(ctx.cwd).agent_name !== requestedName) {
+    throw new Error("REMOTE_PI_DIRECT_CONFIG masks this rename; update the inline configuration instead");
+  }
+  if (!connect && !_cwdLock) {
+    if (persist) {
+      _persistName(ctx.cwd, requestedName);
+      const wasStarted = _state !== "idle";
+      _goIdle("peer_stop", false);
+      if (wasStarted && isCurrent()) await _cmdStart(ctx);
+    }
+    return true;
+  }
+
+  const oldLock = _cwdLock;
+  const sameIntent = oldLock !== null && _lockedName !== null &&
+    _lockedRoomId === roomIdFor(cwd, _lockedName) && _lockedRequestedName === requestedName;
+  const sameRegistration = _meshNode !== null && _meshNode.isConnected() && _meshNode.name() === _lockedName;
+  if (sameIntent && (!connect || sameRegistration)) {
+    if (persist) _persistName(ctx.cwd, requestedName);
+    return true;
+  }
+
+  let resolveResources!: () => void;
+  const resources = new Promise<void>((resolve) => { resolveResources = resolve; });
+  _activeNameResources = resources;
+  const finishResources = () => {
+    if (_activeNameResources === resources) _activeNameResources = null;
+    resolveResources();
+  };
+  const provisional = new Set<AcquiredLock>();
+  const reserve = async (name: string): Promise<AcquiredLock | null> => {
+    if (oldLock && _lockedRoomId === roomIdFor(cwd, name)) return oldLock;
+    const result = await acquireCwdLock(cwd, name);
+    if (result.ok) provisional.add(result);
+    return result.ok ? result : null;
+  };
+  let candidate: Awaited<ReturnType<typeof _connectMeshCandidate>> = null;
+  try {
+    let effectiveName = sameIntent ? _lockedName! : sanitizeMeshName(requestedName);
+    let targetLock = sameIntent ? oldLock : null;
+    const isDaemon = process.env["REMOTE_PI_DAEMON"] === "1";
+    for (let n = 1; !targetLock && n <= (isDaemon ? 1 : 1000); n++) {
+      effectiveName = n === 1 ? sanitizeMeshName(requestedName) : `${sanitizeMeshName(requestedName)}#${n}`;
+      targetLock = await reserve(effectiveName);
+      if (!isCurrent()) return false;
+    }
+    if (!targetLock) {
+      ctx.ui.notify(isDaemon
+        ? `[remote-pi] Daemon not started: another live agent already owns "${requestedName}" in this folder.`
+        : `[remote-pi] Could not reserve a name for "${requestedName}".`, "warning");
+      return false;
+    }
+
+    // An external edit during reservation remains pending for the next explicit
+    // command; never overwrite it or commit an obsolete desired name.
+    if (!persist && _configuredName(ctx.cwd) !== requestedName) return false;
+    const wasStarted = _state !== "idle";
+    try {
+      // Idle does not mean no relay handshake is in flight. Retire every
+      // old-identity producer before changing registration or reservation.
+      _goIdle("peer_stop", false);
+      if (connect) {
+        const oldNode = _meshNode;
+        _meshNode = null;
+        _sessionName = null;
+        _sessionPeerCount = 0;
+        if (oldNode) await oldNode.close();
+        if (!isCurrent()) return false;
+        candidate = await _connectMeshCandidate(ctx, effectiveName, isCurrent);
+        if (!candidate || !isCurrent()) return false;
+        if (!candidate.peer.isConnected() || candidate.peer.name() !== candidate.assigned) {
+          throw new Error("mesh candidate identity changed before commit. Run /remote-pi to retry.");
+        }
+        if (candidate.assigned !== effectiveName) {
+          const exactLock = await reserve(candidate.assigned);
+          if (!isCurrent() || !candidate.isCurrent()) return false;
+          if (!exactLock) throw new Error(`assigned name "${candidate.assigned}" is already locked`);
+          targetLock = exactLock;
+          effectiveName = candidate.assigned;
+        }
+      }
+      if (!isCurrent() || (candidate && !candidate.isCurrent())) return false;
+      if (!persist && _configuredName(ctx.cwd) !== requestedName) {
+        throw new Error("configured name changed during connection; run /remote-pi again");
+      }
+      if (persist && hasDirectConfig() && loadLocalConfig(ctx.cwd).agent_name !== requestedName) {
+        throw new Error("REMOTE_PI_DIRECT_CONFIG changed during rename");
+      }
+      // The ACK snapshot may have gone stale while acquiring its exact lock.
+      // Validate and pin the live identity synchronously with persistence and
+      // ownership handoff; never adopt a different pre-commit reconnect name.
+      if (candidate) {
+        if (!candidate.peer.isConnected() || candidate.peer.name() !== candidate.assigned) {
+          throw new Error("mesh candidate identity changed before commit. Run /remote-pi to retry.");
+        }
+        candidate.peer.pinAssignedName();
+      }
+      if (persist) _persistName(ctx.cwd, requestedName);
+
+      // No await between checked persistence and ownership/publication commit.
+      _cwdLock = targetLock;
+      _lockedName = effectiveName;
+      _lockedRoomId = roomIdFor(cwd, effectiveName);
+      _lockedRequestedName = requestedName;
+      provisional.delete(targetLock);
+      if (oldLock && oldLock !== targetLock) oldLock.release();
+      for (const lock of provisional) lock.release();
+      provisional.clear();
+      if (candidate) {
+        const committed = candidate;
+        candidate = null;
+        _publishMesh(committed.peer, committed.assigned, requestedName, ctx);
+      }
+      finishResources();
+      if (wasStarted && isCurrent()) {
+        try { await _cmdStart(ctx); } catch (err) {
+          if (isCurrent()) ctx.ui.notify(`[remote-pi] Name changed, but relay restart failed: ${String(err)}`, "error");
+        }
+      }
+      return true;
+    } catch (err) {
+      if (isCurrent()) ctx.ui.notify(`[remote-pi] name change failed: ${String(err)}`, "error");
+      return false;
+    }
+  } finally {
+    // Stop/shutdown may already be closing this unpublished candidate. Reuse
+    // its drained close before releasing any remaining provisional locks.
+    if (candidate) { try { await candidate.close(); } catch { /* best-effort */ } }
+    for (const lock of provisional) lock.release();
+    finishResources();
+  }
 }
 
 /**
@@ -2497,6 +2668,8 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     _rootLifecycleGeneration += 1;
     _relayLifecycleGeneration += 1;
     _meshJoinGeneration += 1;
+    const nameResources = _activeNameResources;
+    const candidateCloses = _closeMeshCandidates();
     // The bridge owns live pi.events subscriptions + pending flows. Dispose before
     // the outgoing session is replaced so stale listeners cannot leak or
     // double-broadcast. session_start rebinds it on module-reuse hosts; fresh
@@ -2529,12 +2702,17 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     let meshClose: Promise<void> | null = null;
     try { meshClose = meshNode?.close() ?? null; } catch { /* best-effort */ }
 
-    if (_cwdLock) {
-      try { _cwdLock.release(); } catch { /* best-effort */ }
-      _cwdLock = null;
-      _lockedName = null;
-    }
+    const lock = _cwdLock;
+    _cwdLock = null;
+    _lockedName = null;
+    _lockedRoomId = null;
+    _lockedRequestedName = null;
     try { await meshClose; } catch { /* best-effort */ }
+    // A candidate must finish closing before either its provisional locks or
+    // the outgoing committed reservation can be released to a fresh module.
+    await candidateCloses;
+    await nameResources;
+    try { lock?.release(); } catch { /* best-effort */ }
   });
 
   // ── Commands ──────────────────────────────────────────────────────────────
@@ -2584,7 +2762,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
       else if (sub.startsWith("set-relay"))      { _cmdSetRelay(sub.slice("set-relay".length).trim(), ctx); }
       else if (sub === "relay" || sub.startsWith("relay ")) { await _cmdRelay(sub.slice("relay".length).trim(), ctx); }
       else if (sub === "config")                 { _cmdConfig(ctx); }
-      else if (sub === "rename" || sub.startsWith("rename ")) { await _renameAgent(sub.slice("rename".length).trim()); }
+      else if (sub === "rename" || sub.startsWith("rename ")) { await _renameAgent(sub.slice("rename".length).trim(), ctx); }
       else if (sub === "peers")                  { await _cmdPeers(ctx); }
       else if (sub.startsWith("create"))         { await _cmdCreate(sub.slice("create".length).trim(), ctx); }
       else if (sub.startsWith("remove"))         { await _cmdRemove(sub.slice("remove".length).trim(), ctx); }
@@ -2609,7 +2787,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   pi.registerCommand("remote-pi stop",     { description: "Stop everything (leave local mesh + disconnect relay)", handler: async (_, ctx) => { _lastCtx = ctx; await _cmdStop(ctx); } });
   pi.registerCommand("remote-pi pair",     { description: "Show a QR code to pair a new mobile device (optional: --ttl <seconds>)", handler: async (args, ctx) => { _lastCtx = ctx; await _cmdPair(ctx, args.trim()); } });
   pi.registerCommand("remote-pi devices",  { description: "List paired mobile devices", handler: async (_, ctx) => { _lastCtx = ctx; await _cmdList(ctx); } });
-  pi.registerCommand("remote-pi rename",  { description: "Rename this agent in the current session (updates mesh + relay room)", handler: async (args, ctx) => { _lastCtx = ctx; await _renameAgent(args.trim()); } });
+  pi.registerCommand("remote-pi rename",  { description: "Rename this agent in the current session (updates mesh + relay room)", handler: async (args, ctx) => { _lastCtx = ctx; await _renameAgent(args.trim(), ctx); } });
   pi.registerCommand("remote-pi revoke", {
     description: "Revoke a paired device by its shortid",
     getArgumentCompletions: async (prefix) => _shortidCompletions(prefix),
@@ -2752,15 +2930,11 @@ async function _cmdRoot(
       if (!restartAuthority) throw err;
     }
     if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
-    if (!restartAuthority) {
-      _cmdStatus(ctx);
-      return;
-    }
   }
 
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
 
-  const run = _cmdRootInner(ctx, rootLifecycleGeneration);
+  const run = _serializeNameOperation(() => _cmdRootInner(ctx, rootLifecycleGeneration));
   _cmdRootInFlight = run;
   try {
     await run;
@@ -2778,52 +2952,17 @@ async function _cmdRootInner(
   // clears while an outgoing continuation may still be pending.
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
 
-  const cwd = "cwd" in ctx ? (ctx as ExtensionCommandContext).cwd : process.cwd();
-  // Lock identity is (cwd, name). Several agents may run in the SAME folder; the
-  // requested name just has to be made unique. Derive the name the same way
-  // `_cmdJoin` does so the lock and the mesh registration agree on identity.
-  const requestedName = loadLocalConfig(cwd).agent_name || defaultAgentName(cwd);
-
-  // Per-(cwd,name) lock. Interactive agents may coexist by auto-suffixing
-  // (`name#2`, `name#3`, …), but supervised daemons must be singletons for their
-  // registered cwd/name. If a daemon silently came up as `#2`, the supervisor
-  // would report "running" while the mesh had duplicate peers for one repo.
-  if (_cwdLock === null) {
-    const isDaemon = process.env["REMOTE_PI_DAEMON"] === "1";
-    const maxAttempts = isDaemon ? 1 : 1000;
-    for (let n = 1; n <= maxAttempts; n++) {
-      const candidate = n === 1 ? requestedName : `${requestedName}#${n}`;
-      const result = await acquireCwdLock(cwd, candidate);
-      if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) {
-        if (result.ok) {
-          try { result.release(); } catch { /* best-effort stale lock cleanup */ }
-        }
-        return;
-      }
-      if (result.ok) { _cwdLock = result; _lockedName = candidate; break; }
-    }
-    if (_cwdLock === null) {
-      if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
-      ctx.ui.notify(
-        process.env["REMOTE_PI_DAEMON"] === "1"
-          ? `[remote-pi] Daemon not started: another live agent already owns "${requestedName}" in this folder. Stop the old Pi process, then restart the daemon.`
-          : `[remote-pi] Could not start: too many agents named "${requestedName}" already running in this folder.`,
-        "warning",
-      );
-      return;
-    }
-  }
-
-  // First-time wizard: no local config in this cwd → run interactive setup.
+  const cwd = ctx.cwd;
+  // Resolve wizard intent before locking; cancellation must not reserve the
+  // default folder name or force a later join to use it.
   if (!localConfigExists(cwd)) {
     const ui = ctx.ui as unknown as WizardUI;
     if (typeof ui.select !== "function") {
       _cmdStatus(ctx);
       return;
     }
-    const baseDefault = defaultAgentName(cwd);
     const newConfig = await runSetupWizard(ui, {
-      agent_name: baseDefault,
+      agent_name: defaultAgentName(cwd),
       use_relay: true,
     });
     if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
@@ -2831,32 +2970,17 @@ async function _cmdRootInner(
       ctx.ui.notify("[remote-pi] Setup cancelled.", "info");
       return;
     }
-    saveLocalConfig(cwd, newConfig);
-    ctx.ui.notify(
-      `[remote-pi] Config saved to ${cwd}/.pi/remote-pi/config.json`,
-      "info",
-    );
-    if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
-    await _cmdJoin(ctx);
-    if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
-    if (effectiveAutoStartRelay(newConfig)) await _cmdStart(ctx);
-    if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
-    _cmdStatus(ctx);
-    return;
+    if (!saveLocalConfig(cwd, newConfig) || loadLocalConfig(cwd).agent_name !== newConfig.agent_name) {
+      ctx.ui.notify("[remote-pi] Could not persist setup configuration.", "error");
+      return;
+    }
+    ctx.ui.notify(`[remote-pi] Config saved to ${cwd}/.pi/remote-pi/config.json`, "info");
   }
 
-  // Returning user with config: ALWAYS join the local UDS mesh on connect; the
-  // relay is the only thing gated by auto_start_relay. So auto_start_relay:false
-  // now means "local mesh, no relay" (matching the first-time/wizard path and
-  // the field's documented intent) — previously a false flag skipped the mesh
-  // join entirely, leaving the agent (incl. daemons) fully idle.
-  const config = loadLocalConfig(cwd);
-  if (!_isCurrentRootLifecycle(rootLifecycleGeneration)) return;
-  if (!_meshNode) await _cmdJoin(ctx);
-  // `_cmdJoin` returns void on a canceled/failed join, so recheck both the
-  // root lifecycle and publication before bringing the Relay up.
+  const requestedName = _configuredName(cwd);
+  if (!await _reconcileName(ctx, requestedName, rootLifecycleGeneration, false, true)) return;
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
-  if (effectiveAutoStartRelay(config) && _state === "idle") await _cmdStart(ctx);
+  if (effectiveAutoStartRelay(loadLocalConfig(cwd)) && _state === "idle") await _cmdStart(ctx);
   if (!_isCurrentRootLifecycle(rootLifecycleGeneration) || !_meshNode) return;
   _cmdStatus(ctx);
 }
@@ -2890,6 +3014,10 @@ async function _cmdSetup(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
 }
 
 async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
+  if (_activeNameResources !== null) {
+    ctx.ui.notify("[remote-pi] Name change in progress. Run /remote-pi to retry.", "warning");
+    return;
+  }
   if (_state !== "idle") {
     ctx.ui.notify("[remote-pi] Already started.", "warning");
     return;
@@ -2898,6 +3026,7 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   const isCurrentCandidate = (): boolean => (
     !_disposed &&
     lifecycleGeneration === _relayLifecycleGeneration &&
+    _activeNameResources === null &&
     _state === "idle" &&
     _relay === null
   );
@@ -3027,12 +3156,13 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   // form to ws(s):// at this boundary. The relayUrl variable keeps the
   // http(s):// form for logging + mesh client construction below.
   const relay = new RelayClient(toWebSocketUrl(relayUrl), edKp);
+  _pendingRelayCandidates.add(relay);
   try {
     await relay.connect({ roomId, roomMeta });
   } catch (err) {
     // A rejected local candidate is never published and must always be closed,
     // regardless of whether this lifecycle is still authoritative.
-    try { relay.close(); } catch { /* best-effort rejected candidate cleanup */ }
+    _closePendingRelayCandidate(relay);
     // A stop, shutdown/replacement, relay-off, or newer start may supersede a
     // candidate before its rejection arrives. Keep the outgoing context silent;
     // only the authoritative attempt may report an error.
@@ -3052,10 +3182,11 @@ async function _cmdStart(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<voi
   // stop/relay-off, or a newer start may have invalidated it while connect()
   // was pending; never let that stale continuation resurrect the Relay.
   if (!isCurrentCandidate()) {
-    try { relay.close(); } catch { /* best-effort stale candidate cleanup */ }
+    _closePendingRelayCandidate(relay);
     return;
   }
 
+  _pendingRelayCandidates.delete(relay);
   _relay = relay;
   _relayUrl = relayUrl;
   _peerShort = myShort;
@@ -3190,8 +3321,10 @@ async function _cmdPair(ctx: Pick<ExtensionContext, "ui" | "cwd">, args = ""): P
       return;
     }
     ctx.ui.notify("[remote-pi] Starting mesh + relay before pairing…", "info");
-    if (!_meshNode) await _cmdJoin(ctx);
+    const generation = _rootLifecycleGeneration;
+    if (!await _cmdJoin(ctx) || !_isCurrentRootLifecycle(generation)) return;
     if (_state === "idle") await _cmdStart(ctx);
+    if (!_isCurrentRootLifecycle(generation)) return;
   }
 
   // Relay must be up — the QR carries a token the app exchanges through
@@ -3258,10 +3391,12 @@ async function _cmdStop(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
   // published yet.
   _rootLifecycleGeneration += 1;
   _meshJoinGeneration += 1;
+  const candidateCloses = _closeMeshCandidates();
   const meshUp = _meshNode !== null;
   const relayUp = _state !== "idle";
   if (!meshUp && !relayUp) {
     _relayLifecycleGeneration += 1;
+    await candidateCloses;
     ctx.ui.notify("[remote-pi] Already stopped — nothing to do.", "info");
     return;
   }
@@ -3283,6 +3418,7 @@ async function _cmdStop(ctx: Pick<ExtensionContext, "ui">): Promise<void> {
   try { meshClose = meshNode?.close() ?? null; } catch { /* best-effort */ }
   try { await meshClose; } catch { /* best-effort */ }
 
+  await candidateCloses;
   ctx.ui.notify("[remote-pi] Stopped (mesh + relay disconnected).", "info");
   _refreshFooter(ctx);
 }
@@ -3327,8 +3463,10 @@ async function _cmdRevoke(arg: string, ctx: Pick<ExtensionContext, "ui" | "cwd">
       return;
     }
     ctx.ui.notify("[remote-pi] Starting mesh + relay before revoking…", "info");
-    if (!_meshNode) await _cmdJoin(ctx);
+    const generation = _rootLifecycleGeneration;
+    if (!await _cmdJoin(ctx) || !_isCurrentRootLifecycle(generation)) return;
     if (_state === "idle") await _cmdStart(ctx);
+    if (!_isCurrentRootLifecycle(generation)) return;
   }
   if (_state === "idle" || !_relay) {
     ctx.ui.notify(
@@ -4397,51 +4535,74 @@ export function _deliverMeshMessageToAgentForTest(env: MeshEnvelope): void {
   _deliverMeshMessageToAgent(env);
 }
 
-/**
- * Joins the fixed local UDS mesh ("local" session — see LOCAL_SESSION_NAME).
- * Called by `_cmdRoot` on first run and on subsequent runs when the relay
- * is up and the user hasn't explicitly stopped. The session name is no
- * longer user-configurable: every Pi on the same machine joins the same
- * broker.
- */
-async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void> {
-  const cwd = "cwd" in ctx ? (ctx as ExtensionCommandContext).cwd : process.cwd();
-  const local = loadLocalConfig(cwd);
-  const sessionName = LOCAL_SESSION_NAME;
-  // What the user configured for this agent…
-  const requestedName = local.agent_name || defaultAgentName(cwd);
-  // …and what we actually register: the name the cwd-lock reserved, which is
-  // `requestedName` or a `#N` variant when same-named agents share this folder.
-  // Falls back to requestedName when join runs without a prior `_cmdRoot` lock
-  // (e.g. legacy/test paths).
-  const agentName = _lockedName ?? requestedName;
+/** Join for pairing/revocation bootstrap paths that do not run explicit root. */
+async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<boolean> {
+  const generation = _rootLifecycleGeneration;
+  let connected = false;
+  await _serializeNameOperation(async () => {
+    if (!_isCurrentRootLifecycle(generation)) return;
+    try {
+      connected = await _reconcileName(ctx, _configuredName(ctx.cwd), generation, false, true);
+    } catch (err) {
+      if (_isCurrentRootLifecycle(generation)) ctx.ui.notify(`[remote-pi] join failed: ${String(err)}`, "error");
+    }
+  });
+  return connected && _isCurrentRootLifecycle(generation) && _meshNode !== null;
+}
 
-  if (_meshNode) {
-    ctx.ui.notify("[remote-pi] Already on the local mesh.", "warning");
-    return;
-  }
+/** Own a fresh unpublished peer until lock-backed commit or drained close. */
+async function _connectMeshCandidate(
+  ctx: Pick<ExtensionContext, "ui" | "cwd">,
+  agentName: string,
+  hasAuthority: () => boolean,
+): Promise<{ peer: MeshNode; assigned: string; isCurrent: () => boolean; close: () => Promise<void> } | null> {
   const joinGeneration = ++_meshJoinGeneration;
-
+  const isCurrent = () => hasAuthority() && joinGeneration === _meshJoinGeneration && _meshNode === null;
+  const cwd = ctx.cwd;
+  const sessionName = LOCAL_SESSION_NAME;
   ensureGlobalDirs();
   mkdirSync(join(skillsDir(), "..", "sessions", sessionName), { recursive: true });
 
   const sock = sessionSockPath(sessionName);
   const audit = sessionAuditPath(sessionName);
-  // Forward the cwd so the broker keys this peer by (cwd, name): a same-folder
-  // same-name reincarnation (switch_session re-eval, app restart) takes over the
-  // name instead of registering behind a mute `name#N` ghost. Canonicalize via
-  // realpath so symlinked cwds map to one identity (matches roomIdForCwd).
-  let canonCwd = cwd;
-  try { canonCwd = realpathSync(cwd); } catch { /* cwd missing — use raw path */ }
   const peer = new MeshNode({
     sockPath: sock,
     name: agentName,
-    cwd: canonCwd,
+    cwd: _canonicalCwd(cwd),
     auditPath: audit,
-    takeoverExisting: process.env["REMOTE_PI_DAEMON"] === "1",
+    // A reservation is not permission to evict an existing broker peer.
+    takeoverExisting: false,
+  });
+
+  let closing: Promise<void> | null = null;
+  const close = (): Promise<void> => {
+    closing ??= peer.close().finally(() => { _meshCandidates.delete(peer); });
+    return closing;
+  };
+  _meshCandidates.set(peer, close);
+
+  peer.onReconnectRejected((error) => {
+    if (_meshNode !== peer) return;
+    _meshJoinGeneration += 1;
+    _goIdle("peer_stop");
+    _safeNotify(
+      `[remote-pi] ${error.message}. Stopped communicating under the unowned new name; ` +
+      "mesh and relay disconnected. Run /remote-pi to retry.",
+      "error",
+    );
+    // Keep this retired node visible to shutdown until its drained close ends.
+    // A newer explicit root can await the same close, then replace it safely.
+    void peer.close().catch(() => undefined).then(() => {
+      if (_meshNode !== peer) return;
+      _meshNode = null;
+      _sessionName = null;
+      _sessionPeerCount = 0;
+      _refreshFooter();
+    });
   });
 
   peer.onMessage((env) => {
+    if (_meshNode !== peer) return;
     const body = env.body as { type?: string } | null;
     // Broker system events: re-query broker for authoritative count.
     // Incremental ±1 drifts when peer_left is missed (leader leaves cleanly,
@@ -4493,70 +4654,49 @@ async function _cmdJoin(ctx: Pick<ExtensionContext, "ui" | "cwd">): Promise<void
   // re-wire against the fresh `localBroker()` if we were promoted to leader)
   // is handled INSIDE MeshNode — no manual teardown/ensure needed here.
   peer.onReconnect(() => {
-    _refreshSessionPeerCount(peer, ctx);
+    if (_meshNode === peer) _refreshSessionPeerCount(peer, ctx);
   });
-
-  const isCurrentCandidate = (): boolean => (
-    !_disposed &&
-    joinGeneration === _meshJoinGeneration &&
-    _meshNode === null
-  );
 
   try {
     const assigned = await peer.connect();
-    // The candidate stays local until connect resolves. Shutdown, stop, or a
-    // newer join invalidates its generation; close it instead of publishing a
-    // ghost peer or allowing _cmdRoot to continue into Relay startup.
-    if (!isCurrentCandidate()) {
-      try { await peer.close(); } catch { /* best-effort */ }
-      return;
+    if (!isCurrent()) {
+      await close();
+      return null;
     }
-    _meshNode = peer;
-    _sessionName = sessionName;
-    _sessionPeerCount = 1;  // optimistic — overwritten by list_peers below
-    // Broker broadcasts `peer_joined` only to existing peers when a new one
-    // arrives — the newcomer doesn't get retroactive joined events. Ask the
-    // broker for the live peer list to seed the count correctly on join.
-    _refreshSessionPeerCount(peer, ctx);
-    // Tell RPC clients (e.g. Cockpit) the EFFECTIVE mesh name. The broker
-    // appends a `#N` suffix only on a same-(cwd,name) collision, so the name we
-    // requested and the one actually assigned can differ. Emit a pure-data event
-    // (display:false) carrying both + a `changed` flag so the client can rename
-    // the agent in its own UI to match what the mesh/relay will show. Fired on
-    // every join (incl. failover re-elect, which can re-assign the name), so the
-    // client always reflects the live name, not just the first one.
-    //
-    // plan/38 decision E: we deliberately DO NOT persist `assigned`. A `#N` is a
-    // RUNTIME collision resolution; freezing it into `agent_name` fossilizes an
-    // accident and causes cross-folder name ping-pong across restarts. The clean
-    // name (wizard / explicit `agent_name`) already lives in config or re-derives
-    // from `basename(cwd)`; the event above carries the live `#N` for the UI.
-    _pi?.sendMessage({
-      customType: "remote-pi:name-assigned",
-      content: assigned === requestedName
-        ? `Mesh name: ${assigned}`
-        : `Mesh name reassigned: "${requestedName}" → "${assigned}" (collision)`,
-      details: { requested: requestedName, assigned, changed: assigned !== requestedName },
-      display: false,
-    });
-    ctx.ui.notify(
-      `[remote-pi] Joined local mesh as "${assigned}" (${peer.currentRole()})`,
-      "info",
-    );
-    _refreshFooter(ctx);
-    // Plan/25 Wave B/C: try to bring up cross-PC routing now that the
-    // local broker exists. No-op if the relay isn't up yet (will fire
-    // again from `_cmdStart`).
-    _attachBridgeIfReady();
+    if (process.env["REMOTE_PI_DAEMON"] === "1" && assigned !== agentName) {
+      throw new Error("Daemon not started: broker assigned a different name");
+    }
+    return { peer, assigned, isCurrent, close };
   } catch (err) {
-    // A replacement/stop/newer join can invalidate this candidate before its
-    // failure arrives. Clean it up and never notify the outgoing session ctx.
-    if (!isCurrentCandidate()) {
-      try { await peer.close(); } catch { /* best-effort */ }
-      return;
-    }
-    ctx.ui.notify(`[remote-pi] join failed: ${String(err)}`, "error");
+    try { await close(); } catch { /* best-effort */ }
+    if (isCurrent()) throw err;
+    return null;
   }
+}
+
+function _publishMesh(
+  peer: MeshNode,
+  assigned: string,
+  requestedName: string,
+  ctx: Pick<ExtensionContext, "ui" | "cwd">,
+): void {
+  _meshCandidates.delete(peer);
+  _meshNode = peer;
+  _sessionName = LOCAL_SESSION_NAME;
+  _sessionPeerCount = 1;
+  _refreshSessionPeerCount(peer, ctx);
+  // Persisted intent stays suffix-free; clients receive the effective name.
+  _pi?.sendMessage({
+    customType: "remote-pi:name-assigned",
+    content: assigned === requestedName
+      ? `Mesh name: ${assigned}`
+      : `Mesh name reassigned: "${requestedName}" → "${assigned}" (collision)`,
+    details: { requested: requestedName, assigned, changed: assigned !== requestedName },
+    display: false,
+  });
+  ctx.ui.notify(`[remote-pi] Joined local mesh as "${assigned}" (${peer.currentRole()})`, "info");
+  _refreshFooter(ctx);
+  _attachBridgeIfReady();
 }
 
 // ── routeClientMessage ────────────────────────────────────────────────────────
