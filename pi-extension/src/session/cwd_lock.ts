@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { Server } from "node:net";
 import { roomIdFor } from "../rooms.js";
-import { removeStaleSock, tryBind, tryConnect } from "./leader_election.js";
+import { probeSocketWithRetry, removeStaleSock, tryBind } from "./leader_election.js";
 import { ipcAddress, usesNamedPipe } from "./ipc.js";
 
 /**
@@ -12,12 +12,12 @@ import { ipcAddress, usesNamedPipe } from "./ipc.js";
  *
  * Why a UDS bind instead of a PID lock file:
  *   - The OS releases the socket handle the instant the process dies, even
- *     on `kill -9` or hard crash. No stale-lock cleanup needed.
+ *     on `kill -9` or hard crash. No PID-file cleanup needed.
  *   - The next Pi to try in the same cwd detects the dead socket via
- *     `ECONNREFUSED` on `tryConnect`, unlinks the leftover file, and
+ *     `ECONNREFUSED` on the shared probe, verifies the leftover file, and
  *     binds successfully. Fully self-healing.
- *   - Kernel-enforced — there is no race window between "check if held"
- *     and "claim", which an explicit PID file would have.
+ *   - The kernel arbitrates competing binds. Stale cleanup checks device,
+ *     inode, ctime and birthtime, though that check and unlink are not atomic.
  *
  * Lock files live in `<root>/.pi/remote/locks/<roomId>.sock` (where `roomId`
  * is `sha256(realpath(cwd))[:12]` and `<root>` is `$REMOTE_PI_HOME` or the
@@ -87,15 +87,14 @@ export function lockPathForCwd(cwd: string): string {
 /**
  * Attempts to acquire the cwd lock. Resolves with either:
  *   - `{ ok: true, release }` when we own it (server bound + retained).
- *   - `{ ok: false, lockPath }` when a live Pi already holds the lock.
+ *   - `{ ok: false, lockPath }` when held or the owner cannot be verified.
  *
- * Self-healing path: if the prior holder crashed, the leftover socket file
- * fails `tryConnect` (ECONNREFUSED). We unlink it and retry the bind — the
- * second attempt then succeeds.
+ * Self-healing path: if the prior holder crashed, the probe gets ECONNREFUSED.
+ * We unlink only the unchanged leftover socket and retry the bind.
  *
  * The server holds no actual listener logic; its only job is to keep the
  * UDS endpoint pinned by the OS. No incoming connection ever does anything
- * useful — the next-Pi-attempt's `tryConnect` succeeding is the entire
+ * useful — the next-Pi-attempt's probe connecting is the entire
  * signal we care about.
  */
 export async function acquireCwdLock(cwd: string, name?: string): Promise<CwdLockResult> {
@@ -109,16 +108,15 @@ export async function acquireCwdLock(cwd: string, name?: string): Promise<CwdLoc
   if (server) return _acquired(server, lockPath);
 
   // Bind failed — check whether the existing socket has a live listener.
-  const probe = await tryConnect(lockPath);
-  if (probe) {
-    probe.destroy();
+  const probe = await probeSocketWithRetry(lockPath);
+  if (probe.status === "live") {
+    probe.socket.destroy();
     return { ok: false, lockPath };
   }
+  if (probe.status === "unknown") return { ok: false, lockPath };
 
-  // POSIX: a leftover stale `.sock` file blocks the bind → clean it + retry.
-  // Windows: a named pipe auto-disappears when its owner exits, so there is
-  // never a stale pipe to remove.
-  if (!usesNamedPipe()) removeStaleSock(lockPath);
+  // Only reclaim the unchanged crash-leftover socket; never unlink a pipe.
+  removeStaleSock(lockPath, probe);
   server = await tryBind(lockPath);
   if (server) return _acquired(server, lockPath);
 

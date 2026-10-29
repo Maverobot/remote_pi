@@ -1,7 +1,10 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { mkdtempSync, rmSync, mkdirSync, lstatSync, unlinkSync, renameSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { Socket, createServer } from "node:net";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { dirname, join } from "node:path";
 import { acquireCwdLock, lockPathForCwd, lockPathFor } from "./cwd_lock.js";
 
 /** A fresh tmp cwd per test — each gets a unique room hash, so tests in
@@ -75,16 +78,6 @@ describe("acquireCwdLock", () => {
     if (b.ok) b.release();
   });
 
-  // The stale-socket self-heal path (a previous Pi died WITHOUT releasing
-  // the lock — `kill -9` or crash) can't be reproduced reliably from a
-  // single Node process: depending on Node version + OS, `server.close()`
-  // either unlinks the socket file or leaves it behind. We rely on the
-  // existing leader-election tests (which DO exercise the unlink-retry
-  // path via real broker crashes in `src/session/leader_election.test.ts`)
-  // to cover the OS primitive, and trust that `acquireCwdLock` composes
-  // it correctly. Manual repro: `kill -9` a Pi process holding the lock,
-  // then run `/remote-pi` again — acquires cleanly.
-
   test("same cwd, DIFFERENT names → independent locks (multi-agent per folder)", async () => {
     const cwd = tmpCwd();
     const a = await acquireCwdLock(cwd, "backend");
@@ -134,5 +127,106 @@ describe("acquireCwdLock", () => {
     }
 
     if (held.ok) held.release();
+  });
+});
+
+describe.skipIf(process.platform === "win32")("acquireCwdLock socket safety", () => {
+  test.each(["EAGAIN", "timeout"])("refuses after bounded %s probes without unlinking", async (mode) => {
+    const cwd = tmpCwd();
+    const owner = await acquireCwdLock(cwd);
+    const path = lockPathForCwd(cwd);
+    const before = lstatSync(path);
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementation(function (this: Socket) {
+      if (mode !== "timeout") queueMicrotask(() => this.emit("error", Object.assign(new Error(mode), { code: mode })));
+      return this;
+    });
+    let contender: Awaited<ReturnType<typeof acquireCwdLock>> | undefined;
+    try {
+      contender = await acquireCwdLock(cwd);
+      expect(contender.ok).toBe(false);
+      expect(connect.mock.calls.length).toBeGreaterThan(1);
+      expect(connect.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(lstatSync(path).ino).toBe(before.ino);
+    } finally {
+      connect.mockRestore();
+      if (contender?.ok) contender.release();
+      if (owner.ok) owner.release();
+    }
+  });
+
+  test("re-probes a transient unknown result and refuses a live owner", async () => {
+    const cwd = tmpCwd();
+    const owner = await acquireCwdLock(cwd);
+    const path = lockPathForCwd(cwd);
+    const before = lstatSync(path);
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementationOnce(function (this: Socket) {
+      queueMicrotask(() => this.emit("error", Object.assign(new Error("busy"), { code: "EAGAIN" })));
+      return this;
+    });
+    let contender: Awaited<ReturnType<typeof acquireCwdLock>> | undefined;
+    try {
+      contender = await acquireCwdLock(cwd);
+      expect(contender.ok).toBe(false);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(lstatSync(path).ino).toBe(before.ino);
+    } finally {
+      connect.mockRestore();
+      if (contender?.ok) contender.release();
+      if (owner.ok) owner.release();
+    }
+  });
+
+  test("does not unlink a replacement installed during a gone probe", async () => {
+    const cwd = tmpCwd();
+    const owner = await acquireCwdLock(cwd);
+    const path = lockPathForCwd(cwd);
+    const replacement = createServer();
+    await new Promise<void>((resolve) => replacement.listen(`${path}.new`, resolve));
+    const identity = lstatSync(`${path}.new`);
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementationOnce(function (this: Socket) {
+      unlinkSync(path);
+      renameSync(`${path}.new`, path);
+      queueMicrotask(() => this.emit("error", Object.assign(new Error("gone"), { code: "ECONNREFUSED" })));
+      return this;
+    });
+    let contender: Awaited<ReturnType<typeof acquireCwdLock>> | undefined;
+    try {
+      contender = await acquireCwdLock(cwd);
+      expect(contender.ok).toBe(false);
+      expect(lstatSync(path).ino).toBe(identity.ino);
+    } finally {
+      connect.mockRestore();
+      if (contender?.ok) contender.release();
+      if (owner.ok) owner.release();
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+    }
+  });
+
+  test.each(["young", "mature", "future"])("handles a %s real SIGKILL leftover without unsafe cleanup", async (age) => {
+    const cwd = tmpCwd();
+    const path = lockPathForCwd(cwd);
+    mkdirSync(dirname(path), { recursive: true });
+    const child = spawn(process.execPath, ["-e", `require('node:net').createServer().listen(process.argv[1], () => process.stdout.write('ready\\n'))`, path]);
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await once(child.stdout!, "data");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      expect(lstatSync(path).isSocket()).toBe(true);
+      const created = Number(lstatSync(path, { bigint: true }).ctimeNs / 1_000_000n);
+      clock = vi.spyOn(Date, "now").mockReturnValue(created + (age === "young" ? 1950 : age === "future" ? -60_000 : 3000));
+      let settled = false;
+      const pending = acquireCwdLock(cwd).then((result) => { settled = true; return result; });
+      if (age === "young") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect.soft(settled).toBe(false);
+        clock.mockReturnValue(created + 2050);
+      }
+      const result = await pending;
+      try {
+        expect(result.ok).toBe(age !== "future");
+        if (age === "future") expect(lstatSync(path).isSocket()).toBe(true);
+      } finally { if (result.ok) result.release(); }
+    } finally { clock?.mockRestore(); child.kill("SIGKILL"); }
   });
 });

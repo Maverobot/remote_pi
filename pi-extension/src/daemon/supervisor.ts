@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, unlinkSync } from "node:fs";
-import { createConnection, createServer, type Server, type Socket } from "node:net";
+import { existsSync, mkdirSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { addDaemon, listDaemons, migrateRegistryNames, removeDaemon } from "./registry.js";
 import { daemonIdForCwd } from "./id.js";
 import { defaultAgentName, type LocalConfig } from "../session/local_config.js";
 import { ipcAddress, usesNamedPipe } from "../session/ipc.js";
+import { probeSocketWithRetry, removeStaleSock } from "../session/leader_election.js";
 import { EXIT_DAEMON_FRESH_SESSION, RpcChild, type RpcChildExitEvent, type RpcChildOptions } from "./rpc_child.js";
 import {
   type ControlReply,
@@ -76,23 +77,6 @@ export class SupervisorAlreadyRunningError extends Error {
   }
 }
 
-/** Probes whether a live supervisor is accepting connections on `path`.
- *  Resolves true if the connect succeeds (a listener is there), false on
- *  ECONNREFUSED / ENOENT (stale socket file from a crashed supervisor). */
-function _probeSupervisor(path: string): Promise<boolean> {
-  return new Promise<boolean>((resolve) => {
-    const sock = createConnection({ path });
-    const done = (alive: boolean) => {
-      sock.removeAllListeners();
-      sock.destroy();
-      resolve(alive);
-    };
-    const timer = setTimeout(() => done(false), 1_000);
-    sock.once("connect", () => { clearTimeout(timer); done(true); });
-    sock.once("error", () => { clearTimeout(timer); done(false); });
-  });
-}
-
 export interface SupervisorOptions {
   /** Absolute path to remote-pi's dist/index.js — passed as -e to each
    *  spawned `pi`. Defaults to the location relative to where this file
@@ -161,16 +145,14 @@ export class Supervisor {
     }
     await Promise.all([...this.children.values()].map((s) => s.child.stop()));
     this.children.clear();
+    // Node/libuv close unlinks the bound pathname before releasing its descriptor;
+    // an extra post-close unlink could remove a successor's socket. A replacement
+    // installed before close (e.g. after external unlink) is still removed by close.
     await new Promise<void>((resolve) => {
       if (!this.server) return resolve();
       this.server.close(() => resolve());
     });
     this.server = null;
-    // Best-effort: clear the socket file so a next supervisor bind succeeds.
-    // Windows named pipes have no file (auto-removed on exit) → nothing to do.
-    if (!usesNamedPipe()) {
-      try { unlinkSync(supervisorSockPath()); } catch { /* ignored */ }
-    }
   }
 
   // ── UDS binding ──────────────────────────────────────────────────────────
@@ -184,20 +166,18 @@ export class Supervisor {
   private async _bindUds(): Promise<void> {
     const path = supervisorSockPath();
     const pipe = usesNamedPipe();
-    // Single-instance guard. PROBE first: a live supervisor answering the
-    // connect means we must NOT start a second one. Stealing the socket
-    // (unlink + bind) would orphan the running supervisor's children — they'd
-    // keep running, unreachable by the CLI. Only on POSIX, when the probe
-    // fails (stale socket from a crash), do we unlink + bind. On Windows there
-    // is no file: always probe, never unlink (the pipe self-cleans on exit).
+    // Probe first: ambiguous failures cannot justify stealing a live socket.
+    // Named pipes always probe and never unlink (the OS cleans them up).
     if (pipe || existsSync(path)) {
-      const alive = await _probeSupervisor(path);
-      if (alive) {
+      const probe = await probeSocketWithRetry(path, 1_000);
+      if (probe.status === "live") {
+        probe.socket.destroy();
         throw new SupervisorAlreadyRunningError(path);
       }
-      if (!pipe) {
-        try { unlinkSync(path); } catch { /* will throw on bind if still held */ }
+      if (probe.status === "unknown") {
+        throw new Error(`Existing supervisor socket did not answer and could not be verified as stale: ${path}. Refusing to start a second instance.`);
       }
+      removeStaleSock(path, probe);
     }
     const server = createServer((socket) => this._onConnection(socket));
     await new Promise<void>((resolve, reject) => {

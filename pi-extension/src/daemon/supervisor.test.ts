@@ -1,9 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "vitest";
-import { mkdtempSync, rmSync } from "node:fs";
+import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { mkdtempSync, rmSync, lstatSync, unlinkSync, renameSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createConnection } from "node:net";
+import { spawn } from "node:child_process";
+import { once } from "node:events";
+import { createConnection, createServer, Socket, Server } from "node:net";
 import { join } from "node:path";
-import { Supervisor, decideFireAction, getSupervisorSockPath } from "./supervisor.js";
+import { Supervisor, SupervisorAlreadyRunningError, decideFireAction, getSupervisorSockPath } from "./supervisor.js";
 import { addDaemon } from "./registry.js";
 import { readCronLog } from "./cron_log.js";
 import {
@@ -293,5 +295,143 @@ describe("Supervisor — cron ops", () => {
   test("cron_run on an unknown job → ok:false", async () => {
     const r = await ask({ op: "cron_run", job_id: "j_unknown" });
     expect(r).toMatchObject({ ok: false });
+  });
+});
+
+describe.skipIf(process.platform === "win32")("Supervisor socket safety", () => {
+  test("a live supervisor still reports SupervisorAlreadyRunningError", async () => {
+    const contender = new Supervisor({ extensionPath: "/no/such/extension.js" });
+    await expect(contender.start()).rejects.toBeInstanceOf(SupervisorAlreadyRunningError);
+  });
+
+  test.each(["EAGAIN", "timeout"])("bounded %s probes refuse startup without unlinking", async (mode) => {
+    const path = getSupervisorSockPath();
+    const before = lstatSync(path);
+    const contender = new Supervisor({ extensionPath: "/no/such/extension.js" });
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementation(function (this: Socket) {
+      if (mode !== "timeout") queueMicrotask(() => this.emit("error", Object.assign(new Error(mode), { code: mode })));
+      return this;
+    });
+    let started = false;
+    try {
+      let error: unknown;
+      try { await contender.start(); started = true; } catch (e) { error = e; }
+      expect(String(error)).toMatch(/existing supervisor socket.*did not answer.*could not be verified as stale/i);
+      expect(connect.mock.calls.length).toBeGreaterThan(1);
+      expect(connect.mock.calls.length).toBeLessThanOrEqual(5);
+      expect(lstatSync(path).ino).toBe(before.ino);
+    } finally {
+      connect.mockRestore();
+      if (started) await contender.stop();
+    }
+  });
+
+  test("re-probes a transient unknown before reporting a live supervisor", async () => {
+    const path = getSupervisorSockPath();
+    const before = lstatSync(path);
+    const contender = new Supervisor({ extensionPath: "/no/such/extension.js" });
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementationOnce(function (this: Socket) {
+      queueMicrotask(() => this.emit("error", Object.assign(new Error("busy"), { code: "EAGAIN" })));
+      return this;
+    });
+    let started = false;
+    try {
+      let error: unknown;
+      try { await contender.start(); started = true; } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(SupervisorAlreadyRunningError);
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(lstatSync(path).ino).toBe(before.ino);
+    } finally {
+      connect.mockRestore();
+      if (started) await contender.stop();
+    }
+  });
+
+  test("does not unlink a replacement installed during a gone probe", async () => {
+    const path = getSupervisorSockPath();
+    const replacement = createServer();
+    await new Promise<void>((resolve) => replacement.listen(`${path}.new`, resolve));
+    const identity = lstatSync(`${path}.new`);
+    const contender = new Supervisor({ extensionPath: "/no/such/extension.js" });
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementationOnce(function (this: Socket) {
+      unlinkSync(path);
+      renameSync(`${path}.new`, path);
+      queueMicrotask(() => this.emit("error", Object.assign(new Error("gone"), { code: "ECONNREFUSED" })));
+      return this;
+    });
+    let started = false;
+    try {
+      let error: unknown;
+      try { await contender.start(); started = true; } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(Error);
+      expect(lstatSync(path).ino).toBe(identity.ino);
+    } finally {
+      connect.mockRestore();
+      if (started) await contender.stop();
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+    }
+  });
+
+  test("shutdown does not unlink a successor bound after server.close", async () => {
+    const path = getSupervisorSockPath();
+    const replacement = createServer();
+    const originalClose = Server.prototype.close;
+    const close = vi.spyOn(Server.prototype, "close").mockImplementationOnce(function (this: Server, callback) {
+      return originalClose.call(this, () => {
+        replacement.listen(path, () => callback?.());
+      });
+    });
+    try {
+      await supervisor!.stop();
+      expect(lstatSync(path).isSocket()).toBe(true);
+      // Repeated stop must not remove a socket this instance no longer owns.
+      await supervisor!.stop();
+      expect(lstatSync(path).isSocket()).toBe(true);
+    } finally {
+      close.mockRestore();
+      supervisor = null;
+      await new Promise<void>((resolve) => replacement.close(() => resolve()));
+    }
+  });
+
+  test("startup does not remove a regular file", async () => {
+    const path = getSupervisorSockPath();
+    await supervisor!.stop();
+    supervisor = null;
+    writeFileSync(path, "not a socket");
+    const contender = new Supervisor({ extensionPath: "/no/such/extension.js" });
+    let started = false;
+    try {
+      let error: unknown;
+      try { await contender.start(); started = true; } catch (e) { error = e; }
+      expect(error).toBeInstanceOf(Error);
+      expect(readFileSync(path, "utf8")).toBe("not a socket");
+    } finally { if (started) await contender.stop(); }
+  });
+
+  test.each(["young", "mature"])("reclaims a %s real SIGKILL leftover", async (age) => {
+    const path = getSupervisorSockPath();
+    await supervisor!.stop();
+    supervisor = null;
+    const child = spawn(process.execPath, ["-e", `require('node:net').createServer().listen(process.argv[1], () => process.stdout.write('ready\\n'))`, path]);
+    let clock: ReturnType<typeof vi.spyOn> | undefined;
+    try {
+      await once(child.stdout!, "data");
+      child.kill("SIGKILL");
+      await once(child, "exit");
+      expect(lstatSync(path).isSocket()).toBe(true);
+      supervisor = new Supervisor({ extensionPath: "/no/such/extension.js" });
+      const created = Number(lstatSync(path, { bigint: true }).ctimeNs / 1_000_000n);
+      clock = vi.spyOn(Date, "now").mockReturnValue(created + (age === "young" ? 1950 : 3000));
+      let settled = false;
+      const pending = supervisor.start().then(() => { settled = true; });
+      if (age === "young") {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect.soft(settled).toBe(false);
+        clock.mockReturnValue(created + 2050);
+      }
+      await pending;
+      expect(await ask({ op: "list" })).toMatchObject({ ok: true });
+    } finally { clock?.mockRestore(); child.kill("SIGKILL"); }
   });
 });
