@@ -15,6 +15,7 @@ import 'package:app/data/transport/channel.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/data/transport/peer_channel.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/thinking.dart';
 import 'package:app/domain/background_progress.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/pairing/pair_request_flow.dart';
@@ -52,6 +53,61 @@ class _FakeChannel implements IChannel, IControlLink {
 
   void push(ServerMessage m) => _ctrl.add(m);
   void pushControl(ControlInbound m) => _control.add(m);
+}
+
+class _ThinkingBlockedBoxes extends LocalBoxes {
+  Completer<void>? putRelease;
+  Completer<void>? putStarted;
+  void blockNextPut() {
+    putRelease = Completer<void>();
+    putStarted = Completer<void>();
+  }
+
+  Completer<void>? release;
+  Completer<void>? started;
+  void blockNextRead() {
+    release = Completer<void>();
+    started = Completer<void>();
+  }
+
+  @override
+  Future<Box<dynamic>> msgsBox(String epk, String roomId) async {
+    final pending = release;
+    if (pending != null && !started!.isCompleted) {
+      started!.complete();
+      await pending.future;
+    }
+    return _ThinkingPutBox(await super.msgsBox(epk, roomId), this);
+  }
+}
+
+// A deterministic public storage await, without calling SyncService internals.
+class _ThinkingPutBox implements Box<dynamic> {
+  final Box<dynamic> box;
+  final _ThinkingBlockedBoxes barriers;
+  _ThinkingPutBox(this.box, this.barriers);
+  @override
+  Iterable<dynamic> get keys => box.keys;
+  @override
+  Iterable<dynamic> get values => box.values;
+  @override
+  dynamic get(dynamic key, {dynamic defaultValue}) =>
+      box.get(key, defaultValue: defaultValue);
+  @override
+  Future<void> put(dynamic key, dynamic value) async {
+    if (barriers.putRelease != null && !barriers.putStarted!.isCompleted) {
+      barriers.putStarted!.complete();
+      await barriers.putRelease!.future;
+    }
+    await box.put(key, value);
+  }
+
+  @override
+  Future<void> delete(dynamic key) => box.delete(key);
+  @override
+  Future<int> clear() => box.clear();
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 class _ByteTransport implements PeerTransport {
@@ -131,14 +187,17 @@ void main() {
   Future<
     ({ConnectionManager conn, _FakeChannel ch, SyncService sync, String epk})
   >
-  setup({Duration pendingSendTimeout = const Duration(seconds: 20)}) async {
+  setup({
+    Duration pendingSendTimeout = const Duration(seconds: 20),
+    LocalBoxes? localBoxes,
+  }) async {
     final ch = _FakeChannel();
     final conn = ConnectionManager(
       factory: (_, _) async => ch,
       storage: _FakeStorage(),
       emitDebounce: Duration.zero,
     );
-    final boxes = LocalBoxes();
+    final boxes = localBoxes ?? LocalBoxes();
     final sync = SyncService(
       conn,
       boxes,
@@ -310,6 +369,1291 @@ void main() {
       );
     }
   }
+
+  Pong thought({
+    int revision = 1,
+    String text = 'Received summary',
+    String status = 'streaming',
+    String session = 'S',
+    String epoch = 'E',
+    String room = 'main',
+  }) =>
+      ServerMessage.fromJson({
+            'type': 'pong',
+            'in_reply_to': 'thinking:m',
+            'thinking': {
+              'session_id': session,
+              'epoch': epoch,
+              'room_id': room,
+              'message_id': 'm',
+              'revision': revision,
+              'status': status,
+              'text': text,
+              'ts': 1,
+              'run_id': 'u',
+            },
+          })
+          as Pong;
+
+  SessionHistory thinkingHistory(
+    String id, {
+    int count = 1,
+    String session = 'S',
+    String epoch = 'E',
+    List<Map<String, Object>> events = const [],
+    Object? manifestOverride,
+  }) =>
+      ServerMessage.fromJson({
+            'type': 'session_history',
+            'in_reply_to': id,
+            'room_id': 'main',
+            'session_started_at': 1,
+            'events': events,
+            'eos': true,
+            'truncated': false,
+            'thinking_history':
+                manifestOverride ??
+                {
+                  'kind': 'reply',
+                  'session_id': session,
+                  'epoch': epoch,
+                  'count': count,
+                  'truncated': false,
+                },
+          })
+          as SessionHistory;
+
+  Pong supplement(
+    String reply, {
+    String message = 'm',
+    int index = 0,
+    int before = 0,
+    int revision = 1,
+    String text = 'history thought',
+    String status = 'complete',
+    String epoch = 'E',
+  }) => Pong.fromJson({
+    'in_reply_to': reply,
+    'thinking': {
+      ...thought(
+        revision: revision,
+        text: text,
+        status: status,
+        epoch: epoch,
+      ).thinking!.toJson(),
+      'message_id': message,
+      'history': {'index': index, 'before_event': before},
+    },
+  });
+
+  for (final anchoredHistory in [false, true]) {
+    test(
+      'thinking live position: distinct new live follows older answer, anchored history=$anchoredHistory',
+      () async {
+        final boxes = _ThinkingBlockedBoxes();
+        final h = await setup(localBoxes: boxes);
+        try {
+          h.ch.push(UserInput(id: 'old-user', text: 'old user'));
+          h.ch.push(AgentMessage(inReplyTo: 'old-answer', text: 'old answer'));
+          await _settle();
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          boxes.blockNextRead();
+          h.ch.push(
+            thinkingHistory(
+              id,
+              count: anchoredHistory ? 1 : 0,
+              events: [
+                {
+                  'type': 'user_input',
+                  'ts': 1,
+                  'id': 'old-user',
+                  'text': 'old user',
+                },
+                {
+                  'type': 'agent_message',
+                  'ts': 2,
+                  'in_reply_to': 'old-answer',
+                  'text': 'old answer',
+                },
+              ],
+            ),
+          );
+          if (anchoredHistory) {
+            h.ch.push(
+              supplement(
+                id,
+                message: 'historical',
+                before: 1,
+                text: 'historical thinking',
+              ),
+            );
+          }
+          await boxes.started!.future;
+          h.ch.push(
+            Pong.fromJson({
+              'in_reply_to': 'thinking:new-live',
+              'thinking': {
+                ...thought(text: 'new thinking').thinking!.toJson(),
+                'message_id': 'new-live',
+                'ts': 3,
+              },
+            }),
+          );
+          await _settle();
+          boxes.release!.complete();
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          expect(messages(h.epk).map((r) => r.thinking?.text ?? r.text), [
+            'old user',
+            if (anchoredHistory) 'historical thinking',
+            'old answer',
+            'new thinking',
+          ]);
+          h.sync.leaveThinking(h.epk, 'main');
+          await _settle();
+          expect(messages(h.epk).last.thinking!.locallyInterrupted, isTrue);
+          expect(messages(h.epk).map((r) => r.thinking?.text ?? r.text), [
+            'old user',
+            if (anchoredHistory) 'historical thinking',
+            'old answer',
+            'new thinking',
+          ]);
+        } finally {
+          if (boxes.release != null && !boxes.release!.isCompleted) {
+            boxes.release!.complete();
+          }
+          h.sync.dispose();
+          h.conn.dispose();
+          await _settle();
+        }
+      },
+    );
+  }
+
+  for (final conflictStatus in ['complete', 'streaming']) {
+    test(
+      'thinking tombstone restore: equal $conflictStatus replay keeps producer fields through leave and history',
+      () async {
+        final boxes = _ThinkingBlockedBoxes()..blockNextRead();
+        final h = await setup(localBoxes: boxes);
+        try {
+          await boxes.started!.future;
+          final box = await LocalBoxes().msgsBox(h.epk, 'main');
+          final tombstone = thought(
+            revision: 3,
+            text: '',
+            status: 'complete',
+          ).thinking!.observation;
+          await box.put(
+            0,
+            MessageRecord(
+              id: tombstone.id,
+              seq: 0,
+              role: MsgRole.assistant,
+              ts: DateTime.fromMillisecondsSinceEpoch(1),
+              thinking: tombstone,
+            ).toJson(),
+          );
+          final checkpoint = SessionIndexRecord(
+            epk: h.epk,
+            roomId: 'main',
+            thinkingScope: tombstone.scope,
+          );
+          await boxes.sessionsIndexBox().put(
+            checkpoint.key,
+            checkpoint.toJson(),
+          );
+          h.sync.requestSync();
+          h.ch.push(
+            thinkingHistory(h.ch.sent.whereType<SessionSync>().last.id),
+          );
+          await _settle();
+          boxes.release!.complete();
+          await _settle();
+          h.ch.push(
+            thought(
+              revision: 3,
+              text: 'conflicting replay',
+              status: conflictStatus,
+            ),
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          expect(messages(h.epk).single.thinking, tombstone);
+          h.sync.leaveThinking(h.epk, 'main');
+          await _settle();
+          expect(
+            messages(h.epk).single.thinking,
+            tombstone,
+            reason:
+                'authoritative complete tombstone must not be interrupted by a poisoned streaming cache',
+          );
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          h.ch.push(thinkingHistory(id));
+          h.ch.push(
+            supplement(
+              id,
+              revision: 3,
+              text: 'conflicting historical replay',
+              status: 'streaming',
+            ),
+          );
+          await _settle();
+          h.sync.leaveThinking(h.epk, 'main');
+          await _settle();
+          expect(messages(h.epk).single.thinking, tombstone);
+          h.ch.push(thought(revision: 4, text: 'newer live'));
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          expect(
+            messages(h.epk).single.thinking,
+            thought(revision: 4, text: 'newer live').thinking!.observation,
+          );
+        } finally {
+          if (!boxes.release!.isCompleted) boxes.release!.complete();
+          h.sync.dispose();
+          h.conn.dispose();
+          await _settle();
+        }
+      },
+    );
+  }
+
+  for (final replaceCheckpoint in [false, true]) {
+    test(
+      'thinking reset restore: captures original checkpoint before switching, replacement=$replaceCheckpoint',
+      () async {
+        final boxes = _ThinkingBlockedBoxes()..blockNextRead();
+        final h = await setup(localBoxes: boxes);
+        try {
+          await boxes.started!.future;
+          final original = await LocalBoxes().msgsBox(h.epk, 'main');
+          final other = await LocalBoxes().msgsBox(h.epk, 'other');
+          final retired = thought(status: 'complete').thinking!.observation;
+          final replacement = thought(
+            session: 'new-sdk',
+            status: 'complete',
+          ).thinking!.observation;
+          final destination = thought(
+            session: 'destination',
+            room: 'other',
+            status: 'complete',
+          ).thinking!.observation;
+          MessageRecord row(ThinkingObservation observation, int seq) =>
+              MessageRecord(
+                id: observation.id,
+                seq: seq,
+                role: MsgRole.assistant,
+                ts: DateTime.fromMillisecondsSinceEpoch(1),
+                thinking: observation,
+              );
+          final ordinary = MessageRecord(
+            id: 'ordinary',
+            seq: 7,
+            role: MsgRole.user,
+            text: 'keep original',
+            ts: DateTime.fromMillisecondsSinceEpoch(1),
+          ).toJson();
+          await original.put(0, row(retired, 0).toJson());
+          await original.put(7, ordinary);
+          await other.put(0, row(destination, 0).toJson());
+          await other.put(7, ordinary);
+          final destinationBefore = other.toMap();
+          final checkpoint = SessionIndexRecord(
+            epk: h.epk,
+            roomId: 'main',
+            displayName: 'keep name',
+            lastMessagePreview: 'keep preview',
+            thinkingScope: retired.scope,
+          );
+          final indexBox = boxes.sessionsIndexBox();
+          await indexBox.put(checkpoint.key, checkpoint.toJson());
+          final destinationIndex = SessionIndexRecord(
+            epk: h.epk,
+            roomId: 'other',
+            displayName: 'destination',
+            thinkingScope: destination.scope,
+          );
+          await indexBox.put(destinationIndex.key, destinationIndex.toJson());
+          h.ch.push(
+            ServerMessage.fromJson({
+              'type': 'session_history',
+              'in_reply_to': 'other-owner-reset',
+              'room_id': 'main',
+              'session_started_at': 9,
+              'events': [],
+              'eos': true,
+              'truncated': false,
+              'thinking_reset_pending': true,
+            }),
+          );
+          await _settle();
+          final switching = h.sync.activate(h.epk, 'other');
+          // Durable scope may advance after reset acceptance but before its queued cleanup.
+          if (replaceCheckpoint) {
+            await original.put(8, row(replacement, 8).toJson());
+            await indexBox.put(
+              checkpoint.key,
+              checkpoint.copyWith(thinkingScope: replacement.scope).toJson(),
+            );
+          }
+          boxes.release!.complete();
+          await switching;
+          await _settle();
+          expect(original.get(0), isNull);
+          expect(original.get(7), ordinary);
+          expect(
+            messages(h.epk)
+                .where((r) => r.thinking != null)
+                .map((r) => r.thinking!.scope.sessionId),
+            replaceCheckpoint ? ['new-sdk'] : isEmpty,
+          );
+          expect(
+            index(h.epk),
+            replaceCheckpoint
+                ? checkpoint.copyWith(thinkingScope: replacement.scope)
+                : checkpoint.copyWith(clearThinkingScope: true),
+          );
+          expect(other.toMap(), destinationBefore);
+          expect(indexBox.get(destinationIndex.key), destinationIndex.toJson());
+        } finally {
+          if (!boxes.release!.isCompleted) boxes.release!.complete();
+          h.sync.dispose();
+          h.conn.dispose();
+          await _settle();
+        }
+      },
+    );
+  }
+
+  test(
+    'thinking retirement: same SDK epochs survive and checkpoint stays in original destination across switch',
+    () async {
+      final boxes = _ThinkingBlockedBoxes();
+      final h = await setup(localBoxes: boxes);
+      try {
+        h.ch.push(thought(status: 'complete'));
+        await _settle();
+        h.sync.requestSync();
+        h.ch.push(
+          thinkingHistory(
+            h.ch.sent.whereType<SessionSync>().last.id,
+            epoch: 'E2',
+            count: 1,
+          ),
+        );
+        await _settle();
+        h.ch.push(thought(epoch: 'E2', text: 'second epoch'));
+        await _settle();
+        h.sync.leaveThinking(h.epk, 'main');
+        await _settle();
+        expect(messages(h.epk).map((r) => r.thinking!.scope.epoch).toSet(), {
+          'E',
+          'E2',
+        });
+        boxes.blockNextRead();
+        h.ch.push(thought(epoch: 'E2', revision: 2, status: 'complete'));
+        await boxes.started!.future;
+        h.sync.requestSync();
+        h.ch.push(
+          thinkingHistory(
+            h.ch.sent.whereType<SessionSync>().last.id,
+            session: 'replacement',
+            count: 0,
+          ),
+        );
+        await _settle();
+        final switching = h.sync.activate(h.epk, 'other');
+        boxes.release!.complete();
+        await switching;
+        await _settle();
+        expect(index(h.epk)!.thinkingScope!.sessionId, 'replacement');
+        expect(messages(h.epk), isEmpty);
+        expect(messages(h.epk, 'other'), isEmpty);
+        final other = LocalBoxes().sessionsIndexBox().get(
+          LocalBoxes.sessionKey(h.epk, 'other'),
+        );
+        expect(
+          other == null ||
+              SessionIndexRecord.fromJson(
+                    (other as Map).cast<String, dynamic>(),
+                  ).thinkingScope ==
+                  null,
+          isTrue,
+        );
+      } finally {
+        if (boxes.release != null && !boxes.release!.isCompleted) {
+          boxes.release!.complete();
+        }
+        h.sync.dispose();
+        h.conn.dispose();
+      }
+    },
+  );
+
+  test(
+    'thinking interruption: equal replay and higher historical streaming retain flag until newer live resumes',
+    () async {
+      final h = await setup();
+      try {
+        h.ch.push(thought());
+        await _settle();
+        h.sync.leaveThinking(h.epk, 'main');
+        await _settle();
+        Future<void> replay(int revision) async {
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          h.ch.push(thinkingHistory(id));
+          h.ch.push(supplement(id, revision: revision, status: 'streaming'));
+          await _settle();
+          expect(messages(h.epk).single.thinking!.locallyInterrupted, isTrue);
+          expect(messages(h.epk).single.thinking!.revision, revision);
+        }
+
+        await replay(1);
+        await replay(2);
+        final changes = <BoxEvent>[];
+        final watch = LocalBoxes()
+            .openMsgsBox(h.epk, 'main')
+            .watch()
+            .listen(changes.add);
+        await replay(2);
+        expect(
+          changes,
+          isEmpty,
+          reason: 'identical scoped replay remains write-free',
+        );
+        await watch.cancel();
+        h.ch.push(thought(revision: 2));
+        await _settle();
+        expect(messages(h.epk).single.thinking!.locallyInterrupted, isTrue);
+        h.ch.push(thought(revision: 3));
+        await Future<void>.delayed(const Duration(milliseconds: 240));
+        expect(messages(h.epk).single.thinking!.locallyInterrupted, isFalse);
+      } finally {
+        h.sync.dispose();
+        h.conn.dispose();
+        await _settle();
+      }
+    },
+  );
+
+  test(
+    'thinking retirement: new SDK retires only thinking before supplements complete',
+    () async {
+      final h = await setup();
+      try {
+        h.ch.push(UserInput(id: 'ordinary', text: 'preserved'));
+        h.ch.push(ToolRequest(toolCallId: 'tool', tool: 'read', args: {}));
+        h.ch.push(Compaction(summary: 'recap', tokensBefore: 5, ts: 4));
+        await _settle();
+        final box = LocalBoxes().openMsgsBox(h.epk, 'main');
+        await box.put(
+          40,
+          MessageRecord(
+            id: 'archived',
+            seq: 40,
+            role: MsgRole.askUser,
+            ts: DateTime.fromMillisecondsSinceEpoch(1),
+          ).toJson(),
+        );
+        h.ch.push(thought(status: 'complete'));
+        await _settle();
+        final ordinary = {
+          for (final key in box.keys)
+            if (MessageRecord.fromJson(
+                  (box.get(key) as Map).cast<String, dynamic>(),
+                ).thinking ==
+                null)
+              key: jsonEncode(box.get(key)),
+        };
+        h.sync.requestSync();
+        h.ch.push(
+          thinkingHistory(
+            h.ch.sent.whereType<SessionSync>().last.id,
+            session: 'new-SDK',
+            count: 1,
+          ),
+        );
+        await _settle();
+        expect(
+          messages(h.epk).where((r) => r.thinking != null),
+          isEmpty,
+          reason: 'retirement must not await optional supplements',
+        );
+        h.ch.push(thought(session: 'new-SDK', status: 'complete'));
+        await _settle();
+        expect(
+          messages(
+            h.epk,
+          ).where((r) => r.thinking != null).single.thinking!.scope.sessionId,
+          'new-SDK',
+        );
+        expect({
+          for (final key in box.keys)
+            if (MessageRecord.fromJson(
+                  (box.get(key) as Map).cast<String, dynamic>(),
+                ).thinking ==
+                null)
+              key: jsonEncode(box.get(key)),
+        }, ordinary);
+      } finally {
+        h.sync.dispose();
+        h.conn.dispose();
+        await _settle();
+      }
+    },
+  );
+
+  for (final scenario in [
+    'assembly leave',
+    'queued switch',
+    'writing dispose',
+    'writing leave',
+  ]) {
+    test(
+      'thinking interruption: $scenario retains historical partial in original position',
+      () async {
+        final boxes = _ThinkingBlockedBoxes();
+        final h = await setup(localBoxes: boxes);
+        try {
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          h.ch.push(
+            thinkingHistory(
+              id,
+              count: scenario == 'assembly leave' ? 2 : 1,
+              events: [
+                {
+                  'type': 'user_input',
+                  'ts': 0,
+                  'id': 'before',
+                  'text': 'before',
+                },
+                {
+                  'type': 'agent_message',
+                  'ts': 2,
+                  'in_reply_to': 'after',
+                  'text': 'after',
+                },
+              ],
+            ),
+          );
+          await _settle();
+          if (scenario == 'queued switch') boxes.blockNextRead();
+          if (scenario.startsWith('writing')) boxes.blockNextPut();
+          h.ch.push(
+            supplement(
+              id,
+              status: 'streaming',
+              text: 'received partial',
+              before: 1,
+            ),
+          );
+          if (scenario == 'queued switch') {
+            await boxes.started!.future;
+          } else if (scenario.startsWith('writing')) {
+            await boxes.putStarted!.future;
+          } else {
+            await _settle();
+          }
+          Future<void>? switching;
+          if (scenario == 'queued switch') {
+            switching = h.sync.activate(h.epk, 'other');
+          } else if (scenario == 'writing dispose') {
+            h.sync.dispose();
+          } else {
+            h.sync.leaveThinking(h.epk, 'main');
+          }
+          if (scenario == 'queued switch') boxes.release!.complete();
+          if (scenario.startsWith('writing')) boxes.putRelease!.complete();
+          await switching;
+          // Leave must close a partial assembly promptly, not wait three seconds.
+          await _settle();
+          final rows = messages(h.epk);
+          expect(rows.map((r) => r.thinking?.text ?? r.text), [
+            'before',
+            'received partial',
+            'after',
+          ]);
+          final observation = rows[1].thinking!;
+          expect(observation.status, ThinkingStatus.streaming);
+          expect(observation.revision, 1);
+          expect(observation.locallyInterrupted, isTrue);
+          if (scenario == 'queued switch') {
+            expect(messages(h.epk, 'other'), isEmpty);
+          }
+        } finally {
+          if (boxes.release != null && !boxes.release!.isCompleted) {
+            boxes.release!.complete();
+          }
+          if (boxes.putRelease != null && !boxes.putRelease!.isCompleted) {
+            boxes.putRelease!.complete();
+          }
+          h.sync.dispose();
+          h.conn.dispose();
+        }
+      },
+    );
+  }
+
+  for (final revision in [1, 2]) {
+    test(
+      'thinking loader: same-scope revision $revision history cannot erase interruption written by suspended restore',
+      () async {
+        final boxes = _ThinkingBlockedBoxes()..blockNextRead();
+        final h = await setup(localBoxes: boxes);
+        try {
+          await boxes.started!.future;
+          final box = await LocalBoxes().msgsBox(h.epk, 'main');
+          final observation = thought().thinking!.observation;
+          await box.put(
+            0,
+            MessageRecord(
+              id: observation.id,
+              seq: 0,
+              role: MsgRole.assistant,
+              ts: DateTime.fromMillisecondsSinceEpoch(1),
+              thinking: observation,
+            ).toJson(),
+          );
+          boxes.blockNextPut();
+          boxes.release!.complete();
+          await boxes.putStarted!.future;
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          h.ch.push(thinkingHistory(id));
+          h.ch.push(supplement(id, revision: revision, status: 'streaming'));
+          await _settle();
+          boxes.putRelease!.complete();
+          await _settle();
+          final restored = messages(h.epk).single.thinking!;
+          expect(restored.revision, revision);
+          expect(restored.status, ThinkingStatus.streaming);
+          expect(restored.locallyInterrupted, isTrue);
+          h.ch.push(thought(revision: revision + 1));
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          expect(messages(h.epk).single.thinking!.locallyInterrupted, isFalse);
+        } finally {
+          if (!boxes.release!.isCompleted) boxes.release!.complete();
+          if (boxes.putRelease != null && !boxes.putRelease!.isCompleted) {
+            boxes.putRelease!.complete();
+          }
+          h.sync.dispose();
+          h.conn.dispose();
+          await _settle();
+        }
+      },
+    );
+  }
+  for (final boundary in ['empty read', 'stored read', 'row put']) {
+    test(
+      'thinking loader: newer scope wins across $boundary without starving ordinary readiness',
+      () async {
+        final boxes = _ThinkingBlockedBoxes()..blockNextRead();
+        final h = await setup(localBoxes: boxes);
+        try {
+          await boxes.started!.future;
+          await boxes.sessionsIndexBox().put(
+            LocalBoxes.sessionKey(h.epk, 'main'),
+            SessionIndexRecord(
+              epk: h.epk,
+              roomId: 'main',
+              thinkingScope: const ThinkingScope(sessionId: 'S', epoch: 'E'),
+            ).toJson(),
+          );
+          if (boundary != 'empty read') {
+            final box = await LocalBoxes().msgsBox(h.epk, 'main');
+            final observation = thought().thinking!.observation;
+            await box.put(
+              0,
+              MessageRecord(
+                id: observation.id,
+                seq: 0,
+                role: MsgRole.assistant,
+                ts: DateTime.fromMillisecondsSinceEpoch(1),
+                thinking: observation,
+              ).toJson(),
+            );
+          }
+          if (boundary == 'row put') {
+            boxes.blockNextPut();
+            boxes.release!.complete();
+            await boxes.putStarted!.future;
+          }
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          h.ch.push(thinkingHistory(id, session: 'new-SDK', count: 0));
+          await _settle();
+          if (boundary == 'row put') {
+            boxes.putRelease!.complete();
+          } else {
+            boxes.release!.complete();
+          }
+          await _settle();
+          h.ch.push(
+            thought(revision: 9, status: 'complete', text: 'stale SDK'),
+          );
+          h.ch.push(
+            thought(
+              session: 'new-SDK',
+              status: 'complete',
+              text: 'current SDK',
+            ),
+          );
+          h.ch.push(
+            AgentMessage(
+              inReplyTo: 'ordinary-ready',
+              text: 'ordinary still works',
+            ),
+          );
+          await _settle();
+          expect(
+            messages(h.epk).any((r) => r.thinking?.text == 'stale SDK'),
+            isFalse,
+          );
+          expect(
+            messages(h.epk).any((r) => r.thinking?.text == 'current SDK'),
+            isTrue,
+          );
+          expect(messages(h.epk).any((r) => r.id == 'ordinary-ready'), isTrue);
+          expect(index(h.epk)!.thinkingScope!.sessionId, 'new-SDK');
+        } finally {
+          if (!boxes.release!.isCompleted) boxes.release!.complete();
+          if (boxes.putRelease != null && !boxes.putRelease!.isCompleted) {
+            boxes.putRelease!.complete();
+          }
+          h.sync.dispose();
+          h.conn.dispose();
+        }
+      },
+    );
+  }
+
+  for (final reset in [false, true]) {
+    test(
+      'thinking authority: queued history cannot republish after ${reset ? "SDK reset" : "explicit clear"}',
+      () async {
+        final boxes = _ThinkingBlockedBoxes();
+        final h = await setup(localBoxes: boxes);
+        try {
+          h.ch.push(thought());
+          h.sync.leaveThinking(h.epk, 'main');
+          await Future<void>.delayed(const Duration(milliseconds: 240));
+          h.sync.requestSync();
+          final id = h.ch.sent.whereType<SessionSync>().last.id;
+          boxes.blockNextRead();
+          h.ch.push(thinkingHistory(id));
+          h.ch.push(supplement(id, status: 'streaming'));
+          await boxes.started!.future;
+          Future<void>? clearing;
+          if (reset) {
+            h.ch.push(
+              thinkingHistory(
+                'reset',
+                manifestOverride: {
+                  'kind': 'reset',
+                  'session_id': 'replacement',
+                  'epoch': 'E2',
+                  'count': 0,
+                  'truncated': false,
+                },
+              ),
+            );
+            await _settle();
+          } else {
+            clearing = h.sync.clearActiveSession();
+          }
+          boxes.release!.complete();
+          await clearing;
+          await _settle();
+          expect(messages(h.epk), isEmpty);
+          h.sync.leaveThinking(h.epk, 'main');
+          h.sync.dispose();
+          await _settle();
+          expect(
+            messages(h.epk),
+            isEmpty,
+            reason: 'retired cache cannot create another original-box write',
+          );
+        } finally {
+          if (boxes.release != null && !boxes.release!.isCompleted) {
+            boxes.release!.complete();
+          }
+          h.sync.dispose();
+          h.conn.dispose();
+        }
+      },
+    );
+  }
+
+  test(
+    'tagged foreign/malformed history is rejected before ordinary apply; legacy omission preserves thinking',
+    () async {
+      final h = await setup();
+      h.ch.push(thought(status: 'complete'));
+      h.ch.push(AgentMessage(inReplyTo: 'answer', text: 'ordinary'));
+      await _settle();
+      h.sync.requestSync();
+      final id = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(thinkingHistory('other-phone', count: 0, session: 'foreign'));
+      h.ch.push(
+        thinkingHistory('other-phone', manifestOverride: {'bad': true}),
+      );
+      await _settle();
+      expect(messages(h.epk).map((r) => r.id), contains('answer'));
+      h.ch.push(thinkingHistory(id, manifestOverride: {'bad': true}));
+      await _settle();
+      expect(messages(h.epk).single.thinking!.text, 'Received summary');
+      h.ch.push(
+        SessionHistory(
+          inReplyTo: 'legacy',
+          sessionStartedAt: 1,
+          events: const [],
+          eos: true,
+        ),
+      );
+      await _settle();
+      expect(messages(h.epk).single.thinking!.text, 'Received summary');
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'history uses wire event anchors through tool-result collapse and preserves newer live revision',
+    () async {
+      final h = await setup();
+      h.sync.requestSync();
+      final id = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(supplement(id, before: 2)); // may precede the base
+      h.ch.push(
+        thinkingHistory(
+          id,
+          count: 2,
+          events: [
+            {
+              'type': 'tool_request',
+              'ts': 1,
+              'tool_call_id': 'tool',
+              'tool': 'read',
+              'args': <String, Object>{},
+            },
+            {
+              'type': 'tool_result',
+              'ts': 2,
+              'tool_call_id': 'tool',
+              'result': 'done',
+            },
+            {
+              'type': 'agent_message',
+              'ts': 3,
+              'in_reply_to': 'u',
+              'text': 'answer',
+            },
+          ],
+        ),
+      );
+      h.ch.push(thought(revision: 4, text: 'newer live', status: 'complete'));
+      h.ch.push(
+        supplement(
+          id,
+          message: 'second',
+          index: 1,
+          before: 2,
+          text: 'second thought',
+        ),
+      );
+      await _settle();
+      final rows = messages(h.epk);
+      expect(rows.map((r) => r.thinking?.text ?? r.text), [
+        '',
+        'newer live',
+        'second thought',
+        'answer',
+      ]);
+      expect(rows.first.tool!.result, 'done');
+      expect(rows.map((r) => r.seq), [0, 1, 2, 3]);
+      h.sync.requestSync();
+      final replayId = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(thinkingHistory(replayId, count: 0, epoch: 'next-epoch'));
+      await _settle();
+      expect(messages(h.epk).where((r) => r.thinking != null).length, 2);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'missing supplements fall back in bounded time without erasing received incomplete thought',
+    () async {
+      final h = await setup();
+      h.ch.push(thought());
+      await _settle();
+      h.ch.push(Cancelled(inReplyTo: 'c', targetId: 'u'));
+      await _settle();
+      h.sync.requestSync();
+      final id = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(
+        thinkingHistory(
+          id,
+          count: 2,
+          events: [
+            {
+              'type': 'agent_message',
+              'ts': 2,
+              'in_reply_to': 'a',
+              'text': 'base answer',
+            },
+          ],
+        ),
+      );
+      h.ch.push(
+        supplement(id, revision: 1, status: 'streaming', text: 'old text'),
+      );
+      h.ch.push(
+        supplement(id, index: 1, before: 99),
+      ); // invalid anchor cannot complete
+      await Future<void>.delayed(const Duration(milliseconds: 3100));
+      expect(messages(h.epk).any((r) => r.text == 'base answer'), isTrue);
+      final thinking = messages(
+        h.epk,
+      ).singleWhere((r) => r.thinking != null).thinking!;
+      expect(thinking.text, 'Received summary');
+      expect(thinking.locallyInterrupted, isTrue);
+      h.ch.push(supplement(id, index: 1, message: 'late'));
+      await _settle();
+      expect(messages(h.epk).where((r) => r.thinking != null).length, 1);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'daemon reset marker invalidates all-owner scope and queued thinking, malformed/foreign-room markers cannot',
+    () async {
+      final h = await setup();
+      h.ch.push(thought());
+      await _settle();
+      final reset = <String, dynamic>{
+        'type': 'session_history',
+        'in_reply_to': 'another-owners-action',
+        'room_id': 'main',
+        'session_started_at': 9,
+        'events': [],
+        'eos': true,
+        'truncated': false,
+        'thinking_reset_pending': true,
+      };
+      h.ch.push(ServerMessage.fromJson({...reset, 'room_id': 'other'}));
+      h.ch.push(
+        ServerMessage.fromJson({...reset, 'thinking_reset_pending': 'true'}),
+      );
+      await _settle();
+      expect(messages(h.epk).single.thinking, isNotNull);
+      h.ch.push(ServerMessage.fromJson(reset));
+      await _settle();
+      h.ch.push(
+        thought(revision: 5, status: 'complete', text: 'stale exiting SDK'),
+      );
+      await _settle();
+      expect(messages(h.epk), isEmpty);
+      final id = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(thinkingHistory(id, count: 0, session: 'actual-new-SDK'));
+      await _settle();
+      final index =
+          LocalBoxes().sessionsIndexBox().get(
+                LocalBoxes.sessionKey(h.epk, 'main'),
+              )
+              as Map;
+      expect(
+        SessionIndexRecord.fromJson(
+          index.cast<String, dynamic>(),
+        ).thinkingScope!.sessionId,
+        'actual-new-SDK',
+      );
+      h.sync.dispose();
+      final restored = SyncService(h.conn, LocalBoxes());
+      await _settle();
+      h.ch.push(thought(status: 'complete', session: 'S'));
+      await _settle();
+      expect(
+        messages(h.epk),
+        isEmpty,
+      ); // zero-card checkpoint still fences old SDK
+      restored.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'scoped tombstone wins stale history, identical replay is write-free and actual SDK reset retires it',
+    () async {
+      final h = await setup();
+      h.ch.push(thought(revision: 3, text: '', status: 'complete'));
+      await _settle();
+      Future<void> replay() async {
+        h.sync.requestSync();
+        final id = h.ch.sent.whereType<SessionSync>().last.id;
+        h.ch.push(thinkingHistory(id));
+        h.ch.push(supplement(id, revision: 2, text: 'must not resurrect'));
+        await _settle();
+      }
+
+      await replay();
+      expect(messages(h.epk).single.thinking!.visible, isFalse);
+      final changes = <BoxEvent>[];
+      final subscription = LocalBoxes()
+          .openMsgsBox(h.epk, 'main')
+          .watch()
+          .listen(changes.add);
+      await replay();
+      expect(changes, isEmpty);
+      await subscription.cancel();
+      final reset = <String, dynamic>{
+        'type': 'session_history',
+        'in_reply_to': 'global-reset',
+        'room_id': 'main',
+        'session_started_at': 2,
+        'events': [],
+        'eos': true,
+        'truncated': false,
+        'thinking_history': {
+          'kind': 'reset',
+          'session_id': 'new-SDK',
+          'epoch': 'new-E',
+          'count': 0,
+          'truncated': false,
+        },
+      };
+      h.ch.push(
+        ServerMessage.fromJson({
+          ...reset,
+          'events': [
+            {
+              'type': 'agent_message',
+              'in_reply_to': 'u',
+              'text': 'noncanonical',
+              'ts': 1,
+            },
+          ],
+        }),
+      );
+      await _settle();
+      expect(messages(h.epk).single.thinking!.scope.sessionId, 'S');
+      h.ch.push(ServerMessage.fromJson(reset));
+      await _settle();
+      expect(messages(h.epk), isEmpty);
+      h.ch.push(thought(revision: 9, status: 'complete'));
+      await _settle();
+      expect(messages(h.epk), isEmpty);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'oversized optional history count falls back; stale old-channel reset cannot clear current thinking',
+    () async {
+      final h = await setup();
+      h.ch.push(thought(status: 'complete'));
+      await _settle();
+      h.sync.requestSync();
+      final id = h.ch.sent.whereType<SessionSync>().last.id;
+      h.ch.push(
+        thinkingHistory(
+          id,
+          count: 257,
+          events: [
+            {
+              'type': 'agent_message',
+              'in_reply_to': 'u',
+              'text': 'base survives',
+              'ts': 2,
+            },
+          ],
+        ),
+      );
+      await _settle();
+      expect(messages(h.epk).any((r) => r.text == 'base survives'), isTrue);
+      expect(
+        messages(h.epk).singleWhere((r) => r.thinking != null).thinking!.text,
+        'Received summary',
+      );
+      final next = _FakeChannel();
+      h.ch.push(
+        ServerMessage.fromJson({
+          'type': 'session_history',
+          'in_reply_to': 'stale-reset',
+          'room_id': 'main',
+          'session_started_at': 99,
+          'events': [],
+          'eos': true,
+          'truncated': false,
+          'thinking_reset_pending': true,
+        }),
+      );
+      h.conn.adopt(
+        next,
+        PeerRecord(
+          remoteEpk: h.epk,
+          sessionName: 'Pi',
+          relayUrl: 'ws://localhost',
+          pairedAt: '2026-01-01T00:00:00Z',
+        ),
+      );
+      await _settle();
+      expect(messages(h.epk).where((r) => r.thinking != null).length, 1);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'explicit clear retires original thinking after queued write and switch without clearing ordinary history or new indexes',
+    () async {
+      final boxes = _ThinkingBlockedBoxes();
+      final h = await setup(localBoxes: boxes);
+      h.ch.push(
+        AgentMessage(inReplyTo: 'ordinary', text: 'Keep old ordinary behavior'),
+      );
+      h.ch.push(thought());
+      await _settle();
+      final otherBox = await LocalBoxes().msgsBox(h.epk, 'other');
+      await otherBox.put(
+        0,
+        MessageRecord(
+          id: 'other-user',
+          seq: 0,
+          role: MsgRole.user,
+          text: 'Other destination',
+          ts: DateTime.fromMillisecondsSinceEpoch(1),
+        ).toJson(),
+      );
+      final otherIndex = SessionIndexRecord(
+        epk: h.epk,
+        roomId: 'other',
+        displayName: 'Other',
+        thinkingScope: const ThinkingScope(
+          sessionId: 'other-SDK',
+          epoch: 'other-epoch',
+        ),
+      );
+      await boxes.sessionsIndexBox().put(otherIndex.key, otherIndex.toJson());
+      boxes.blockNextRead();
+      h.sync.leaveThinking(h.epk, 'main');
+      await boxes.started!.future;
+      final clearing = h.sync.clearActiveSession();
+      final switching = h.sync.activate(h.epk, 'other');
+      boxes.release!.complete();
+      await clearing;
+      await switching;
+      await _settle();
+      expect(messages(h.epk).map((r) => r.text), [
+        'Keep old ordinary behavior',
+      ]);
+      final oldIndex =
+          boxes.sessionsIndexBox().get(LocalBoxes.sessionKey(h.epk, 'main'))
+              as Map;
+      expect(
+        SessionIndexRecord.fromJson(
+          oldIndex.cast<String, dynamic>(),
+        ).thinkingScope,
+        isNull,
+      );
+      expect(messages(h.epk, 'other').single.text, 'Other destination');
+      expect(
+        SessionIndexRecord.fromJson(
+          (boxes.sessionsIndexBox().get(otherIndex.key) as Map)
+              .cast<String, dynamic>(),
+        ),
+        otherIndex,
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 220));
+      expect(messages(h.epk).where((r) => r.thinking != null), isEmpty);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'thinking cancellation retains partial text but ordinary stream is discarded',
+    () async {
+      final h = await setup();
+      h.ch.push(AgentChunk(inReplyTo: 'u', delta: 'ordinary'));
+      h.ch.push(thought());
+      await _settle();
+      h.ch.push(Cancelled(inReplyTo: 'cancel', targetId: 'u'));
+      await _settle();
+      final row = messages(h.epk).single;
+      expect(row.text, isEmpty);
+      expect(row.thinking!.text, 'Received summary');
+      expect(row.thinking!.revision, 1);
+      expect(row.thinking!.locallyInterrupted, isTrue);
+      expect(h.sync.streaming, isNull);
+      h.ch.push(
+        thought(
+          revision: 2,
+          text: 'Final provider summary',
+          status: 'complete',
+        ),
+      );
+      await _settle();
+      expect(messages(h.epk).single.thinking!.incomplete, isFalse);
+      expect(messages(h.epk).single.thinking!.text, 'Final provider summary');
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'thinking tombstone survives stale replay and checkpoint protects restored scope',
+    () async {
+      final h = await setup();
+      h.ch.push(thought(status: 'complete'));
+      await _settle();
+      h.ch.push(thought(revision: 3, text: '', status: 'complete'));
+      h.ch.push(thought(revision: 2, text: 'stale', status: 'complete'));
+      await _settle();
+      expect(messages(h.epk).single.thinking!.visible, isFalse);
+      expect(messages(h.epk).single.thinking!.revision, 3);
+      h.sync.dispose();
+      final restored = SyncService(h.conn, LocalBoxes());
+      await _settle();
+      h.ch.push(thought(session: 'foreign', status: 'complete'));
+      await _settle();
+      expect(messages(h.epk).single.thinking!.scope.sessionId, 'S');
+      final raw =
+          LocalBoxes().sessionsIndexBox().get(
+                LocalBoxes.sessionKey(h.epk, 'main'),
+              )
+              as Map;
+      expect(
+        SessionIndexRecord.fromJson(raw.cast<String, dynamic>()).thinkingScope,
+        const ThinkingScope(sessionId: 'S', epoch: 'E'),
+      );
+      restored.dispose();
+      h.conn.dispose();
+    },
+  );
+
+  test(
+    'accepted coalesced thinking writes remain in original room across activation',
+    () async {
+      final h = await setup();
+      h.ch.push(thought());
+      await _settle();
+      await h.sync.activate(h.epk, 'other');
+      await _settle();
+      expect(messages(h.epk).single.thinking!.text, 'Received summary');
+      expect(messages(h.epk).single.thinking!.incomplete, isTrue);
+      expect(messages(h.epk, 'other'), isEmpty);
+      h.ch.push(thought(status: 'complete'));
+      await _settle();
+      expect(messages(h.epk, 'other'), isEmpty);
+      h.sync.dispose();
+      h.conn.dispose();
+    },
+  );
 
   test(
     'background launch completion cannot finish the observed worker; no task persistence',
@@ -979,34 +2323,37 @@ void main() {
     s.sync.dispose();
   });
 
-  test('continuous chunks flush before the source becomes quiet (#136)', () async {
-    final s = await setup();
-    var producing = true;
-    var emittedDuringBurst = false;
-    final sub = s.sync.streamingStream.listen((message) {
-      if (producing && (message?.buffer.isNotEmpty ?? false)) {
-        emittedDuringBurst = true;
+  test(
+    'continuous chunks flush before the source becomes quiet (#136)',
+    () async {
+      final s = await setup();
+      var producing = true;
+      var emittedDuringBurst = false;
+      final sub = s.sync.streamingStream.listen((message) {
+        if (producing && (message?.buffer.isNotEmpty ?? false)) {
+          emittedDuringBurst = true;
+        }
+      });
+
+      for (var i = 0; i < 20; i++) {
+        s.ch.push(AgentChunk(inReplyTo: 'r1', delta: 'x'));
+        await Future<void>.delayed(const Duration(milliseconds: 5));
       }
-    });
+      producing = false;
 
-    for (var i = 0; i < 20; i++) {
-      s.ch.push(AgentChunk(inReplyTo: 'r1', delta: 'x'));
-      await Future<void>.delayed(const Duration(milliseconds: 5));
-    }
-    producing = false;
+      expect(
+        emittedDuringBurst,
+        isTrue,
+        reason: 'continuous input must not postpone every 16ms UI flush',
+      );
+      await _settle();
+      expect(s.sync.streaming?.buffer, List.filled(20, 'x').join());
 
-    expect(
-      emittedDuringBurst,
-      isTrue,
-      reason: 'continuous input must not postpone every 16ms UI flush',
-    );
-    await _settle();
-    expect(s.sync.streaming?.buffer, List.filled(20, 'x').join());
-
-    await sub.cancel();
-    s.conn.dispose();
-    s.sync.dispose();
-  });
+      await sub.cancel();
+      s.conn.dispose();
+      s.sync.dispose();
+    },
+  );
 
   test('agent_done finalizes the streamed message + flips to idle', () async {
     final s = await setup();

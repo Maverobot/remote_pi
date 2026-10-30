@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:app/domain/session_state.dart';
 
 import 'package:app/data/actions/actions_repository.dart';
 import 'package:app/data/images/image_picker_service.dart';
@@ -15,9 +16,11 @@ import 'package:app/ui/chat/voice/viewmodels/voice_input_viewmodel.dart';
 import 'package:app/ui/chat/widgets/extension_ui_card.dart';
 import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:app/ui/chat/widgets/message_bubble.dart';
+import 'package:app/ui/chat/widgets/thinking_card.dart';
 import 'package:app/ui/chat/widgets/streaming_bubble.dart';
 import 'package:app/ui/chat/widgets/tool_request_card.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:provider/provider.dart';
@@ -79,9 +82,151 @@ void main() {
     await tester.pump();
   }
 
+  testWidgets(
+    'Thinking choices survive revisions, history and lazy eviction; page recreation collapses',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      Future<void> showChat() => tester.pumpWidget(
+        MaterialApp(
+          home: MultiProvider(
+            providers: [
+              ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+              ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+              ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+              ChangeNotifierProvider<AttachmentViewModel>.value(value: attach),
+            ],
+            child: const ChatPage(),
+          ),
+        ),
+      );
+      Pong snapshot(int revision, String text) => Pong.fromJson({
+        'in_reply_to': 'thinking:m',
+        'thinking': {
+          'session_id': 'thinking-ui',
+          'epoch': 'E',
+          'message_id': 'm',
+          'room_id': 'main',
+          'revision': revision,
+          'status': 'complete',
+          'text': text,
+          'ts': 1,
+        },
+      });
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await showChat();
+        await deliver(
+          tester,
+          h.ch,
+          ServerMessage.fromJson({
+            'type': 'session_history',
+            'in_reply_to': h.ch.sent.whereType<SessionSync>().last.id,
+            'session_started_at': 1,
+            'room_id': 'main',
+            'events': [],
+            'eos': true,
+            'truncated': false,
+            'thinking_history': {
+              'kind': 'reply',
+              'session_id': 'thinking-ui',
+              'epoch': 'E',
+              'count': 0,
+              'truncated': false,
+            },
+          }),
+        );
+        await deliver(tester, h.ch, snapshot(1, 'Summary A\n\nSummary B'));
+        expect(find.text('Thinking'), findsOneWidget);
+        expect(find.text('Summary A\n\nSummary B'), findsNothing);
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        expect(find.text('Summary A\n\nSummary B'), findsOneWidget);
+        await deliver(tester, h.ch, snapshot(2, 'Revised provider summary'));
+        expect(find.text('Revised provider summary'), findsOneWidget);
+        await deliver(
+          tester,
+          h.ch,
+          SessionHistory(
+            inReplyTo: 'legacy-replay',
+            sessionStartedAt: 1,
+            events: const [
+              UserInputEvt(ts: 0, id: 'thinking-question', text: 'Question'),
+            ],
+            eos: true,
+          ),
+        );
+        expect(find.text('Revised provider summary'), findsOneWidget);
+        final original = find.byType(ThinkingCard).evaluate().single;
+        for (var i = 0; i < 24; i++) {
+          await deliver(
+            tester,
+            h.ch,
+            UserInput(
+              id: 'thinking-after-$i',
+              text: 'Later $i\nSecond line\nThird line',
+            ),
+          );
+        }
+        expect(original.mounted, isFalse);
+        final scrollable = find
+            .descendant(
+              of: find.byType(ListView).first,
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        await tester.scrollUntilVisible(
+          find.text('Thinking'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('Revised provider summary'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+        await showChat();
+        await tester.scrollUntilVisible(
+          find.text('Thinking'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('Revised provider summary'), findsNothing);
+        await deliver(tester, h.ch, snapshot(3, ''));
+        expect(find.byType(ThinkingCard), findsNothing);
+        expect(
+          (h.vm.state as ChatReady).messages.whereType<ThinkingMsg>(),
+          isEmpty,
+        );
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    },
+  );
+
   for (final fromHistory in [false, true]) {
     testWidgets('tool choices survive updates, streaming and lazy eviction '
         '(history: $fromHistory)', (tester) async {
+      final copied = <String>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(SystemChannels.platform, (call) async {
+            if (call.method == 'Clipboard.setData') {
+              copied.add((call.arguments as Map)['text'] as String);
+            }
+            return null;
+          });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(SystemChannels.platform, null);
+      });
       await tester.binding.setSurfaceSize(const Size(390, 844));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final h = (await tester.runAsync(extensionUiHarness))!;
@@ -136,10 +281,22 @@ void main() {
           );
         }
         expect(find.text('BASH'), findsOneWidget);
-        expect(find.text('echo retained'), findsNothing);
+        expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsNothing);
+        expect(find.text('✓ Done'), findsNothing);
+        expect(find.text('⏳ Running…'), findsNothing);
+        expect(find.text('Copy input'), findsNothing);
+        await tester.tap(find.byTooltip('Copy options'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Copy input'));
+        await tester.pumpAndSettle();
+        await tester.pump();
+        expect(copied, ['echo retained']);
+        expect(find.text(r'$ '), findsNothing);
         await tester.tap(find.text('BASH'));
         await tester.pump();
         expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsOneWidget);
         // Hiding even the only row must not overwrite its expansion choice.
         await h.prefs.setHideToolCalls(true);
         await tester.pump();
@@ -148,12 +305,22 @@ void main() {
         await h.prefs.setHideToolCalls(false);
         await tester.pump();
         expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsOneWidget);
         await deliver(
           tester,
           h.ch,
           ToolResult(toolCallId: 'collapse-bash', result: 'ok'),
         );
         expect(find.text('✓ Done'), findsOneWidget);
+        expect(find.text('ok'), findsOneWidget);
+        expect(find.text('Copy output'), findsNothing);
+        await tester.tap(find.byTooltip('Copy options'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Copy output'));
+        await tester.pumpAndSettle();
+        await tester.pump();
+        expect(copied, ['echo retained', 'ok']);
+        expect(find.text(r'$ '), findsOneWidget);
         await deliver(
           tester,
           h.ch,
@@ -164,7 +331,8 @@ void main() {
           ),
         );
         expect(find.text('READ'), findsOneWidget);
-        expect(find.textContaining('hidden.txt'), findsNothing);
+        expect(find.text('hidden.txt'), findsOneWidget);
+        expect(find.text('path=hidden.txt'), findsNothing);
         await deliver(
           tester,
           h.ch,
@@ -177,9 +345,12 @@ void main() {
             AgentChunk(inReplyTo: 'later-turn', delta: delta),
           );
           expect(find.text('echo retained'), findsOneWidget);
-          expect(find.textContaining('hidden.txt'), findsNothing);
+          expect(find.text(r'$ '), findsOneWidget);
+          expect(find.text('path=hidden.txt'), findsNothing);
         }
         await deliver(tester, h.ch, AgentDone(inReplyTo: 'later-turn'));
+        // Menu/header ink animations temporarily keep their lazy row alive.
+        await tester.pumpAndSettle();
         final originalCard = find
             .ancestor(
               of: find.text('BASH'),
@@ -212,11 +383,15 @@ void main() {
           scrollable: scrollable,
         );
         expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsOneWidget);
         await tester.ensureVisible(find.text('BASH'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('BASH'));
         await tester.pump();
-        expect(find.text('echo retained'), findsNothing);
+        expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsNothing);
+        expect(find.text('✓ Done'), findsNothing);
+        expect(find.text('⏳ Running…'), findsNothing);
         await tester.scrollUntilVisible(
           find.text('Later message 23\nMore text\nThird line'),
           -300,
@@ -232,13 +407,17 @@ void main() {
           300,
           scrollable: scrollable,
         );
-        expect(find.text('echo retained'), findsNothing);
-        expect(find.textContaining('hidden.txt'), findsNothing);
+        expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsNothing);
+        expect(find.text('✓ Done'), findsNothing);
+        expect(find.text('⏳ Running…'), findsNothing);
+        expect(find.text('path=hidden.txt'), findsNothing);
         await tester.ensureVisible(find.text('BASH'));
         await tester.pumpAndSettle();
         await tester.tap(find.text('BASH'));
         await tester.pump();
         expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsOneWidget);
         // Choices are screen-local, not persisted in the repository.
         await tester.pumpWidget(const SizedBox());
         await showChat();
@@ -247,7 +426,10 @@ void main() {
           300,
           scrollable: scrollable,
         );
-        expect(find.text('echo retained'), findsNothing);
+        expect(find.text('echo retained'), findsOneWidget);
+        expect(find.text(r'$ '), findsNothing);
+        expect(find.text('✓ Done'), findsNothing);
+        expect(find.text('⏳ Running…'), findsNothing);
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -261,6 +443,150 @@ void main() {
       }
     });
   }
+
+  testWidgets(
+    'compaction choices survive history, streaming and lazy eviction independently',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      Future<void> showChat() => tester.pumpWidget(
+        MaterialApp(
+          home: MultiProvider(
+            providers: [
+              ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+              ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+              ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+              ChangeNotifierProvider<AttachmentViewModel>.value(value: attach),
+            ],
+            child: const ChatPage(),
+          ),
+        ),
+      );
+      SessionHistory history({bool both = false}) => SessionHistory(
+        inReplyTo: 'sync',
+        sessionStartedAt: 1,
+        eos: true,
+        roomId: 'main',
+        events: [
+          const CompactionEvt(
+            ts: 101,
+            summary: 'History recap',
+            tokensBefore: 111,
+          ),
+          if (both)
+            const CompactionEvt(
+              ts: 102,
+              summary: 'Live recap',
+              tokensBefore: 222,
+            ),
+        ],
+      );
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await showChat();
+        await deliver(tester, h.ch, history());
+        expect(find.text('~111 tokens'), findsOneWidget);
+        expect(find.text('History recap'), findsNothing);
+        await deliver(
+          tester,
+          h.ch,
+          Compaction(ts: 102, summary: 'Live recap', tokensBefore: 222),
+        );
+        expect(find.text('~222 tokens'), findsOneWidget);
+        expect(find.text('Live recap'), findsNothing);
+        await tester.tap(find.text('~111 tokens'));
+        await tester.pump();
+        expect(find.text('History recap'), findsOneWidget);
+        expect(find.text('Live recap'), findsNothing);
+        await tester.tap(find.text('~222 tokens'));
+        await tester.pump();
+        expect(find.text('History recap'), findsOneWidget);
+        expect(find.text('Live recap'), findsOneWidget);
+        await tester.tap(find.text('~111 tokens'));
+        await tester.pump();
+        await deliver(tester, h.ch, history(both: true));
+        expect(find.text('History recap'), findsNothing);
+        expect(find.text('Live recap'), findsOneWidget);
+        await deliver(
+          tester,
+          h.ch,
+          UserInput(id: 'after-compaction', text: 'Continue'),
+        );
+        await deliver(
+          tester,
+          h.ch,
+          AgentChunk(inReplyTo: 'after-compaction', delta: 'Reply'),
+        );
+        expect(find.text('History recap'), findsNothing);
+        expect(find.text('Live recap'), findsOneWidget);
+        await deliver(tester, h.ch, AgentDone(inReplyTo: 'after-compaction'));
+        // Let header ink animations release their temporary row keep-alives.
+        await tester.pumpAndSettle();
+        final originalCard = find
+            .ancestor(
+              of: find.text('~222 tokens'),
+              matching: find.byType(CompactionBubble),
+            )
+            .evaluate()
+            .single;
+        for (var i = 0; i < 24; i++) {
+          await deliver(
+            tester,
+            h.ch,
+            UserInput(
+              id: 'after-compaction-$i',
+              text: 'New message $i\nMore text\nThird line',
+            ),
+          );
+        }
+        expect(find.text('~222 tokens'), findsNothing);
+        expect(originalCard.mounted, isFalse);
+        final scrollable = find
+            .descendant(
+              of: find.byType(ListView).first,
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        await tester.scrollUntilVisible(
+          find.text('~111 tokens'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('History recap'), findsNothing);
+        expect(find.text('Live recap'), findsOneWidget);
+        await tester.ensureVisible(find.text('~111 tokens'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('~111 tokens'));
+        await tester.pump();
+        expect(find.text('History recap'), findsOneWidget);
+        expect(find.text('Live recap'), findsOneWidget);
+        await tester.pumpWidget(const SizedBox());
+        await showChat();
+        await tester.scrollUntilVisible(
+          find.text('~111 tokens'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('History recap'), findsNothing);
+        expect(find.text('Live recap'), findsNothing);
+        expect(find.text('~222 tokens'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    },
+  );
 
   for (final requestBeforeTool in [false, true]) {
     testWidgets('live question follows its intro and tool, not later replies '

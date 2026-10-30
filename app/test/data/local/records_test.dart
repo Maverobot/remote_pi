@@ -1,6 +1,7 @@
 // Plan/31 — record roundtrips + volatile runtime wipe on boot.
 
 import 'dart:io';
+import 'package:app/domain/thinking.dart';
 
 import 'package:app/data/local/boxes.dart';
 import 'package:app/data/local/records/message_record.dart';
@@ -11,6 +12,69 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
 void main() {
+  test(
+    'thinking records and scope survive roundtrip without legacy text leakage',
+    () {
+      const scope = ThinkingScope(sessionId: 'S', epoch: 'E');
+      const thought = ThinkingObservation(
+        scope: scope,
+        messageId: 'm',
+        revision: 2,
+        status: ThinkingStatus.incomplete,
+        text: '  Summary\n',
+        locallyInterrupted: true,
+      );
+      final record = MessageRecord(
+        id: thought.id,
+        seq: 1,
+        role: MsgRole.assistant,
+        ts: DateTime.fromMillisecondsSinceEpoch(1),
+        thinking: thought,
+      );
+      final back = MessageRecord.fromJson(record.copyWith(seq: 4).toJson());
+      expect(back.thinking, thought);
+      expect(back.text, isEmpty);
+      expect(back.thinking!.incomplete, isTrue);
+      expect(
+        ThinkingObservation.tryFromJson({
+          ...thought.toJson(),
+          'text': '',
+        })!.visible,
+        isFalse,
+      );
+      final index = SessionIndexRecord(
+        epk: 'peer',
+        roomId: 'R',
+        thinkingScope: scope,
+      );
+      expect(
+        SessionIndexRecord.fromJson(
+          index.copyWith(displayName: 'new').toJson(),
+        ).thinkingScope,
+        scope,
+      );
+      expect(index.copyWith(clearThinkingScope: true).thinkingScope, isNull);
+      expect(
+        SessionIndexRecord.fromJson({'epk': 'p', 'room_id': 'R'}).thinkingScope,
+        isNull,
+      );
+      expect(
+        SessionIndexRecord.fromJson({
+          ...index.toJson(),
+          'thinking_scope': {'epoch': 2},
+        }).thinkingScope,
+        isNull,
+      );
+      expect(
+        MessageRecord.fromJson({
+          ...record.toJson(),
+          'thinking': {'revision': 'bad'},
+        }).thinking,
+        isNull,
+      );
+    },
+  );
+
   group('record roundtrips', () {
     test('MessageRecord (user + images) survives toJson/fromJson in order', () {
       final r = MessageRecord(

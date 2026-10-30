@@ -276,6 +276,27 @@ export interface BackgroundProgressWire {
   groups: { id: string; label?: string; tasks: BackgroundTaskWire[] }[];
 }
 
+export interface ThinkingSnapshotWire {
+  session_id: string;
+  epoch: string;
+  room_id: string;
+  message_id: string;
+  revision: number;
+  status: "streaming" | "complete" | "incomplete";
+  text: string;
+  ts: number;
+  run_id?: string;
+  history?: { index: number; before_event: number };
+}
+
+export interface ThinkingHistoryWire {
+  kind: "reply" | "reset";
+  session_id: string;
+  epoch: string;
+  count: number;
+  truncated: boolean;
+}
+
 export type ServerMessage =
   | {
       type: "pair_ok";
@@ -329,13 +350,15 @@ export type ServerMessage =
   | { type: "tool_result"; tool_call_id: string; result?: unknown; error?: string }
   | { type: "error"; in_reply_to?: string; code: ErrorCode; message: string }
   | { type: "cancelled"; in_reply_to: string; target_id: string }
-  | { type: "pong"; in_reply_to: string; background_progress?: BackgroundProgressWire }
+  | { type: "pong"; in_reply_to: string; background_progress?: BackgroundProgressWire; thinking?: ThinkingSnapshotWire }
   | { type: "bye"; reason: ByeReason }
   | {
       type: "session_history";
       in_reply_to: string;
       session_started_at: number;
       events: SessionHistoryEvent[];
+      thinking_history?: ThinkingHistoryWire;
+      thinking_reset_pending?: boolean;
       eos: boolean;
       truncated: boolean;
       room_id?: string;

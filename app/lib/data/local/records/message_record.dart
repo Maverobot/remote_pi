@@ -1,4 +1,5 @@
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/thinking.dart';
 
 /// Plan/31 — one persisted chat message (row-granular SSOT). Stored in the
 /// per-session `msgs:<epk>:<roomId>` box, keyed by [seq]. Maps to the domain
@@ -13,6 +14,7 @@ class MessageRecord {
   final int seq;
   final MsgRole role;
   final String text;
+  final ThinkingObservation? thinking;
 
   /// Ordered attached images (user messages only).
   final List<MessageImage> images;
@@ -38,6 +40,7 @@ class MessageRecord {
     required this.seq,
     required this.role,
     this.text = '',
+    this.thinking,
     List<MessageImage> images = const [],
     this.tool,
     this.askUser,
@@ -50,6 +53,7 @@ class MessageRecord {
   MessageRecord copyWith({
     int? seq,
     String? text,
+    ThinkingObservation? thinking,
     List<MessageImage>? images,
     ToolEventData? tool,
     AskUserPromptData? askUser,
@@ -60,6 +64,7 @@ class MessageRecord {
     seq: seq ?? this.seq,
     role: role,
     text: text ?? this.text,
+    thinking: thinking ?? this.thinking,
     images: images ?? this.images,
     tool: tool ?? this.tool,
     askUser: askUser ?? this.askUser,
@@ -73,7 +78,8 @@ class MessageRecord {
     'id': id,
     'seq': seq,
     'role': role.name,
-    'text': text,
+    'text': thinking == null ? text : '',
+    if (thinking != null) 'thinking': thinking!.toJson(),
     if (images.isNotEmpty)
       'images': [
         for (final image in images) {'data': image.data, 'mime': image.mime},
@@ -97,6 +103,7 @@ class MessageRecord {
         orElse: () => MsgRole.assistant,
       ),
       text: (j['text'] as String?) ?? '',
+      thinking: ThinkingObservation.tryFromJson(j['thinking']),
       images: _imagesFromJson(j),
       tool: toolRaw is Map
           ? ToolEventData.fromJson(toolRaw.cast<String, dynamic>())
@@ -123,6 +130,9 @@ class MessageRecord {
           images: images,
         );
       case MsgRole.assistant:
+        if (thinking != null) {
+          return ThinkingMsg(id: id, observation: thinking!);
+        }
         return AssistantMsg(id: id, text: text);
       case MsgRole.tool:
         final t = tool;

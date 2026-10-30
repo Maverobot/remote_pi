@@ -1270,7 +1270,7 @@ function captureEventHandler(eventName: string): EventHandler {
   } as unknown as ExtensionAPI;
   (extension as ExtensionFactory)(pi);
   if (!captured) throw new Error(`event "${eventName}" handler not registered`);
-  return captured;
+  return (event, ctx = makeMockCtx()) => captured!(event, { sessionManager: makeMockCtx().sessionManager, ...ctx as object });
 }
 
 function captureEventHarness(): {
@@ -1308,7 +1308,7 @@ function captureEventHarness(): {
     handler(eventName: string) {
       const h = handlers.get(eventName);
       if (!h) throw new Error(`event "${eventName}" handler not registered`);
-      return h;
+      return (event, ctx = makeMockCtx()) => h(event, { sessionManager: makeMockCtx().sessionManager, ...ctx as object });
     },
     emitBus(channel: string, data: unknown) {
       (pi.events as unknown as { emit: (channel: string, data: unknown) => void }).emit(channel, data);
@@ -3696,6 +3696,104 @@ describe("session sync", () => {
     await stop("", makeMockCtx());
     _setMessageBufferForTest([]);
     _setSessionStartedAtForTest(null);
+  });
+
+  test("thinking capture without connected peers replays final-only summaries and in-flight text", async () => {
+    const harness = captureEventHarness();
+    harness.handler("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", timestamp: 1, content: [{ type: "thinking", thinking: "offline summary" }] } });
+    await _pairForTest("thinking-late-owner");
+    const partial = { role: "assistant", timestamp: 2, content: [{ type: "thinking", thinking: "in flight" }] };
+    harness.handler("message_update")({ type: "message_update", message: partial, assistantMessageEvent: { type: "thinking_end", contentIndex: 0, content: "in flight", partial } });
+    const before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type: "session_sync", id: "late-sync" }, { abort() {} });
+    const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    const snapshots = frames.filter(f => f.type === "pong") as Extract<ServerMessage,{type:"pong"}>[];
+    expect(snapshots.map(p => p.thinking!.text)).toEqual(["offline summary", "in flight"]);
+    expect(snapshots.map(p => p.thinking!.status)).toEqual(["complete", "streaming"]);
+    expect(snapshots.map(p => p.thinking!.history!.before_event)).toEqual([0,0]);
+    harness.handler("agent_end")({ type: "agent_end" });
+  });
+
+  test("in-process session replacement uses actual SDK scope; cancelled replacement does not reset", async () => {
+    await _pairForTest("thinking-new-owner");
+    const status = captureHandler("remote-pi status");
+    const fresh = { ...makeMockCtx(), sessionManager: { getSessionId: () => "actual-fresh-sdk" } };
+    const ctx = { ...makeMockCtx(), newSession: vi.fn(async (options?: {withSession?: (value: unknown) => Promise<void>}) => {
+      await options?.withSession?.(fresh);
+      return { cancelled: false };
+    }) };
+    await status("", ctx);
+    let before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type:"session_new",id:"in-process" }, { abort() {} });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    let frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    expect(frames.find(f => f.type === "session_history")).toMatchObject({ thinking_history:{kind:"reset",session_id:"actual-fresh-sdk",count:0},events:[] });
+    expect(frames.some(f => "thinking_reset_pending" in f)).toBe(false);
+    await status("", { ...makeMockCtx(), newSession: vi.fn(async () => ({cancelled:true})) });
+    before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({type:"session_new",id:"cancelled-new"},{abort(){}});
+    await new Promise<void>(resolve => setImmediate(resolve));
+    frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    expect(frames.some(f => f.type === "session_history")).toBe(false);
+    expect(frames.find(f => f.type === "action_error")).toMatchObject({in_reply_to:"cancelled-new"});
+  });
+
+  test("thinking live/history uses known pongs, original request UUID and original event anchors", async () => {
+    await _pairForTest("thinking-owner");
+    const harness = captureEventHarness();
+    const onEnd = harness.handler("message_end");
+    onEnd({ type: "message_end", message: { role: "user", content: "question", timestamp: 1 } });
+    const before = relayRef.current!.send.mock.calls.length;
+    onEnd({ type: "message_end", message: { role: "assistant", stopReason: "toolUse", timestamp: 2, content: [
+      { type: "thinking", thinking: "Summary A", thinkingSignature: "never-wire" },
+      { type: "text", text: "answer" },
+      { type: "thinking", thinking: "Summary B" },
+      { type: "toolCall", id: "tool", name: "read", arguments: {} },
+    ] } });
+    onEnd({ type: "message_end", message: { role: "toolResult", toolCallId: "tool", content: "result", timestamp: 3 } });
+    routeClientMessage({ type: "session_sync", id: "thinking-sync" }, { abort() {} });
+    const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    const history = frames.find(f => f.type === "session_history") as Extract<ServerMessage, {type: "session_history"}>;
+    expect(history.events.map(e => e.type)).toEqual(["user_input", "agent_message", "tool_request", "tool_result"]);
+    expect(history.thinking_history).toMatchObject({ kind: "reply", count: 1 });
+    const pongs = frames.filter(f => f.type === "pong") as Extract<ServerMessage, {type: "pong"}>[];
+    expect(pongs).toHaveLength(2);
+    expect(pongs[0]!.thinking).toMatchObject({ text: "Summary A\n\nSummary B", status: "complete" });
+    expect(pongs[1]).toMatchObject({ in_reply_to: "thinking-sync", thinking: { message_id: pongs[0]!.thinking!.message_id, revision: pongs[0]!.thinking!.revision, history: { index: 0, before_event: 1 } } });
+    expect(JSON.stringify(frames)).not.toContain("never-wire");
+  });
+
+  test("daemon fresh reset invalidates all owners without inventing SDK scope during exit window", async () => {
+    await _pairForTest("thinking-owner-a");
+    await _pairAdditionalForTest("thinking-owner-b", "Other phone");
+    const status = captureHandler("remote-pi status");
+    await status("", makeMockCtx()); // no in-process newSession method
+    const harness = captureEventHarness();
+    const before = relayRef.current!.send.mock.calls.length;
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+    vi.useFakeTimers();
+    process.env["REMOTE_PI_DAEMON"] = "1";
+    try {
+      routeClientMessage({ type: "session_new", id: "fresh" }, { abort() {} });
+      routeClientMessage({ type: "session_sync", id: "during-exit" }, { abort() {} });
+      harness.handler("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [{ type: "thinking", thinking: "stale" }], timestamp: 4 } });
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string));
+      const resets = frames.filter(f => f.inner.type === "session_history" && f.inner.in_reply_to === "fresh");
+      expect(resets.map(f => f.peer).sort()).toEqual(["thinking-owner-a", "thinking-owner-b"]);
+      for (const reset of resets) expect(reset.inner).toMatchObject({ thinking_reset_pending: true, events: [] });
+      const transitional = frames.find(f => f.inner.type === "session_history" && f.inner.in_reply_to === "during-exit")!.inner;
+      expect(transitional).not.toHaveProperty("thinking_history");
+      expect(transitional).not.toHaveProperty("thinking_reset_pending");
+      expect(frames.some(f => f.inner.type === "pong" && "thinking" in f.inner)).toBe(false);
+      await vi.advanceTimersByTimeAsync(100);
+      expect(exit).toHaveBeenCalledOnce();
+    } finally {
+      delete process.env["REMOTE_PI_DAEMON"];
+      exit.mockRestore();
+      vi.useRealTimers();
+      // Model a real replacement SDK scope, not a fabricated production ID.
+      harness.handler("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", content: [], timestamp: 5 } }, { sessionManager: { getSessionId: () => "replacement-sdk" } });
+    }
   });
 
   test("session_sync with no active session → empty history + eos:true + truncated:false", async () => {

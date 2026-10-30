@@ -1,3 +1,4 @@
+import 'thinking.dart';
 // Session domain model — chat message variants + streaming buffer.
 // Lives in domain/ → no Flutter, no network, no storage.
 
@@ -115,6 +116,18 @@ bool _sameMessageImages(List<MessageImage> left, List<MessageImage> right) {
     if (left[index] != right[index]) return false;
   }
   return true;
+}
+
+class ThinkingMsg extends ChatMessage {
+  final ThinkingObservation observation;
+  const ThinkingMsg({required super.id, required this.observation});
+  @override
+  bool operator ==(Object other) =>
+      other is ThinkingMsg &&
+      other.id == id &&
+      other.observation == observation;
+  @override
+  int get hashCode => Object.hash(id, observation);
 }
 
 class AssistantMsg extends ChatMessage {

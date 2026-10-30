@@ -14,6 +14,7 @@ import 'package:app/ui/chat/widgets/input_bar.dart';
 import 'package:app/ui/chat/widgets/background_progress_panel.dart';
 import 'package:app/ui/chat/widgets/ask_user_prompt_card.dart';
 import 'package:app/ui/chat/widgets/message_bubble.dart';
+import 'package:app/ui/chat/widgets/thinking_card.dart';
 import 'package:app/ui/chat/widgets/streaming_bubble.dart';
 import 'package:app/ui/chat/widgets/tool_request_card.dart';
 import 'package:app/ui/chat/widgets/extension_ui_card.dart';
@@ -65,11 +66,27 @@ class ChatPage extends StatefulWidget {
 class _ChatPageState extends State<ChatPage> {
   // Keep choices outside lazy rows, which are disposed when scrolled away.
   final _expandedToolCallIds = <String>{};
+  final _expandedCompactionIds = <String>{};
+  final _expandedThinkingIds = <String>{};
+
+  void _toggleThinking(String id) {
+    setState(() {
+      if (!_expandedThinkingIds.remove(id)) _expandedThinkingIds.add(id);
+    });
+  }
 
   void _toggleTool(String toolCallId) {
     setState(() {
       if (!_expandedToolCallIds.remove(toolCallId)) {
         _expandedToolCallIds.add(toolCallId);
+      }
+    });
+  }
+
+  void _toggleCompaction(String messageId) {
+    setState(() {
+      if (!_expandedCompactionIds.remove(messageId)) {
+        _expandedCompactionIds.add(messageId);
       }
     });
   }
@@ -418,6 +435,10 @@ class _ChatPageState extends State<ChatPage> {
           messages: messages,
           expandedToolCallIds: _expandedToolCallIds,
           onToggleTool: _toggleTool,
+          expandedThinkingIds: _expandedThinkingIds,
+          onToggleThinking: _toggleThinking,
+          expandedCompactionIds: _expandedCompactionIds,
+          onToggleCompaction: _toggleCompaction,
           hideToolCalls: hideToolCalls,
           uiFlows: state.uiFlows,
           uiError: state.pendingUiError,
@@ -593,8 +614,12 @@ class _ChatPageState extends State<ChatPage> {
 // ---------------------------------------------------------------------------
 
 class _MessageList extends StatelessWidget {
+  final Set<String> expandedThinkingIds;
+  final ValueChanged<String> onToggleThinking;
   final Set<String> expandedToolCallIds;
   final ValueChanged<String> onToggleTool;
+  final Set<String> expandedCompactionIds;
+  final ValueChanged<String> onToggleCompaction;
   final List<ChatMessage> messages;
   final StreamingMessage? streaming;
   final bool hideToolCalls;
@@ -604,8 +629,12 @@ class _MessageList extends StatelessWidget {
   final Future<void> Function(ExtensionUiResponse) onRespond;
   final void Function(String, ApproveDecision) onDecide;
   const _MessageList({
+    required this.expandedThinkingIds,
+    required this.onToggleThinking,
     required this.expandedToolCallIds,
     required this.onToggleTool,
+    required this.expandedCompactionIds,
+    required this.onToggleCompaction,
     required this.messages,
     required this.streaming,
     required this.hideToolCalls,
@@ -652,13 +681,22 @@ class _MessageList extends StatelessWidget {
             child: switch (msg) {
               UserMsg() => UserBubble(msg),
               AssistantMsg() => AssistantBubble(msg),
+              ThinkingMsg() => ThinkingCard(
+                msg,
+                expanded: expandedThinkingIds.contains(msg.id),
+                onToggle: () => onToggleThinking(msg.id),
+              ),
               ToolEvent() => ToolRequestCard(
                 tool: msg,
                 expanded: expandedToolCallIds.contains(msg.toolCallId),
                 onToggle: () => onToggleTool(msg.toolCallId),
                 onDecide: onDecide,
               ),
-              CompactionMsg() => CompactionBubble(msg),
+              CompactionMsg() => CompactionBubble(
+                msg,
+                expanded: expandedCompactionIds.contains(msg.id),
+                onToggle: () => onToggleCompaction(msg.id),
+              ),
               AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
             },
           ),

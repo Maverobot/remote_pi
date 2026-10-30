@@ -1,7 +1,10 @@
+import 'dart:convert';
+
 import 'package:app/domain/session_state.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/core/themes/themes.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 // Inline tool execution card that appears in the chat flow.
 //
@@ -77,12 +80,77 @@ class ToolRequestCard extends StatelessWidget {
               _buildCodeBlock(context),
               const SizedBox(height: 8),
               _buildOutcome(color),
+              if (_hasResult)
+                _buildOutputSection(
+                  context,
+                  'OUTPUT',
+                  _payloadText(tool.result),
+                ),
+              if (tool.error?.isNotEmpty ?? false)
+                _buildOutputSection(context, 'ERROR', tool.error!),
             ],
           ],
         ),
       ),
     );
   }
+
+  bool get _hasResult => tool.result != null && tool.result != '';
+  bool get _hasOutput => _hasResult || (tool.error?.isNotEmpty ?? false);
+
+  String _inputText() {
+    final args = tool.args;
+    if (tool.tool.toLowerCase() == 'bash' && args is Map) {
+      final command = args['command'];
+      if (command is String) return command;
+    }
+    return _payloadText(args);
+  }
+
+  String _outputText() => [
+    if (_hasResult) _payloadText(tool.result),
+    if (tool.error?.isNotEmpty ?? false) tool.error!,
+  ].join('\n');
+
+  static String _payloadText(Object? value) => value is String
+      ? value
+      : const JsonEncoder.withIndent('  ').convert(value);
+
+  Future<void> _copy(BuildContext context, String text, String label) async {
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+    } on PlatformException {
+      if (!context.mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not copy ${label.toLowerCase()}')),
+      );
+      return;
+    }
+    if (!context.mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text('$label copied')));
+  }
+
+  Widget _buildOutputSection(BuildContext context, String label, String text) =>
+      Padding(
+        padding: const EdgeInsets.only(top: 10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              label,
+              style: context.typo.monoSmall.copyWith(
+                color: label == 'ERROR'
+                    ? context.colors.error
+                    : context.colors.muted,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(text, style: context.typo.mono),
+          ],
+        ),
+      );
 
   Widget _buildHeader(BuildContext context, Color color) {
     final statusLabel = switch (tool.status) {
@@ -93,62 +161,131 @@ class ToolRequestCard extends StatelessWidget {
       ToolEventStatus.expired => 'EXPIRED',
     };
 
-    return Semantics(
-      button: true,
-      expanded: expanded,
-      label:
-          '${tool.tool}, ${expanded ? "expanded" : "collapsed"}, $statusLabel',
-      onTap: onToggle,
-      excludeSemantics: true,
-      child: Material(
-        type: MaterialType.transparency,
-        child: InkWell(
-          onTap: onToggle,
-          excludeFromSemantics: true,
-          borderRadius: BorderRadius.circular(8),
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(minHeight: 48),
-            child: Row(
-              children: [
-                CustomPaint(
-                  size: const Size(14, 14),
-                  painter: _TerminalIconPainter(color: color),
-                ),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    tool.tool.toUpperCase(),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: kMonoFamily,
-                      fontSize: 11.5,
-                      color: color,
-                      letterSpacing: 0.6,
-                    ),
+    final preview = expanded ? '' : _formatPreview(tool.tool, tool.args);
+
+    return Row(
+      children: [
+        Expanded(
+          child: Semantics(
+            button: true,
+            expanded: expanded,
+            label:
+                '${tool.tool}, ${expanded ? "expanded" : "collapsed"}, $statusLabel'
+                '${preview.isEmpty ? "" : ", $preview"}',
+            onTap: onToggle,
+            excludeSemantics: true,
+            child: Material(
+              type: MaterialType.transparency,
+              child: InkWell(
+                onTap: onToggle,
+                excludeFromSemantics: true,
+                borderRadius: BorderRadius.circular(8),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minHeight: 48),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          CustomPaint(
+                            size: const Size(14, 14),
+                            painter: _TerminalIconPainter(color: color),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              tool.tool.toUpperCase(),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontFamily: kMonoFamily,
+                                fontSize: 11.5,
+                                color: color,
+                                letterSpacing: 0.6,
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            statusLabel,
+                            style: TextStyle(
+                              fontFamily: kMonoFamily,
+                              fontSize: 10,
+                              color: color,
+                              letterSpacing: 0.4,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Icon(
+                            expanded ? Icons.expand_less : Icons.expand_more,
+                            color: color,
+                            size: 20,
+                          ),
+                        ],
+                      ),
+                      if (preview.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          preview,
+                          maxLines: 1,
+                          softWrap: false,
+                          overflow: TextOverflow.ellipsis,
+                          style: context.typo.monoSmall.copyWith(
+                            color: context.colors.muted,
+                          ),
+                        ),
+                      ],
+                    ],
                   ),
                 ),
-                const SizedBox(width: 8),
-                Text(
-                  statusLabel,
-                  style: TextStyle(
-                    fontFamily: kMonoFamily,
-                    fontSize: 10,
-                    color: color,
-                    letterSpacing: 0.4,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Icon(
-                  expanded ? Icons.expand_less : Icons.expand_more,
-                  color: color,
-                  size: 20,
-                ),
-              ],
+              ),
             ),
           ),
         ),
-      ),
+        SizedBox.square(
+          dimension: 48,
+          child: PopupMenuButton<_ToolCopyAction>(
+            tooltip: 'Copy options',
+            icon: Icon(Icons.more_vert, color: context.colors.text),
+            onSelected: (action) {
+              switch (action) {
+                case _ToolCopyAction.input:
+                  _copy(context, _inputText(), 'Input');
+                case _ToolCopyAction.output:
+                  _copy(context, _outputText(), 'Output');
+              }
+            },
+            itemBuilder: (context) => [
+              PopupMenuItem(
+                value: _ToolCopyAction.input,
+                enabled: tool.args != null,
+                child: Text(
+                  'Copy input',
+                  style: context.typo.monoSmall.copyWith(
+                    color: tool.args != null
+                        ? context.colors.accent
+                        : context.colors.muted,
+                  ),
+                ),
+              ),
+              PopupMenuItem(
+                value: _ToolCopyAction.output,
+                enabled: _hasOutput,
+                child: Text(
+                  'Copy output',
+                  style: context.typo.monoSmall.copyWith(
+                    color: _hasOutput
+                        ? context.colors.accent
+                        : context.colors.muted,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
@@ -210,6 +347,18 @@ class ToolRequestCard extends StatelessWidget {
       text,
       style: TextStyle(fontFamily: kMonoFamily, fontSize: 12, color: color),
     );
+  }
+
+  static String _formatPreview(String tool, dynamic args) {
+    if (args is! Map) return '';
+    final value = switch (tool.toLowerCase()) {
+      'bash' => _stringArg(args, const ['command']),
+      'read' ||
+      'edit' ||
+      'write' => _stringArg(args, const ['file_path', 'path']),
+      _ => '',
+    };
+    return value.replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   static String _formatArgs(String tool, dynamic args) {
@@ -282,6 +431,8 @@ class ToolRequestCard extends StatelessWidget {
     return '';
   }
 }
+
+enum _ToolCopyAction { input, output }
 
 class _ToolDisplay {
   final String command;

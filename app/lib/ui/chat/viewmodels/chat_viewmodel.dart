@@ -199,7 +199,10 @@ class ChatViewModel extends ViewModel<ChatState> {
   }
 
   void _onMessages(List<MessageRecord> rows) {
-    _messages = [for (final r in rows) r.toChatMessage()];
+    _messages = [
+      for (final r in rows)
+        if (r.thinking == null || r.thinking!.visible) r.toChatMessage(),
+    ];
     _uiFlows = List.unmodifiable(
       _uiFlows.map((flow) {
         if (!flow.awaitingToolRow) return flow;
@@ -468,6 +471,8 @@ class ChatViewModel extends ViewModel<ChatState> {
 
   @override
   void dispose() {
+    final peer = _activePeer;
+    if (peer != null) _sync.leaveThinking(peer.remoteEpk, _activeRoomId);
     _disposed = true;
     _msgsSub?.cancel();
     _runtimeSub?.cancel();

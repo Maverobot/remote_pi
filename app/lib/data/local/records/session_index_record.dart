@@ -1,3 +1,5 @@
+import 'package:app/domain/thinking.dart';
+
 /// Plan/31 — per-session activity (#5: idle | working).
 enum SessionActivity { idle, working }
 
@@ -12,6 +14,7 @@ class SessionIndexRecord {
   final DateTime? lastMessageAt;
   final String? lastMessagePreview;
   final DateTime? sessionStartedAt;
+  final ThinkingScope? thinkingScope;
 
   const SessionIndexRecord({
     required this.epk,
@@ -21,6 +24,7 @@ class SessionIndexRecord {
     this.lastMessageAt,
     this.lastMessagePreview,
     this.sessionStartedAt,
+    this.thinkingScope,
   });
 
   String get key => '$epk:$roomId';
@@ -31,6 +35,8 @@ class SessionIndexRecord {
     DateTime? lastMessageAt,
     String? lastMessagePreview,
     DateTime? sessionStartedAt,
+    ThinkingScope? thinkingScope,
+    bool clearThinkingScope = false,
   }) => SessionIndexRecord(
     epk: epk,
     roomId: roomId,
@@ -39,6 +45,9 @@ class SessionIndexRecord {
     lastMessageAt: lastMessageAt ?? this.lastMessageAt,
     lastMessagePreview: lastMessagePreview ?? this.lastMessagePreview,
     sessionStartedAt: sessionStartedAt ?? this.sessionStartedAt,
+    thinkingScope: clearThinkingScope
+        ? null
+        : thinkingScope ?? this.thinkingScope,
   );
 
   Map<String, dynamic> toJson() => {
@@ -49,6 +58,7 @@ class SessionIndexRecord {
     'last_message_at': lastMessageAt?.millisecondsSinceEpoch,
     'last_message_preview': lastMessagePreview,
     'session_started_at': sessionStartedAt?.millisecondsSinceEpoch,
+    if (thinkingScope != null) 'thinking_scope': thinkingScope!.toJson(),
   };
 
   factory SessionIndexRecord.fromJson(Map<String, dynamic> j) {
@@ -66,6 +76,7 @@ class SessionIndexRecord {
       lastMessageAt: ms(j['last_message_at']),
       lastMessagePreview: j['last_message_preview'] as String?,
       sessionStartedAt: ms(j['session_started_at']),
+      thinkingScope: ThinkingScope.tryFromJson(j['thinking_scope']),
     );
   }
 
@@ -78,7 +89,8 @@ class SessionIndexRecord {
       other.status == status &&
       other.lastMessageAt == lastMessageAt &&
       other.lastMessagePreview == lastMessagePreview &&
-      other.sessionStartedAt == sessionStartedAt;
+      other.sessionStartedAt == sessionStartedAt &&
+      other.thinkingScope == thinkingScope;
 
   @override
   int get hashCode => Object.hash(
@@ -89,5 +101,6 @@ class SessionIndexRecord {
     lastMessageAt,
     lastMessagePreview,
     sessionStartedAt,
+    thinkingScope,
   );
 }

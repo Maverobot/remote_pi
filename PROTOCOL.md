@@ -524,3 +524,73 @@ Longo prazo:
 ## Reportar problemas de segurança
 
 [Definir canal] — por enquanto, abra issue marcando como `security` ou contate maintainers diretamente.
+
+### Provider-visible Thinking (optional, grouped)
+
+Thinking content is distinct from thinking-level settings. One SDK assistant
+message yields one grouped observation; readable thinking/summary slots are
+joined in content-index order with `\n\n`, preserving each original string.
+Redacted blocks and signatures are never display content. Ordinary `agent_chunk`
+and legacy history events are unchanged.
+
+Live observations use the known `pong` carrier (no `background_progress`):
+
+```json
+{"type":"pong","in_reply_to":"thinking:m","thinking":{"session_id":"S","epoch":"E","room_id":"R","message_id":"m","revision":1,"status":"streaming","text":"Visible provider summary","ts":1700000000000,"run_id":"u"}}
+```
+
+Identity is authenticated peer + room + SDK session + capture epoch + message ID;
+run ID and timestamp are not identity. IDs are nonempty opaque strings. Revision
+is a positive safe integer; timestamp is a nonnegative integer in Dart's date
+range. Status is `streaming`, `complete`, or `incomplete`. Each higher revision
+replaces the complete text/status; equal/lower revisions are inert. Empty text
+retracts visibility, retaining a hidden revision tombstone. Interrupted text is
+retained and labelled incomplete. Local interruption never increments producer
+revision. Unknown/malformed optional payloads are ignored without an error frame.
+
+History keeps its exact legacy `events`, limit and `truncated`, adding:
+
+```json
+{"thinking_history":{"kind":"reply","session_id":"S","epoch":"E","count":1,"truncated":false}}
+```
+
+One separate `pong` per selected observation uses the original sync UUID as
+`in_reply_to` and adds `thinking.history:{"index":0,"before_event":2}`. Index is
+its ordinal in the captured list; `before_event` anchors before the **original
+wire event**, not a database row (tool results may collapse into a tool row).
+The end anchor is `events.length`. Base, count, snapshots and anchors share one
+captured query view. Select newest N thinking messages within the legacy source
+window separately, including in-flight and retracted observations; limit zero
+selects none. Thinking truncation is separate from legacy truncation.
+
+New clients associate tagged replies **before applying any base history** with
+an outstanding UUID/peer/room/connection generation; shared-Owner foreign replies
+are ignored. Intentional session reset broadcasts use `kind:"reset"`, count zero,
+and the authoritative SDK scope. Supplements cannot establish scope. First live
+may establish an unknown scope; later mismatch requires matched history/reset.
+Same SDK session with a new capture epoch preserves previously received cards.
+Malformed-present metadata is not legacy absence. Missing supplements have a
+bounded fallback applying ordinary history and preserving received thinking;
+omission is not deletion. Capture/live writes coalesce at 200ms; terminal and
+retraction changes flush promptly. Optional history assembly waits at most 3s
+after base (3s request expiry without base), bounded to 256 entries/16 MiB.
+
+Mobile uses existing assistant records with **empty legacy text** and optional
+nested thinking, plus an optional `thinking_scope` checkpoint in the existing
+session index. No new persisted role or box namespace. Old readers ignore Pong
+metadata and see at most empty assistant spacing; old writers may drop optional
+fields/rows, so lossless downgrade retention is not promised. Separate supplements
+do not inflate ordinary history with thought text. Individual frames remain
+subject to the relay's existing default 4 MiB decoded-payload ceiling; no text
+truncation or fragmentation is defined.
+
+Daemon fresh-restart exception: the successful pre-exit empty reset history may
+carry `thinking_reset_pending:true` without `thinking_history`, because the next
+SDK session ID does not exist yet. Only an authenticated active-origin/room/
+generation and canonical empty/eos/nontruncated reset shape permits invalidating
+Thinking scope/capture/assemblies. False, malformed, noncanonical or conflicting
+markers do not authorize reset. All owners receive this existing fanout. Producer
+Thinking is suspended for the outgoing SDK; transitional sync replies remain
+untagged and do not repeat the marker. Actual new SDK context restores tagged
+replies. In-process replacement uses its real SDK ID; cancelled actions do not
+reset. No identity is synthesized from a timestamp or predicted future session.

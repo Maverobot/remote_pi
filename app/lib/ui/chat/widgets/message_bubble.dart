@@ -115,11 +115,18 @@ class UserBubble extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 /// A system message distinct from user/assistant: shows that the Pi compacted
-/// the context, with the recap summary and the reclaimed token count. Mirrors
+/// the context, with the recap summary and pre-compaction token count. Mirrors
 /// the TUI's CompactionSummaryMessageComponent.
 class CompactionBubble extends StatelessWidget {
   final CompactionMsg message;
-  const CompactionBubble(this.message, {super.key});
+  final bool expanded;
+  final VoidCallback onToggle;
+  const CompactionBubble(
+    this.message, {
+    super.key,
+    required this.expanded,
+    required this.onToggle,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -140,33 +147,28 @@ class CompactionBubble extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Row(
-                children: [
-                  Icon(LucideIcons.check, size: 13, color: colors.success),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      'Context compacted',
-                      style: TextStyle(
-                        fontFamily: kMonoFamily,
-                        fontSize: 12,
-                        color: colors.text,
-                        fontWeight: FontWeight.w600,
-                      ),
+              if (summary.isNotEmpty)
+                Semantics(
+                  button: true,
+                  expanded: expanded,
+                  label:
+                      'Context compacted, ${expanded ? "expanded" : "collapsed"}'
+                      '${tokens == null ? "" : ", ~$tokens tokens"}',
+                  onTap: onToggle,
+                  excludeSemantics: true,
+                  child: Material(
+                    type: MaterialType.transparency,
+                    child: InkWell(
+                      onTap: onToggle,
+                      excludeFromSemantics: true,
+                      borderRadius: BorderRadius.circular(8),
+                      child: _buildHeader(context),
                     ),
                   ),
-                  if (tokens != null)
-                    Text(
-                      '~$tokens tokens',
-                      style: TextStyle(
-                        fontFamily: kMonoFamily,
-                        fontSize: 11,
-                        color: colors.muted,
-                      ),
-                    ),
-                ],
-              ),
-              if (summary.isNotEmpty) ...[
+                )
+              else
+                _buildHeader(context),
+              if (expanded && summary.isNotEmpty) ...[
                 const SizedBox(height: 6),
                 Text(
                   summary,
@@ -180,6 +182,50 @@ class CompactionBubble extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildHeader(BuildContext context) {
+    final colors = context.colors;
+    final tokens = message.tokensBefore;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(minHeight: 48),
+      child: Row(
+        children: [
+          Icon(LucideIcons.check, size: 13, color: colors.success),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Wrap(
+              spacing: 8,
+              runSpacing: 4,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                Text(
+                  'Context compacted',
+                  style: context.typo.mono.copyWith(
+                    fontSize: 12,
+                    color: colors.text,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if (tokens != null)
+                  Text(
+                    '~$tokens tokens',
+                    style: context.typo.monoSmall.copyWith(color: colors.muted),
+                  ),
+              ],
+            ),
+          ),
+          if (message.summary.isNotEmpty) ...[
+            const SizedBox(width: 8),
+            Icon(
+              expanded ? Icons.expand_less : Icons.expand_more,
+              color: colors.muted,
+              size: 20,
+            ),
+          ],
+        ],
       ),
     );
   }

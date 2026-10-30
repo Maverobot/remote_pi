@@ -1,6 +1,7 @@
 // ignore_for_file: lines_longer_than_80_chars
 
 import 'package:app/domain/background_progress.dart';
+import 'thinking.dart';
 
 // ---------------------------------------------------------------------------
 // Control frames (plano 12 — presence)
@@ -1009,12 +1010,14 @@ class Cancelled extends ServerMessage {
 class Pong extends ServerMessage {
   final String inReplyTo;
   final BackgroundProgressMessage? backgroundProgress;
-  Pong({required this.inReplyTo, this.backgroundProgress});
+  final ThinkingSnapshot? thinking;
+  Pong({required this.inReplyTo, this.backgroundProgress, this.thinking});
 
   factory Pong.fromJson(Map<String, dynamic> j) {
     final reply = j['in_reply_to'] as String;
     return Pong(
       inReplyTo: reply,
+      thinking: ThinkingSnapshot.tryFromJson(j['thinking']),
       backgroundProgress: j.containsKey('background_progress')
           ? BackgroundProgressMessage.fromJson(reply, j['background_progress'])
           : null,
@@ -1277,6 +1280,9 @@ class SessionHistory extends ServerMessage {
   final bool eos;
   final bool truncated;
   final String? roomId;
+  final bool thinkingResetPending;
+  final bool thinkingHistoryPresent;
+  final ThinkingHistoryManifest? thinkingHistory;
   SessionHistory({
     required this.inReplyTo,
     required this.sessionStartedAt,
@@ -1284,6 +1290,9 @@ class SessionHistory extends ServerMessage {
     required this.eos,
     this.truncated = false,
     this.roomId,
+    this.thinkingResetPending = false,
+    this.thinkingHistoryPresent = false,
+    this.thinkingHistory,
   });
 
   factory SessionHistory.fromJson(Map<String, dynamic> j) => SessionHistory(
@@ -1296,6 +1305,9 @@ class SessionHistory extends ServerMessage {
     // Tolerate absence during the protocol transition window.
     truncated: (j['truncated'] as bool?) ?? false,
     roomId: j['room_id'] as String?,
+    thinkingResetPending: j['thinking_reset_pending'] == true,
+    thinkingHistoryPresent: j.containsKey('thinking_history'),
+    thinkingHistory: ThinkingHistoryManifest.tryFromJson(j['thinking_history']),
   );
 }
 

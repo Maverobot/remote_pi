@@ -32,6 +32,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { ThinkingCapture, thinkingFrame, checkedThinkingFrame } from "./thinking_capture.js";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -871,6 +872,7 @@ type BufferMsg = {
   tokensBefore?: number;
 };
 let _messageBuffer: BufferMsg[] = [];
+const _thinkingCapture = new ThinkingCapture(() => _myRoomId || "main", _broadcastToActive);
 type PendingSteer = { id: string; text: string };
 let _pendingSteers: PendingSteer[] = [];
 let _lastConsumedSteerText: string | null = null;
@@ -1018,6 +1020,8 @@ function _maybeDrainQueuedItem(): void {
  */
 export async function _connectForTest(ctx: unknown): Promise<void> {
   const real = ctx as Parameters<typeof _cmdJoin>[0];
+  const sdk = ctx as ExtensionContext;
+  if (sdk.sessionManager) _thinkingCapture.setSession(sdk.sessionManager.getSessionId());
   if (await _cmdJoin(real)) await _cmdStart(real);
 }
 
@@ -1082,6 +1086,7 @@ export function _getCachedPublicKeyForTest(): string | null {
 
 export function _setMessageBufferForTest(msgs: unknown[]): void {
   _messageBuffer = msgs as BufferMsg[];
+  _thinkingCapture.clear();
 }
 
 /** Test-only accessor: returns a defensive copy of the buffer. */
@@ -2490,13 +2495,21 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
     _clearMeshWakeRequest();
   });
 
-  pi.on("message_start", (event) => {
+  pi.on("message_start", (event, ctx) => {
+    if (event.message?.role === "assistant") {
+      _thinkingCapture.setSession(ctx.sessionManager.getSessionId());
+      _thinkingCapture.start(event.message, _messageBuffer.length, _currentTurnId ?? undefined);
+    }
     const message = event?.message as BufferMsg | undefined;
     if (!_anyPeerActive() || message?.role !== "user") return;
     _broadcastConsumedSteerForUserContent(message.content);
   });
 
-  pi.on("message_update", (event) => {
+  pi.on("message_update", (event, ctx) => {
+    if (event.assistantMessageEvent.type.startsWith("thinking_")) {
+      _thinkingCapture.setSession(ctx.sessionManager.getSessionId());
+      _thinkingCapture.update(event, _messageBuffer.length, _currentTurnId ?? undefined);
+    }
     if (!_anyPeerActive() || !_currentTurnId) return;
     const ae = event.assistantMessageEvent;
     if (ae.type === "text_delta") {
@@ -2538,7 +2551,11 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // turn — including turns initiated from the Pi terminal (source:"interactive")
   // or RPC. Previous impl overwrote on `agent_end` and lost everything but the
   // last turn (see diagnostics 14, 15).
-  pi.on("message_end", (event) => {
+  pi.on("message_end", (event, ctx) => {
+    if (event.message?.role === "assistant") {
+      _thinkingCapture.setSession(ctx.sessionManager.getSessionId());
+      _thinkingCapture.end(event.message, _messageBuffer.length, _currentTurnId ?? undefined);
+    }
     const m = event?.message as { role?: string; content?: unknown; stopReason?: string; errorMessage?: string } | undefined;
     if (!m) return;
     if (m.role === "user" && _anyPeerActive()) {
@@ -2565,6 +2582,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   });
 
   pi.on("agent_end", (_event, ctx) => {
+    _thinkingCapture.finishInterrupted();
     _captureMeshDrainContext(ctx);
     // Buffer is fed by `message_end`; here we only finalize the outbound
     // turn signal to every connected owner. No buffer mutation.
@@ -2656,6 +2674,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // bound to the current session.
   pi.on("session_start", (_event, ctx) => {
     _lastEventCtx = ctx;
+    _thinkingCapture.setSession(ctx.sessionManager.getSessionId());
     if (!_backgroundProgress && pi.events) _backgroundProgress = createBackgroundProgressBridge(pi.events);
     _backgroundProgress?.setSession(ctx.sessionManager.getSessionId());
     // session_shutdown disposes per-session pi-ask subscriptions. A host that
@@ -2759,6 +2778,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // best-effort: every step is guarded so a partially-initialised instance
   // (e.g. shutdown lands mid-`_cmdRoot`) tears down without throwing.
   pi.on("session_shutdown", async () => {
+    _thinkingCapture.finishInterrupted();
     // Revoke async authority synchronously, before any teardown await. `_disposed`
     // blocks the outgoing continuation immediately; the root and candidate
     // generations keep queued work stale even if a same-module session_start
@@ -5024,7 +5044,7 @@ export function _routeClientMessageFrom(
       // ("session_new failed") and left New Context wedged.
       const restartFresh = () => {
         sender.send({ type: "action_ok", in_reply_to: msg.id, action: "session_new" });
-        _resetSessionForNew(msg.id);
+        _resetSessionForNew(msg.id, true);
         setTimeout(() => process.exit(EXIT_DAEMON_FRESH_SESSION), 100);
       };
       if (!actionCtx?.newSession) {
@@ -5052,6 +5072,8 @@ export function _routeClientMessageFrom(
           const result = await newSession({
             withSession: async (freshCtx) => {
               _lastCtx = freshCtx as unknown as typeof _lastCtx;
+              const replacement = freshCtx as unknown as ExtensionContext;
+              _thinkingCapture.setSession(replacement.sessionManager.getSessionId());
             },
           });
           if (result?.cancelled) {
@@ -5134,15 +5156,16 @@ function _handleSessionSync(
 ): void {
   _sendQueuedState(sender);
   if (_sessionStartedAt === null) {
-    sender.send({
+    sender.send(checkedThinkingFrame({
       type: "session_history",
       in_reply_to: msg.id,
       session_started_at: 0,
+      ...(!_thinkingCapture.suspended ? { thinking_history: _thinkingCapture.history([], 0).manifest } : {}),
       events: [],
       eos: true,
       truncated: false,
       ...(_myRoomId ? { room_id: _myRoomId } : {}),
-    });
+    }));
     return;
   }
 
@@ -5152,19 +5175,24 @@ function _handleSessionSync(
   const requested = msg.limit ?? serverLimit;
   const effectiveLimit = Math.min(requested, serverLimit);  // server clamps
 
-  const allEvents = _mapAgentMessagesToEvents(_messageBuffer);
+  const sourceIndices: number[] = [];
+  const allEvents = _mapAgentMessagesToEvents(_messageBuffer, sourceIndices);
+  const thinking = _thinkingCapture.suspended ? null : _thinkingCapture.history(sourceIndices, effectiveLimit);
   const slice = effectiveLimit > 0 ? allEvents.slice(-effectiveLimit) : [];
   const truncated = allEvents.length > effectiveLimit;
 
-  sender.send({
+  sender.send(checkedThinkingFrame({
     type: "session_history",
     in_reply_to: msg.id,
     session_started_at: _sessionStartedAt,
     events: slice,
+    ...(thinking ? { thinking_history: thinking.manifest } : {}),
     eos: true,
     truncated,
     ...(_myRoomId ? { room_id: _myRoomId } : {}),
-  });
+  }));
+
+  for (const snapshot of thinking?.snapshots ?? []) sender.send(thinkingFrame(snapshot, msg.id));
 
   // Plan/57 — replay ask_user flows still awaiting an answer. The bridge
   // broadcasts `started` once; a peer that connects afterwards would otherwise
@@ -5194,7 +5222,9 @@ function _handleSessionSync(
  * channel only — see `_broadcastToActive`), this is an intentional fan-out:
  * a new session is global state, so every owner must see the reset.
  */
-function _resetSessionForNew(inReplyTo: string): void {
+function _resetSessionForNew(inReplyTo: string, pendingSdk = false): void {
+  if (pendingSdk) _thinkingCapture.suspend();
+  else _thinkingCapture.setSession(_thinkingCapture.scope.session_id, true);
   _messageBuffer = [];
   _pendingSteers = [];
   _lastConsumedSteerText = null;
@@ -5203,6 +5233,7 @@ function _resetSessionForNew(inReplyTo: string): void {
   _broadcastToActive({
     type: "session_history",
     in_reply_to: inReplyTo,
+    ...(pendingSdk ? { thinking_reset_pending: true } : { thinking_history: { kind: "reset" as const, ..._thinkingCapture.scope, count: 0, truncated: false } }),
     session_started_at: _sessionStartedAt,
     events: [],
     eos: true,
@@ -5424,11 +5455,13 @@ function _imagesFromContent(content: unknown): WireImage[] {
  */
 export function _mapAgentMessagesToEvents(
   messages: BufferMsg[],
+  sourceIndices?: number[],
 ): SessionHistoryEvent[] {
   const events: SessionHistoryEvent[] = [];
   let lastUserId: string | null = null;
 
-  for (const m of messages) {
+  for (const [source, m] of messages.entries()) {
+    const before = events.length;
     const ts = typeof m.timestamp === "number" ? m.timestamp : 0;
 
     if (m.role === "compaction") {
@@ -5493,6 +5526,7 @@ export function _mapAgentMessagesToEvents(
           : { ts, type: "tool_result", tool_call_id: tcid, result: text },
       );
     }
+    for (let i = before; i < events.length; i++) sourceIndices?.push(source);
   }
 
   return events;

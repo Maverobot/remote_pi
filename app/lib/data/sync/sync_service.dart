@@ -20,6 +20,8 @@ import 'package:app/data/sync/sync_events.dart';
 import 'package:app/data/transport/connection_manager.dart';
 import 'package:app/domain/contracts/service.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/thinking.dart';
+import 'package:app/protocol/thinking.dart';
 import 'package:app/domain/background_progress.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/protocol/uuid7.dart';
@@ -45,6 +47,16 @@ class SyncService extends Service {
   final Map<String, int> _idToSeq = {};
   int _nextSeq = 0;
   bool _indexLoaded = false;
+  ThinkingScope? _thinkingScope;
+  final _thinkingRows = <String, _AcceptedThinking>{};
+  final _pendingThinking = <String, MessageRecord>{};
+  Timer? _thinkingWriteTimer;
+  int _thinkingGeneration = 0;
+  // Publication authority is separate from the matched history request owner.
+  int _thinkingAuthority = 0;
+  int _connectionGeneration = 0;
+  bool _thinkingResetPending = false;
+  _ThinkingHistoryRequest? _thinkingHistoryRequest;
 
   // Serialise box mutations so concurrent async writes stay ordered.
   Future<void> _writeChain = Future<void>.value();
@@ -171,6 +183,16 @@ class SyncService extends Service {
     // durable session index — the previous room may still be running on
     // the Pi, and Home keeps showing it via the relay's per-room
     // `meta.working` broadcast.
+    _finishThinkingHistory();
+    _thinkingHistoryRequest?.timer?.cancel();
+    _thinkingHistoryRequest = null;
+    _interruptThinking();
+    _thinkingGeneration++;
+    _thinkingAuthority++;
+    _thinkingRows.clear();
+    _thinkingScope = null;
+    _thinkingResetPending = false;
+    _indexLoaded = false;
     _resetTurnState();
     _activeEpk = epk;
     _activeRoomId = room;
@@ -420,7 +442,21 @@ class SyncService extends Service {
       return;
     }
     _pendingSyncRequest = false;
-    ch.send(SessionSync(id: _newId()));
+    if (_thinkingHistoryRequest != null &&
+        _ownsThinkingRequest(_thinkingHistoryRequest!)) {
+      return;
+    }
+    _thinkingHistoryRequest?.timer?.cancel();
+    final request = _ThinkingHistoryRequest(
+      _newId(),
+      _activeEpk!,
+      _activeRoomId,
+      _thinkingGeneration,
+      _connectionGeneration,
+    );
+    _thinkingHistoryRequest = request;
+    request.timer = Timer(const Duration(seconds: 3), _finishThinkingHistory);
+    ch.send(SessionSync(id: request.id));
     _startBackgroundInterest();
   }
 
@@ -472,6 +508,25 @@ class SyncService extends Service {
     final epk = _activeEpk;
     if (epk == null) return;
     final room = _activeRoomId;
+    // A canonical reset can arrive before the initial message-box load returns.
+    // Bind its authority to this destination's validated checkpoint now, not to
+    // whichever scope happens to exist when the queued cleanup finally runs.
+    final rawIndex = _thinkingScope == null && !_indexLoaded
+        ? _boxes.sessionsIndexBox().get(LocalBoxes.sessionKey(epk, room))
+        : null;
+    final retiredScope =
+        _thinkingScope ??
+        (rawIndex is Map
+            ? ThinkingScope.tryFromJson(rawIndex['thinking_scope'])
+            : null);
+    _thinkingHistoryRequest?.timer?.cancel();
+    _thinkingHistoryRequest = null;
+    _flushThinkingWrites();
+    final clearGeneration = ++_thinkingGeneration;
+    _thinkingAuthority++;
+    _thinkingScope = null;
+    _thinkingRows.clear();
+    _thinkingResetPending = true;
     // Session wiped → any optimistic sends/streaming/working state are moot.
     _clearBackgroundProgress();
     _cancelAllSendTimers();
@@ -479,8 +534,34 @@ class SyncService extends Service {
     _setQueuedMessages(const []);
     _setWorking(false);
     await _enqueue(() async {
-      if (_activeEpk != epk || _activeRoomId != room) return;
       final box = await _boxes.msgsBox(epk, room);
+      if (_activeEpk != epk ||
+          _activeRoomId != room ||
+          _thinkingGeneration != clearGeneration) {
+        // Preserve the existing inactive ordinary-clear behavior. Only retire
+        // Thinking authorized by this explicit lifecycle, after its queued writes.
+        if (retiredScope != null) {
+          for (final key in box.keys.toList()) {
+            final row = MessageRecord.fromJson(_coerce(box.get(key)));
+            if (row.thinking?.scope.sessionId == retiredScope.sessionId) {
+              await box.delete(key);
+            }
+          }
+          final index = _boxes.sessionsIndexBox();
+          final key = LocalBoxes.sessionKey(epk, room);
+          final raw = index.get(key);
+          if (raw is Map) {
+            final current = SessionIndexRecord.fromJson(_coerce(raw));
+            if (current.thinkingScope == retiredScope) {
+              await index.put(
+                key,
+                current.copyWith(clearThinkingScope: true).toJson(),
+              );
+            }
+          }
+        }
+        return;
+      }
       await box.clear();
       _idToSeq.clear();
       _nextSeq = 0;
@@ -535,6 +616,7 @@ class SyncService extends Service {
     if (live) _backgroundRoomLost = false;
     _backgroundRoomWasLive = live;
     if (!_canObserveBackground) {
+      _interruptThinking();
       _endBackgroundInterest();
       _freezeBackground(BackgroundFreshness.offline);
     } else if (_backgroundRequestId == null) {
@@ -592,6 +674,11 @@ class SyncService extends Service {
   // ---------------------------------------------------------------------------
 
   void _onStatus(ConnectionStatus s) {
+    _finishThinkingHistory();
+    _thinkingHistoryRequest?.timer?.cancel();
+    _thinkingHistoryRequest = null;
+    final connectionGeneration = ++_connectionGeneration;
+    _interruptThinking();
     _msgSub?.cancel();
     _msgSub = null;
     _endBackgroundInterest();
@@ -615,7 +702,14 @@ class SyncService extends Service {
       // drop everything after switching cwds on the same Mac.
       final originEpk = _conn.activePeer?.remoteEpk;
       _msgSub = s.channel.serverMessages.listen(
-        (msg) => _onServerMessage(msg, originEpk),
+        (msg) {
+          if ((msg is Pong || msg is SessionHistory) &&
+              (connectionGeneration != _connectionGeneration ||
+                  !identical(s.channel, _conn.channel))) {
+            return;
+          }
+          _onServerMessage(msg, originEpk);
+        },
         onError: (Object _, StackTrace _) {
           _endBackgroundInterest();
           _freezeBackground(BackgroundFreshness.offline);
@@ -663,6 +757,7 @@ class SyncService extends Service {
         _setWorking(true, replyTo: inReplyTo);
 
       case AgentDone(:final inReplyTo):
+        _interruptThinking(runId: inReplyTo);
         // Finalize whatever text accumulated since the last tool boundary.
         final text = _finalizeSegment();
         _clearSteeringLabel(inReplyTo);
@@ -795,6 +890,7 @@ class SyncService extends Service {
         });
 
       case Cancelled(:final targetId):
+        _interruptThinking(runId: targetId);
         _pendingSendTimers.remove(targetId)?.cancel();
         _discardStreamingState();
         // Cancel is stop-generation, not delete-history. Only drop a local
@@ -806,6 +902,7 @@ class SyncService extends Service {
         _setWorking(false);
 
       case Bye(:final rawReason):
+        _interruptThinking();
         _endBackgroundInterest();
         _freezeBackground(BackgroundFreshness.offline);
         if (!_eventController.isClosed) {
@@ -821,17 +918,10 @@ class SyncService extends Service {
 
       case SessionHistory(:final roomId):
         if (!_isForActiveRoom(roomId)) break;
-        final startedAt = msg.sessionStartedAt;
-        if (_backgroundSessionStartedAt != null &&
-            _backgroundSessionStartedAt != startedAt) {
-          _clearBackgroundProgress();
-          requestSync();
-        }
-        _backgroundSessionStartedAt = startedAt;
-        // ignore: discarded_futures
-        _applyHistory(msg);
+        _receiveThinkingHistory(msg);
 
       case ErrorMessage(:final code, :final message):
+        _interruptThinking(runId: msg.inReplyTo ?? _workingReplyTo);
         if (code.contains('unknown_peer')) {
           if (!_eventController.isClosed) {
             _eventController.add(const PairingRevoked());
@@ -858,6 +948,13 @@ class SyncService extends Service {
         _writeCompaction(summary, tokensBefore, ts);
 
       case Pong():
+        if (msg.thinking != null) {
+          if (msg.thinking!.historyIndex == null) {
+            _receiveThinking(msg.thinking!);
+          } else {
+            _receiveThinkingSupplement(msg.inReplyTo, msg.thinking!);
+          }
+        }
         if (msg.backgroundProgress != null) {
           _receiveBackground(msg.backgroundProgress!);
         }
@@ -901,17 +998,321 @@ class SyncService extends Service {
     );
   }
 
-  Future<void> _applyHistory(SessionHistory h) async {
+  bool _ownsThinkingAuthority(String epk, String room, int authority) =>
+      !_disposed &&
+      _activeEpk == epk &&
+      _activeRoomId == room &&
+      _thinkingAuthority == authority;
+
+  bool _ownsThinkingRequest(_ThinkingHistoryRequest request) =>
+      request.epk == _activeEpk &&
+      request.room == _activeRoomId &&
+      request.generation == _thinkingGeneration &&
+      request.connection == _connectionGeneration;
+
+  void _adoptThinkingScope(ThinkingScope scope) {
+    _flushThinkingWrites();
+    _thinkingAuthority++;
+    _thinkingScope = scope;
+    _thinkingResetPending = false;
+    _thinkingRows.removeWhere(
+      (_, accepted) =>
+          accepted.row.thinking!.scope.sessionId != scope.sessionId,
+    );
+    final epk = _activeEpk;
+    final room = _activeRoomId;
+    final generation = _thinkingGeneration;
+    if (epk != null) {
+      // Old accepted writes precede this retirement barrier. Later new-scope
+      // writes cannot overtake it, even while optional supplements are missing.
+      unawaited(
+        _enqueue(() async {
+          final box = await _boxes.msgsBox(epk, room);
+          for (final key in box.keys.toList()) {
+            final row = MessageRecord.fromJson(_coerce(box.get(key)));
+            if (row.thinking == null ||
+                row.thinking!.scope.sessionId == scope.sessionId) {
+              continue;
+            }
+            await box.delete(key);
+            if (_activeEpk == epk &&
+                _activeRoomId == room &&
+                _thinkingGeneration == generation) {
+              final id = _key(row.role, row.id);
+              if (_idToSeq[id] == key) _idToSeq.remove(id);
+            }
+          }
+        }),
+      );
+    }
+    _updateIndex((cur) => cur.copyWith(thinkingScope: scope));
+  }
+
+  void _receiveThinkingHistory(SessionHistory history) {
+    if ((history.thinkingHistoryPresent || history.thinkingResetPending) &&
+        (_conn.activePeer?.remoteEpk != _activeEpk ||
+            _conn.activeRoomId != _activeRoomId)) {
+      return;
+    }
+    final canonicalReset =
+        history.events.isEmpty && history.eos && !history.truncated;
+    if (history.thinkingResetPending &&
+        !history.thinkingHistoryPresent &&
+        canonicalReset) {
+      // Explicit successful daemon-new-session lifecycle, not empty-history guessing.
+      unawaited(clearActiveSession());
+      return;
+    }
+    final manifest = history.thinkingHistory;
+    if (history.thinkingHistoryPresent &&
+        manifest?.reset == true &&
+        !history.thinkingResetPending) {
+      if (!canonicalReset) return;
+      _thinkingHistoryRequest?.timer?.cancel();
+      _thinkingHistoryRequest = null;
+      _adoptThinkingScope(manifest!.scope);
+      _applyReceivedHistory(history);
+      return;
+    }
+    final request = _thinkingHistoryRequest;
+    if (history.thinkingHistoryPresent) {
+      // Association precedes ALL base-history and background-session side effects.
+      if (request == null ||
+          !_ownsThinkingRequest(request) ||
+          request.id != history.inReplyTo) {
+        return;
+      }
+      if (request.base != null) return;
+      request.base = history;
+      request.timer?.cancel();
+      if (manifest != null && !history.thinkingResetPending) {
+        _adoptThinkingScope(manifest.scope);
+      } else {
+        request.fallback = true;
+      }
+      request.timer = Timer(const Duration(seconds: 3), _finishThinkingHistory);
+      _checkThinkingHistoryComplete();
+      return;
+    }
+    // Truly absent metadata preserves old-extension ordinary-history behavior.
+    if (request?.id == history.inReplyTo) {
+      request!.timer?.cancel();
+      _thinkingHistoryRequest = null;
+    }
+    _applyReceivedHistory(history);
+  }
+
+  void _receiveThinkingSupplement(String reply, ThinkingSnapshot snapshot) {
+    final request = _thinkingHistoryRequest;
+    if (request == null ||
+        !_ownsThinkingRequest(request) ||
+        request.id != reply ||
+        snapshot.roomId != request.room) {
+      return;
+    }
+    final index = snapshot.historyIndex!;
+    if (request.snapshots.containsKey(index)) return;
+    final bytes = utf8.encode(jsonEncode(snapshot.toJson())).length;
+    if (request.snapshots.length >= 256 ||
+        request.bytes + bytes > 16 * 1024 * 1024) {
+      debugPrint('[thinking-history] optional assembly bound exceeded');
+      request.fallback = true;
+    } else {
+      request.snapshots[index] = snapshot;
+      request.bytes += bytes;
+    }
+    _checkThinkingHistoryComplete();
+  }
+
+  List<ThinkingSnapshot> _validThinkingSupplements(
+    _ThinkingHistoryRequest request,
+  ) {
+    final base = request.base;
+    final manifest = base?.thinkingHistory;
+    if (base == null || manifest == null || base.thinkingResetPending) {
+      return const [];
+    }
+    final identities = <String>{};
+    return request.snapshots.values
+        .where(
+          (s) =>
+              s.observation.scope == manifest.scope &&
+              s.historyIndex! < manifest.count &&
+              s.beforeEvent! <= base.events.length &&
+              identities.add(s.observation.id),
+        )
+        .toList()
+      ..sort((a, b) => a.historyIndex!.compareTo(b.historyIndex!));
+  }
+
+  void _checkThinkingHistoryComplete() {
+    final request = _thinkingHistoryRequest;
+    if (request == null || request.base == null) return;
+    final count = request.base!.thinkingHistory?.count;
+    if (count != null && count > 256) {
+      debugPrint('[thinking-history] supplement count exceeds assembly bound');
+      request.fallback = true;
+    }
+    if (request.fallback ||
+        (count != null && _validThinkingSupplements(request).length == count)) {
+      _finishThinkingHistory();
+    }
+  }
+
+  void _finishThinkingHistory() {
+    final request = _thinkingHistoryRequest;
+    if (request == null) return;
+    request.timer?.cancel();
+    _thinkingHistoryRequest = null;
+    if (!_ownsThinkingRequest(request) || request.base == null) return;
+    _applyReceivedHistory(
+      request.base!,
+      _acceptThinkingHistory(_validThinkingSupplements(request)),
+    );
+  }
+
+  ThinkingObservation _mergeHistoricalThinking(
+    ThinkingObservation incoming,
+    ThinkingObservation? previous,
+  ) {
+    if (previous == null) return incoming;
+    if (previous.revision > incoming.revision) return previous;
+    if (previous.revision == incoming.revision) {
+      return previous.interrupted(
+        previous.locallyInterrupted || incoming.locallyInterrupted,
+      );
+    }
+    return incoming.interrupted(
+      incoming.status == ThinkingStatus.streaming &&
+          (incoming.locallyInterrupted || previous.locallyInterrupted),
+    );
+  }
+
+  List<ThinkingSnapshot> _acceptThinkingHistory(
+    List<ThinkingSnapshot> snapshots,
+  ) => [for (final snapshot in snapshots) _acceptThinkingSnapshot(snapshot)];
+
+  ThinkingSnapshot _acceptThinkingSnapshot(ThinkingSnapshot snapshot) {
+    final previous = _thinkingRows[snapshot.observation.id];
+    final observation = _mergeHistoricalThinking(
+      snapshot.observation,
+      previous?.row.thinking,
+    );
+    // Negative seq denotes accepted history not positioned yet. Only its wire
+    // before_event anchor may place it; it is not a stored archival neighbor.
+    _thinkingRows[observation.id] = (
+      row: MessageRecord(
+        id: observation.id,
+        seq: previous?.row.seq ?? -1,
+        role: MsgRole.assistant,
+        ts:
+            previous?.row.ts ??
+            DateTime.fromMillisecondsSinceEpoch(snapshot.ts),
+        thinking: observation,
+      ),
+      liveResume:
+          previous != null &&
+          previous.row.thinking!.revision >= snapshot.observation.revision &&
+          previous.liveResume,
+    );
+    return ThinkingSnapshot(
+      observation: observation,
+      roomId: snapshot.roomId,
+      ts: snapshot.ts,
+      historyIndex: snapshot.historyIndex,
+      beforeEvent: snapshot.beforeEvent,
+    );
+  }
+
+  ThinkingObservation _mergeAcceptedThinking(
+    _AcceptedThinking accepted,
+    ThinkingObservation? stored,
+  ) {
+    final observation = accepted.row.thinking!;
+    // Only a strictly newer LIVE observation can resume after interruption.
+    // A loader may have persisted interruption before its cache was fenced.
+    if (accepted.liveResume &&
+        (stored == null || observation.revision > stored.revision)) {
+      return observation;
+    }
+    return _mergeHistoricalThinking(observation, stored);
+  }
+
+  void _applyReceivedHistory(
+    SessionHistory history, [
+    List<ThinkingSnapshot> thinking = const [],
+  ]) {
+    final startedAt = history.sessionStartedAt;
+    if (_backgroundSessionStartedAt != null &&
+        _backgroundSessionStartedAt != startedAt) {
+      _clearBackgroundProgress();
+      requestSync();
+    }
+    _backgroundSessionStartedAt = startedAt;
+    unawaited(_applyHistory(history, thinking));
+  }
+
+  Future<void> _applyHistory(
+    SessionHistory h, [
+    List<ThinkingSnapshot> thinking = const [],
+  ]) async {
     final epk = _activeEpk;
     if (epk == null) return;
     final room = _activeRoomId;
-    final rows = _convertHistory(h.events);
-    final historyIds = {for (final r in rows) _key(r.role, r.id)};
+    final authority = _thinkingAuthority;
+    final generation = _thinkingGeneration;
+    _flushThinkingWrites();
+    final scope = h.thinkingResetPending
+        ? null
+        : h.thinkingHistory?.scope ?? _thinkingScope;
     await _enqueue(() async {
       final box = await _boxes.msgsBox(epk, room);
       final stored = [
         for (final v in box.values) MessageRecord.fromJson(_coerce(v)),
       ];
+      // Revision arbitration uses accepted observations; unpositioned live or
+      // historical rows never become positional archival neighbors.
+      if (_ownsThinkingAuthority(epk, room, authority)) {
+        for (final accepted in _thinkingRows.values) {
+          final row = accepted.row;
+          final at = stored.indexWhere(
+            (r) => r.id == row.id && r.thinking != null,
+          );
+          if (at < 0) {
+            if (row.seq >= 0) stored.add(row);
+          } else {
+            stored[at] = stored[at].copyWith(
+              thinking: _mergeAcceptedThinking(accepted, stored[at].thinking),
+            );
+          }
+        }
+      }
+      final latest = {
+        for (final row in stored)
+          if (row.thinking != null) row.id: row,
+      };
+      if (_ownsThinkingAuthority(epk, room, authority)) {
+        for (final accepted in _thinkingRows.values) {
+          final row = accepted.row;
+          latest[row.id] = row.copyWith(
+            thinking: _mergeAcceptedThinking(
+              accepted,
+              latest[row.id]?.thinking,
+            ),
+          );
+        }
+      }
+      final rows = _convertHistory(h.events, thinking).map((row) {
+        final incoming = row.thinking;
+        if (incoming == null) return row;
+        return row.copyWith(
+          thinking: _mergeHistoricalThinking(
+            incoming,
+            latest[row.id]?.thinking,
+          ),
+        );
+      }).toList();
+      final historyIds = {for (final r in rows) _key(r.role, r.id)};
       // Pending users still follow server history until their echo arrives.
       final pending = [
         for (final r in stored)
@@ -958,7 +1359,11 @@ class SyncService extends Service {
       for (var i = 0; i < stored.length; i++) {
         final r = stored[i];
         predecessor = storedPositions[i] ?? predecessor;
-        if (r.role != MsgRole.askUser) continue;
+        final retainThinking =
+            r.thinking != null &&
+            (scope == null || r.thinking!.scope.sessionId == scope.sessionId) &&
+            !historyIds.contains(_key(r.role, r.id));
+        if (r.role != MsgRole.askUser && !retainThinking) continue;
         // A truncated history may contain neither neighbor. Use time only to
         // place the card, never to sort or otherwise reorder server rows.
         var slot =
@@ -1008,7 +1413,9 @@ class SyncService extends Service {
           await box.put(i, newJson);
         }
       }
-      if (_activeEpk == epk && _activeRoomId == room) {
+      if (_activeEpk == epk &&
+          _activeRoomId == room &&
+          _thinkingGeneration == generation) {
         _idToSeq
           ..clear()
           ..addEntries([
@@ -1016,6 +1423,11 @@ class SyncService extends Service {
               MapEntry(_key(desired[i].role, desired[i].id), i),
           ]);
         _nextSeq = desired.length;
+        for (final row in desired) {
+          if (!_ownsThinkingAuthority(epk, room, authority)) break;
+          if (row.thinking == null) continue;
+          _publishStoredThinking(row);
+        }
         _indexLoaded = true;
       }
     });
@@ -1029,10 +1441,27 @@ class SyncService extends Service {
     }
   }
 
-  List<MessageRecord> _convertHistory(List<SessionHistoryEvent> events) {
+  List<MessageRecord> _convertHistory(
+    List<SessionHistoryEvent> events, [
+    List<ThinkingSnapshot> thinking = const [],
+  ]) {
     final out = <MessageRecord>[];
     var seq = 0;
-    for (final e in events) {
+    for (var eventIndex = 0; eventIndex <= events.length; eventIndex++) {
+      for (final snapshot in thinking) {
+        if (snapshot.beforeEvent != eventIndex) continue;
+        out.add(
+          MessageRecord(
+            id: snapshot.observation.id,
+            seq: seq++,
+            role: MsgRole.assistant,
+            ts: DateTime.fromMillisecondsSinceEpoch(snapshot.ts),
+            thinking: snapshot.observation,
+          ),
+        );
+      }
+      if (eventIndex == events.length) break;
+      final e = events[eventIndex];
       switch (e) {
         case UserInputEvt(:final id, :final text, :final images):
           out.add(
@@ -1130,24 +1559,229 @@ class SyncService extends Service {
     final epk = _activeEpk;
     if (epk == null) return Future<void>.value();
     final room = _activeRoomId;
+    final generation = _thinkingGeneration;
+    final authority = _thinkingAuthority;
+    bool ownsBinding() =>
+        _activeEpk == epk &&
+        _activeRoomId == room &&
+        _thinkingGeneration == generation;
     return _enqueue(() async {
-      if (_activeEpk != epk || _activeRoomId != room) return;
+      if (!ownsBinding()) return;
       final box = await _boxes.msgsBox(epk, room);
-      _idToSeq.clear();
-      _nextSeq = 0;
+      if (!ownsBinding()) return;
+      final rawIndex = _boxes.sessionsIndexBox().get(
+        LocalBoxes.sessionKey(epk, room),
+      );
+      final restoredScope = rawIndex is Map
+          ? SessionIndexRecord.fromJson(_coerce(rawIndex)).thinkingScope
+          : null;
+      final restoredThinking = <String, _AcceptedThinking>{};
+      final positions = <String, int>{};
+      final pending = <MessageRecord>[];
+      var next = 0;
       for (final k in box.keys) {
         final seq = (k as num).toInt();
-        final r = MessageRecord.fromJson(_coerce(box.get(k)));
-        _idToSeq[_key(r.role, r.id)] = seq;
-        _nextSeq = math.max(_nextSeq, seq + 1);
-        // Re-arm the no-echo backstop for any pending row this session owns, so
-        // a bubble persisted across an app restart / quick session-switch is
-        // reaped by its `ts` instead of spinning forever (already-stale → fires
-        // immediately). Timers were cleared by _resetTurnState before this load.
-        if (r.role == MsgRole.user && r.pending) _armSendTimeout(r.id, r.ts);
+        var row = MessageRecord.fromJson(_coerce(box.get(k)));
+        if (row.thinking != null) {
+          if (row.thinking!.status == ThinkingStatus.streaming &&
+              !row.thinking!.locallyInterrupted) {
+            row = row.copyWith(thinking: row.thinking!.interrupted(true));
+            await box.put(k, row.toJson());
+          }
+          restoredThinking[row.id] = (row: row, liveResume: false);
+        }
+        positions[_key(row.role, row.id)] = seq;
+        next = math.max(next, seq + 1);
+        if (row.role == MsgRole.user && row.pending) pending.add(row);
       }
+      if (!ownsBinding()) return;
+      // Ordinary readiness describes this box, even if a matched manifest
+      // established newer Thinking authority during either storage await.
+      _idToSeq
+        ..clear()
+        ..addAll(positions);
+      _nextSeq = next;
       _indexLoaded = true;
+      if (_ownsThinkingAuthority(epk, room, authority)) {
+        _thinkingScope = restoredScope;
+        _thinkingRows
+          ..clear()
+          ..addAll(restoredThinking);
+      }
+      if (!_disposed) {
+        for (final row in pending) {
+          _armSendTimeout(row.id, row.ts);
+        }
+      }
     });
+  }
+
+  /// Leaving a page retains accepted text without borrowing another page's scope.
+  void leaveThinking(String epk, String room) {
+    if (_activeEpk == epk && _activeRoomId == room) _interruptThinking();
+  }
+
+  void _receiveThinking(ThinkingSnapshot snapshot) {
+    if (_disposed ||
+        _activeEpk == null ||
+        _conn.activePeer?.remoteEpk != _activeEpk ||
+        _conn.activeRoomId != _activeRoomId ||
+        snapshot.roomId != _activeRoomId ||
+        _thinkingResetPending) {
+      return;
+    }
+    if (!_indexLoaded) {
+      final generation = _thinkingGeneration;
+      final connection = _connectionGeneration;
+      // Wait for the queued scope checkpoint load, never bootstrap over it.
+      unawaited(
+        _enqueue(() async {
+          if (generation == _thinkingGeneration &&
+              connection == _connectionGeneration &&
+              _indexLoaded) {
+            _receiveThinking(snapshot);
+          }
+        }),
+      );
+      return;
+    }
+    final observation = snapshot.observation;
+    if (_thinkingScope != null && _thinkingScope != observation.scope) {
+      requestSync();
+      return;
+    }
+    if (_thinkingScope == null) {
+      _thinkingAuthority++;
+      _thinkingScope = observation.scope;
+      _updateIndex((cur) => cur.copyWith(thinkingScope: observation.scope));
+    }
+    final previous = _thinkingRows[observation.id]?.row;
+    if ((previous?.thinking?.revision ?? 0) >= observation.revision) return;
+    final row = MessageRecord(
+      id: observation.id,
+      // A new live observation has no archival position until its box write.
+      seq: previous?.seq ?? -1,
+      role: MsgRole.assistant,
+      ts: DateTime.fromMillisecondsSinceEpoch(snapshot.ts),
+      thinking: observation,
+    );
+    _thinkingRows[row.id] = (row: row, liveResume: true);
+    _pendingThinking[row.id] = row;
+    if (observation.status != ThinkingStatus.streaming ||
+        !observation.visible ||
+        (previous != null && previous.thinking!.status != observation.status)) {
+      _flushThinkingWrites();
+    } else {
+      _thinkingWriteTimer ??= Timer(
+        const Duration(milliseconds: 200),
+        _flushThinkingWrites,
+      );
+    }
+  }
+
+  void _interruptThinking({String? runId}) {
+    _finishThinkingHistory();
+    for (final entry in _thinkingRows.entries.toList()) {
+      final thought = entry.value.row.thinking!;
+      if (thought.status != ThinkingStatus.streaming ||
+          thought.locallyInterrupted ||
+          (runId != null && thought.runId != runId)) {
+        continue;
+      }
+      final row = entry.value.row.copyWith(thinking: thought.interrupted(true));
+      _thinkingRows[entry.key] = (row: row, liveResume: entry.value.liveResume);
+      _pendingThinking[entry.key] = row;
+    }
+    _flushThinkingWrites();
+  }
+
+  void _publishStoredThinking(MessageRecord stored) {
+    final accepted = _thinkingRows[stored.id];
+    final current = accepted?.row.thinking;
+    final durable = stored.thinking!;
+    if (current != null && current.revision > durable.revision) {
+      // Its physical position is now known, but a newer accepted revision and
+      // its live/history provenance must survive the older write's completion.
+      _thinkingRows[stored.id] = (
+        row: accepted!.row.copyWith(seq: stored.seq),
+        liveResume: accepted.liveResume,
+      );
+      return;
+    }
+    final equal = current?.revision == durable.revision;
+    _thinkingRows[stored.id] = (
+      row: stored.copyWith(
+        thinking: durable.interrupted(
+          durable.locallyInterrupted || (equal && current!.locallyInterrupted),
+        ),
+      ),
+      liveResume: equal && accepted!.liveResume,
+    );
+  }
+
+  void _flushThinkingWrites() {
+    _thinkingWriteTimer?.cancel();
+    _thinkingWriteTimer = null;
+    if (_pendingThinking.isEmpty) return;
+    final epk = _activeEpk;
+    final room = _activeRoomId;
+    final authority = _thinkingAuthority;
+    final rows = _pendingThinking.values.toList();
+    _pendingThinking.clear();
+    if (epk == null) return;
+    // Unlike ordinary _upsert, accepted thinking stays bound to its original
+    // box even when activate() switches before this serialized write executes.
+    unawaited(
+      _enqueue(() async {
+        final box = await _boxes.msgsBox(epk, room);
+        final positions = <String, int>{};
+        var next = 0;
+        for (final key in box.keys) {
+          final seq = (key as num).toInt();
+          final record = MessageRecord.fromJson(_coerce(box.get(key)));
+          positions[_key(record.role, record.id)] = seq;
+          next = math.max(next, seq + 1);
+        }
+        for (final row in rows) {
+          final key = _key(row.role, row.id);
+          final seq = positions[key] ?? next++;
+          final old = box.get(seq);
+          final stored = old == null
+              ? null
+              : MessageRecord.fromJson(_coerce(old));
+          final previous = stored?.thinking;
+          final incoming = row.thinking!;
+          // The persisted producer fields win ties, including hidden tombstones.
+          // Only the local interruption bit may be merged at equal revision.
+          final resolved =
+              previous != null && previous.revision >= incoming.revision
+              ? stored!.copyWith(
+                  seq: seq,
+                  thinking: previous.revision == incoming.revision
+                      ? previous.interrupted(
+                          previous.locallyInterrupted ||
+                              incoming.locallyInterrupted,
+                        )
+                      : previous,
+                )
+              : row.copyWith(seq: seq);
+          final json = resolved.toJson();
+          if (old == null || jsonEncode(_coerce(old)) != jsonEncode(json)) {
+            await box.put(seq, json);
+          }
+          if (_ownsThinkingAuthority(epk, room, authority)) {
+            _publishStoredThinking(resolved);
+          }
+          positions[key] = seq;
+        }
+        if (_activeEpk == epk && _activeRoomId == room) {
+          _idToSeq
+            ..clear()
+            ..addAll(positions);
+          _nextSeq = next;
+        }
+      }),
+    );
   }
 
   Future<void> _upsert(
@@ -1443,6 +2077,11 @@ class SyncService extends Service {
   void dispose() {
     if (_disposed) return;
     // Fence pending activation/session-clear continuations before cancellation.
+    _finishThinkingHistory();
+    _thinkingHistoryRequest?.timer?.cancel();
+    _thinkingHistoryRequest = null;
+    _interruptThinking();
+    _thinkingAuthority++;
     _disposed = true;
     _clearBackgroundProgress();
     _backgroundController.close();
@@ -1459,4 +2098,27 @@ class SyncService extends Service {
     _workingController.close();
     _queuedController.close();
   }
+}
+
+// Provenance belongs to the accepted cache, never to wire or persisted records.
+typedef _AcceptedThinking = ({MessageRecord row, bool liveResume});
+
+class _ThinkingHistoryRequest {
+  final String id;
+  final String epk;
+  final String room;
+  final int generation;
+  final int connection;
+  SessionHistory? base;
+  final snapshots = <int, ThinkingSnapshot>{};
+  int bytes = 0;
+  bool fallback = false;
+  Timer? timer;
+  _ThinkingHistoryRequest(
+    this.id,
+    this.epk,
+    this.room,
+    this.generation,
+    this.connection,
+  );
 }
