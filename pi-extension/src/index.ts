@@ -2493,6 +2493,7 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
       _meshAgentEndSettleTimer = null;
     }
     _clearMeshWakeRequest();
+    _scheduleMeshMessageDrain();
   });
 
   pi.on("message_start", (event, ctx) => {
@@ -4444,8 +4445,9 @@ function _wakeAgent(
  * SDK's `convertToLlm` maps custom → a user-role LLM message, so the agent
  * still sees + replies to it, but `message_end` does NOT buffer role:"custom",
  * so it never replays as `user_input` on session_sync. Idle envelopes can drain
- * immediately; active envelopes wait through `agent_end` until a live session
- * context reports idle, then append as one batch before a single turn starts.
+ * immediately with one hidden wake. During an observed active run, each envelope
+ * queues in native steering FIFO without interrupting the response or tool batch.
+ * Pi owns consumption timing and steeringMode; envelopes are not coalesced.
  *
  * Pi #6744 residual TOCTOU: `ctx.isIdle()` and append/wake are not atomic. Pi
  * can become active after the idle check; after an unconfirmed wake, already
@@ -4488,7 +4490,8 @@ function _readMeshContextIdle(
 ): boolean | null {
   if (_meshDrainContext !== context || _meshDrainContextGeneration !== contextGeneration) return null;
   try {
-    return context.isIdle();
+    const isIdle = context.isIdle();
+    return _meshDrainContext === context && _meshDrainContextGeneration === contextGeneration ? isIdle : null;
   } catch {
     // Extension runner contexts throw after session replacement. Do not let an
     // old callback re-arm itself against a new session.
@@ -4508,11 +4511,11 @@ function _scheduleMeshAgentEndSettle(
   if (_meshAgentEndSettleTimer) clearTimeout(_meshAgentEndSettleTimer);
   const context = _meshDrainContext;
   const contextGeneration = _meshDrainContextGeneration;
-  _meshAgentEndSettleTimer = setTimeout(() => {
+  const timer = setTimeout(() => {
+    if (_meshDrainLifecycleGeneration !== lifecycleGeneration || _meshAgentEndSettleTimer !== timer) return;
     _meshAgentEndSettleTimer = null;
     if (
-      _meshDrainLifecycleGeneration !== lifecycleGeneration
-      || _agentRunGeneration !== endedGeneration
+      _agentRunGeneration !== endedGeneration
       || !_meshAgentEndSettling
       || !context
     ) return;
@@ -4528,6 +4531,7 @@ function _scheduleMeshAgentEndSettle(
     _meshAgentEndSettling = false;
     _scheduleMeshMessageDrain();
   }, delay);
+  _meshAgentEndSettleTimer = timer;
 }
 
 function _scheduleMeshIdleRecheck(
@@ -4536,18 +4540,15 @@ function _scheduleMeshIdleRecheck(
   contextGeneration: number,
 ): void {
   if (_meshIdleRecheckTimer) return;
-  _meshIdleRecheckTimer = setTimeout(() => {
+  const timer = setTimeout(() => {
+    if (_meshDrainLifecycleGeneration !== lifecycleGeneration || _meshIdleRecheckTimer !== timer) return;
     _meshIdleRecheckTimer = null;
-    if (_meshDrainLifecycleGeneration !== lifecycleGeneration) return;
     const isIdle = _readMeshContextIdle(context, contextGeneration);
-    if (isIdle !== true) {
-      if (isIdle === false && _pendingMeshMessages.length > 0) {
-        _scheduleMeshIdleRecheck(lifecycleGeneration, context, contextGeneration);
-      }
-      return;
-    }
+    if (isIdle === null) return;
+    // Re-evaluate phase without inferring agent activity from an idle poll.
     _scheduleMeshMessageDrain();
   }, MESH_IDLE_RECHECK_MS);
+  _meshIdleRecheckTimer = timer;
 }
 
 function _resetMeshMessageDrainState(): void {
@@ -4615,47 +4616,60 @@ function _scheduleMeshMessageDrain(): void {
   _meshDrainScheduled = true;
   const lifecycleGeneration = _meshDrainLifecycleGeneration;
   queueMicrotask(() => {
+    if (_meshDrainLifecycleGeneration !== lifecycleGeneration) return;
     _meshDrainScheduled = false;
     const pi = _pi;
-    if (
-      _meshDrainLifecycleGeneration !== lifecycleGeneration
-      || _agentRunActive
-      || _meshAgentEndSettling
-      || _meshWakeRequest
-      || !pi
-      || _pendingMeshMessages.length === 0
-    ) return;
+    const ownsLifecycle = () => !_disposed && _meshDrainLifecycleGeneration === lifecycleGeneration && _pi === pi;
+    if (!ownsLifecycle() || _meshAgentEndSettling || !pi || _pendingMeshMessages.length === 0) return;
 
     const context = _meshDrainContext;
     const contextGeneration = _meshDrainContextGeneration;
     if (!context) return;
     const isIdle = _readMeshContextIdle(context, contextGeneration);
-    if (isIdle !== true) {
-      if (isIdle === false) {
-        _scheduleMeshIdleRecheck(lifecycleGeneration, context, contextGeneration);
-      }
+    if (!ownsLifecycle() || isIdle === null) return;
+    const steer = _agentRunActive && !isIdle;
+    if (!steer && _meshWakeRequest) return;
+    if (!steer && (_agentRunActive || !isIdle)) {
+      _scheduleMeshIdleRecheck(lifecycleGeneration, context, contextGeneration);
       return;
     }
 
+    const canSubmit = () => {
+      if (!ownsLifecycle()) return false;
+      const idle = _readMeshContextIdle(context, contextGeneration);
+      return ownsLifecycle() && !_meshAgentEndSettling
+        && (steer ? _agentRunActive && idle === false : !_agentRunActive && idle === true && !_meshWakeRequest);
+    };
     const batch = _pendingMeshMessages.splice(0);
     let submitted = 0;
+    const restoreSuffix = () => {
+      if (ownsLifecycle()) _pendingMeshMessages = [...batch.slice(submitted), ..._pendingMeshMessages];
+    };
     try {
       for (const env of batch) {
-        pi.sendMessage(_meshMessageForAgent(env), { triggerTurn: false });
+        const message = _meshMessageForAgent(env);
+        if (!canSubmit()) {
+          restoreSuffix();
+          if (ownsLifecycle()) _scheduleMeshMessageDrain();
+          return;
+        }
+        pi.sendMessage(message, steer ? { triggerTurn: true, deliverAs: "steer" } : { triggerTurn: false });
+        // A normal void return hands off ownership, not an async acceptance ACK.
+        // Never replay this prefix, including after a missing start or a timeout.
         submitted += 1;
       }
     } catch (err) {
-      // Only the unsubmitted suffix is still ours to retry; preserve its FIFO
-      // position ahead of messages that arrived while this batch was submitted.
-      _pendingMeshMessages = [...batch.slice(submitted), ..._pendingMeshMessages];
+      // Only the unsubmitted suffix is ours, and only in this lifecycle. Wait
+      // for another event/envelope rather than looping on a synchronous rejection.
+      restoreSuffix();
       const detail = err instanceof Error ? err.message : String(err);
       console.error(`[remote-pi] queued mesh delivery failed: ${detail}`);
       _safeNotify(`[remote-pi] failed to process queued mesh messages: ${detail}`, "error");
       return;
     }
 
-    if (submitted === 0 || _meshDrainLifecycleGeneration !== lifecycleGeneration) return;
-    _requestMeshWake(pi, lifecycleGeneration);
+    // Within-run steering expects no new agent_start and needs no hidden wake.
+    if (!steer && submitted > 0 && canSubmit()) _requestMeshWake(pi, lifecycleGeneration);
   });
 }
 

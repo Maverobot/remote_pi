@@ -1029,6 +1029,10 @@ describe("agent-network mesh delivery", () => {
     ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-message"
       && (options as { triggerTurn?: boolean }).triggerTurn === false,
   );
+  const meshSteers = (sendMessage: ReturnType<typeof vi.fn>) => sendMessage.mock.calls.filter(
+    ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-message"
+      && (options as { deliverAs?: string }).deliverAs === "steer",
+  );
   const meshWakes = (sendMessage: ReturnType<typeof vi.fn>) => sendMessage.mock.calls.filter(
     ([message, options]) => (message as { customType?: string }).customType === "remote-pi:mesh-wake"
       && (options as { triggerTurn?: boolean }).triggerTurn === true,
@@ -1089,11 +1093,11 @@ describe("agent-network mesh delivery", () => {
     _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
     startSession(harness, () => idle);
     harness.handler("agent_start")({ type: "agent_start" }, ctx);
+    harness.handler("agent_end")({ type: "agent_end" }, ctx);
     _deliverMeshMessageToAgentForTest(envelope("deferred-1"));
     _deliverMeshMessageToAgentForTest(envelope("deferred-2"));
     await Promise.resolve();
 
-    harness.handler("agent_end")({ type: "agent_end" }, ctx);
     await vi.advanceTimersByTimeAsync(10);
     expect(meshAppends(sendMessage)).toHaveLength(0);
     expect(meshWakes(sendMessage)).toHaveLength(0);
@@ -1163,7 +1167,8 @@ describe("agent-network mesh delivery", () => {
     expect(meshWakes(sendMessage)).toHaveLength(2);
   });
 
-  test("preserves an unsubmitted FIFO suffix after a synchronous partial append failure", async () => {
+  test.each([false, true])("preserves only an unsubmitted FIFO suffix after synchronous failure (active=%s)", async (active) => {
+    vi.useFakeTimers();
     const harness = captureEventHarness();
     let failSecondAppend = true;
     const acceptedAppendContents: string[] = [];
@@ -1174,13 +1179,16 @@ describe("agent-network mesh delivery", () => {
       if (message.customType === "remote-pi:mesh-message") acceptedAppendContents.push(message.content ?? "");
     });
     _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
-    startSession(harness, () => true);
+    startSession(harness, () => !active);
+    if (active) harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
 
     _deliverMeshMessageToAgentForTest(envelope("first"));
     _deliverMeshMessageToAgentForTest(envelope("second"));
     await Promise.resolve();
     expect(acceptedAppendContents).toEqual([expect.stringContaining("first")]);
     expect(meshWakes(sendMessage)).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sendMessage).toHaveBeenCalledTimes(2); // No automatic retry or replay.
 
     failSecondAppend = false;
     _deliverMeshMessageToAgentForTest(envelope("third"));
@@ -1190,10 +1198,10 @@ describe("agent-network mesh delivery", () => {
       expect.stringContaining("second"),
       expect.stringContaining("third"),
     ]);
-    expect(meshWakes(sendMessage)).toHaveLength(1);
+    expect(meshWakes(sendMessage)).toHaveLength(active ? 0 : 1);
   });
 
-  test("confirmed wakes release their token so the next post-end batch drains before the old timeout", async () => {
+  test("confirmed wakes release their token for within-run steering without another wake", async () => {
     vi.useFakeTimers();
     const harness = captureEventHarness();
     let idle = true;
@@ -1209,15 +1217,179 @@ describe("agent-network mesh delivery", () => {
     _deliverMeshMessageToAgentForTest(envelope("after-confirmation"));
     await Promise.resolve();
     expect(meshAppends(sendMessage)).toHaveLength(1);
+    expect(meshSteers(sendMessage)).toEqual([[
+      expect.objectContaining({ content: expect.stringContaining("after-confirmation") }),
+      { triggerTurn: true, deliverAs: "steer" },
+    ]]);
 
     harness.handler("agent_end")({ type: "agent_end" }, ctx);
     idle = true;
     await vi.advanceTimersByTimeAsync(10);
     expect(meshAppends(sendMessage).map(([message]) => (message as { content: string }).content)).toEqual([
       expect.stringContaining("confirmed"),
-      expect.stringContaining("after-confirmation"),
     ]);
-    expect(meshWakes(sendMessage)).toHaveLength(2);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(meshWakes(sendMessage)).toHaveLength(1);
+    expect(meshSteers(sendMessage)).toHaveLength(1);
+  });
+
+  test("steers distinct active envelopes FIFO with unchanged sender, id and reply content and no wake/replay", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => false);
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+    _deliverMeshMessageToAgentForTest({ ...envelope("first"), re: "parent-id", body: "reply body" });
+    _deliverMeshMessageToAgentForTest(envelope("second"));
+    await Promise.resolve();
+
+    expect(sendMessage.mock.calls).toEqual([
+      [{ customType: "remote-pi:mesh-message", display: true,
+        content: '[agent-network] message from "/work/repo@worker" (id=first, re=parent-id):\nreply body\n\n(This is a reply to a previous message of yours.)' },
+      { triggerTurn: true, deliverAs: "steer" }],
+      [expect.objectContaining({ customType: "remote-pi:mesh-message", display: true,
+        content: expect.stringContaining('id=second') }), { triggerTurn: true, deliverAs: "steer" }],
+    ]);
+    // A within-run steer expects no new agent_start, receipt or content reply.
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+  });
+
+  test("unknown non-idle startup or standalone compaction defers until agent_start promptly releases steering", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => false);
+    _deliverMeshMessageToAgentForTest(envelope("startup"));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(sendMessage).not.toHaveBeenCalled();
+
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+    await Promise.resolve();
+    expect(meshSteers(sendMessage)).toHaveLength(1);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+  });
+
+  test("end settlement defers until a continuation agent_start releases the suffix", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    const ctx = liveContext(() => false);
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => false);
+    harness.handler("agent_start")({ type: "agent_start" }, ctx);
+    harness.handler("agent_end")({ type: "agent_end" }, ctx);
+    _deliverMeshMessageToAgentForTest(envelope("continuation"));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(sendMessage).not.toHaveBeenCalled();
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+    await Promise.resolve();
+    expect(meshSteers(sendMessage)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  test("contradictory active/idle context waits for a fresh non-idle read without inventing activity", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    let idle = true;
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => idle);
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => idle));
+    _deliverMeshMessageToAgentForTest(envelope("contradictory"));
+    await vi.advanceTimersByTimeAsync(30);
+    expect(sendMessage).not.toHaveBeenCalled();
+    idle = false;
+    await vi.advanceTimersByTimeAsync(10);
+    expect(meshSteers(sendMessage)).toHaveLength(1);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+  });
+
+  test("a same-lifecycle context refresh reevaluates only the untouched suffix", async () => {
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn((message: { content: string }) => {
+      if (message.content.includes("id=first")) {
+        harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+        _deliverMeshMessageToAgentForTest(envelope("third"));
+      }
+    });
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => true);
+    _deliverMeshMessageToAgentForTest(envelope("first"));
+    _deliverMeshMessageToAgentForTest(envelope("second"));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(sendMessage.mock.calls.map(([message]) => message.content)).toEqual([
+      expect.stringContaining("id=first"), expect.stringContaining("id=second"), expect.stringContaining("id=third"),
+    ]);
+    expect(meshAppends(sendMessage)).toHaveLength(1);
+    expect(meshSteers(sendMessage)).toHaveLength(2);
+    expect(meshWakes(sendMessage)).toHaveLength(0);
+  });
+
+  test.each([false, true])("reentrant shutdown/replacement drops the old suffix and wake (throws=%s)", async (throws) => {
+    const harness = captureEventHarness();
+    let shutdown: unknown;
+    const sendMessage = vi.fn((message: { content: string }) => {
+      if (message.content.includes("id=old-first")) {
+        shutdown = harness.handler("session_shutdown")({ type: "session_shutdown" });
+        // Rearm without starting unrelated root resources from this minimal ctx.
+        _setDisposedForTest(false);
+        startSession(harness, () => true);
+        _deliverMeshMessageToAgentForTest(envelope("replacement"));
+        if (throws) throw new Error("old API rejected during shutdown");
+      }
+    });
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => true);
+    _deliverMeshMessageToAgentForTest(envelope("old-first"));
+    _deliverMeshMessageToAgentForTest(envelope("old-second"));
+    await Promise.resolve();
+    await shutdown;
+    await Promise.resolve();
+    expect(meshAppends(sendMessage).map(([message]) => message.content)).toEqual([
+      expect.stringContaining("id=old-first"), expect.stringContaining("id=replacement"),
+    ]);
+    expect(meshWakes(sendMessage)).toHaveLength(1); // Only the replacement batch wakes.
+  });
+
+  test("a context invalidated during isIdle cannot authorize a submission", async () => {
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => {
+      startSession(harness, () => false);
+      return true;
+    });
+    _deliverMeshMessageToAgentForTest(envelope("refresh-during-read"));
+    await Promise.resolve();
+    expect(sendMessage).not.toHaveBeenCalled();
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+    await Promise.resolve();
+    expect(meshSteers(sendMessage)).toHaveLength(1);
+  });
+
+  test("an invalidated context throwing on recheck waits for fresh lifecycle authority", async () => {
+    vi.useFakeTimers();
+    const harness = captureEventHarness();
+    const sendMessage = vi.fn();
+    let stale = false;
+    _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
+    startSession(harness, () => {
+      if (stale) throw new Error("stale context");
+      return false;
+    });
+    _deliverMeshMessageToAgentForTest(envelope("stale-context"));
+    await Promise.resolve();
+    stale = true;
+    await vi.advanceTimersByTimeAsync(30);
+    expect(sendMessage).not.toHaveBeenCalled();
+    harness.handler("agent_start")({ type: "agent_start" }, liveContext(() => false));
+    await Promise.resolve();
+    expect(meshSteers(sendMessage)).toHaveLength(1);
   });
 
   test("shutdown invalidates stale settle work and a replacement drains new mesh work", async () => {
@@ -1229,9 +1401,9 @@ describe("agent-network mesh delivery", () => {
     _setPiForTest({ sendMessage, sendUserMessage: () => undefined });
     startSession(harness, () => oldIdle);
     harness.handler("agent_start")({ type: "agent_start" }, oldCtx);
+    harness.handler("agent_end")({ type: "agent_end" }, oldCtx);
     _deliverMeshMessageToAgentForTest(envelope("old-session"));
     await Promise.resolve();
-    harness.handler("agent_end")({ type: "agent_end" }, oldCtx);
 
     await harness.handler("session_shutdown")({ type: "session_shutdown" });
     oldIdle = true;
