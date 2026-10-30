@@ -96,7 +96,7 @@ import {
   skillsDir,
 } from "./session/global_config.js";
 import { sanitizeMeshName } from "./session/broker.js";
-import { acquireCwdLock, type AcquiredLock } from "./session/cwd_lock.js";
+import { acquireCwdLock, type AcquiredLock, type RefusedLock } from "./session/cwd_lock.js";
 import { addDaemon, listDaemons, removeDaemon } from "./daemon/registry.js";
 import { callSupervisor, supervisorOnline, SupervisorOfflineError } from "./daemon/client.js";
 import type { ControlRequest, DaemonInfo } from "./daemon/control_protocol.js";
@@ -1940,10 +1940,12 @@ async function _reconcileName(
     resolveResources();
   };
   const provisional = new Set<AcquiredLock>();
+  let requestedRefusalReason: RefusedLock["reason"] | undefined;
   const reserve = async (name: string): Promise<AcquiredLock | null> => {
     if (oldLock && _lockedRoomId === roomIdFor(cwd, name)) return oldLock;
     const result = await acquireCwdLock(cwd, name);
     if (result.ok) provisional.add(result);
+    else if (name === sanitizeMeshName(requestedName)) requestedRefusalReason = result.reason;
     return result.ok ? result : null;
   };
   let candidate: Awaited<ReturnType<typeof _connectMeshCandidate>> = null;
@@ -1957,9 +1959,13 @@ async function _reconcileName(
       if (!isCurrent()) return false;
     }
     if (!targetLock) {
-      ctx.ui.notify(isDaemon
-        ? `[remote-pi] Daemon not started: another live agent already owns "${requestedName}" in this folder.`
-        : `[remote-pi] Could not reserve a name for "${requestedName}".`, "warning");
+      const prefix = isDaemon
+        ? "[remote-pi] Daemon not started:"
+        : `[remote-pi] Could not reserve a name for "${requestedName}".`;
+      const detail = requestedRefusalReason === "held"
+        ? `another live agent already owns "${requestedName}" in this folder.`
+        : `existing lock socket for "${requestedName}" did not answer and could not be verified as stale. Retrying /remote-pi shortly may succeed.`;
+      ctx.ui.notify(`${prefix} ${detail}`, "warning");
       return false;
     }
 
@@ -1986,7 +1992,7 @@ async function _reconcileName(
         if (candidate.assigned !== effectiveName) {
           const exactLock = await reserve(candidate.assigned);
           if (!isCurrent() || !candidate.isCurrent()) return false;
-          if (!exactLock) throw new Error(`assigned name "${candidate.assigned}" is already locked`);
+          if (!exactLock) throw new Error(`assigned name "${candidate.assigned}" could not be reserved`);
           targetLock = exactLock;
           effectiveName = candidate.assigned;
         }
@@ -2740,11 +2746,10 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // cwd-lock UDS keep running regardless (module state is gone, but the OS
   // handles aren't). In daemon mode (REMOTE_PI_DAEMON=1, set by the Cockpit) the
   // fresh instance re-runs `_cmdRoot` on load, so without releasing the old
-  // handles first we end up with TWO mesh peers under the same name on the
-  // broker + two rooms on the relay. The per-cwd lock is meant to stop the
-  // second connect, but its 500 ms connect-probe can miss the still-bound old
-  // socket while the event loop is saturated at boot, fall through to the
-  // stale-socket unlink path, and let the fresh instance bind a second lock.
+  // handles first, the fresh instance's lock attempt is refused or delayed:
+  // both a live owner and an unanswered, unverified socket prevent acquisition.
+  // That can force an interactive instance to a #N name or refuse a daemon
+  // while the outgoing instance's connections remain open.
   //
   // `session_shutdown` fires on the OUTGOING extension runner and is AWAITED by
   // the SDK (`teardownCurrent`) BEFORE the replacement runtime — and thus the

@@ -4160,10 +4160,10 @@ describe("session_shutdown teardown", () => {
   // Regression: the Pi SDK re-evaluates this module FRESH on every session
   // replacement (jiti `moduleCache: false`), and in daemon mode the fresh
   // instance re-runs `_cmdRoot` on load. Without releasing the OUTGOING
-  // instance's mesh + relay first, the Cockpit's boot-time `switch_session`
-  // leaves two live connections (the "double mesh connection" bug). The SDK
-  // emits + awaits `session_shutdown` on the outgoing runner before the
-  // replacement loads, so the handler MUST exist and tear everything down.
+  // instance's mesh + relay + lock first, the Cockpit's boot-time `switch_session`
+  // leaves the old connections open and the fresh daemon's lock attempt refused
+  // or delayed. The SDK emits + awaits `session_shutdown` on the outgoing runner
+  // before the replacement loads, so the handler MUST exist and tear everything down.
   test("a session_shutdown handler is registered", () => {
     expect(() => captureEventHandler("session_shutdown")).not.toThrow();
   });
@@ -4917,7 +4917,7 @@ describe("name-lock consistency on explicit reconnect", () => {
     const reserve = vi.spyOn(lockModule, "acquireCwdLock").mockImplementation(async () => {
       reservationEntered.resolve();
       await reservation.promise;
-      return { ok: false, lockPath: join(cwd, "refused.sock") };
+      return { ok: false, lockPath: join(cwd, "refused.sock"), reason: "held" };
     });
     // A daemon refuses the first occupied name rather than trying suffixes.
     vi.stubEnv("REMOTE_PI_DAEMON", "1");
@@ -5468,7 +5468,7 @@ describe("name-lock consistency on explicit reconnect", () => {
       expect(await nameIsReserved("Taken")).toBe(false);
       expect(await nameIsReserved("Taken#2")).toBe(true);
       expect(await nameIsReserved("Taken#3")).toBe(false);
-      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("already locked"), "error");
+      expect(ctx.ui.notify).toHaveBeenCalledWith(expect.stringContaining("could not be reserved"), "error");
     } finally {
       if (ackLock.ok) ackLock.release();
       await incumbent.leave();
@@ -6094,6 +6094,37 @@ describe("same-folder same-name → #N suffix (no refusal)", () => {
       expect(_hasMeshNodeForTest()).toBe(true);
     } finally {
       delete process.env["REMOTE_PI_DIRECT_CONFIG"];
+      _resetCwdLockForTest();
+    }
+  });
+
+  test.each(
+    [false, true].flatMap((daemon) => (["held", "unverified"] as const).map((reason) => ({ daemon, reason }))),
+  )("name refusal reports the requested name's $reason reason (daemon=$daemon)", async ({ daemon, reason }) => {
+    vi.stubEnv("REMOTE_PI_DAEMON", daemon ? "1" : undefined);
+    vi.stubEnv("REMOTE_PI_DIRECT_CONFIG", JSON.stringify({ agent_name: "Backoffice", auto_start_relay: false }));
+    const cwd = "/home/user/projects/remote_pi";
+    const lockModule = await import("./session/cwd_lock.js");
+    const reserve = vi.spyOn(lockModule, "acquireCwdLock").mockImplementation(async (_cwd, name) => ({
+      ok: false,
+      lockPath: join(cwd, "refused.sock"),
+      // Suffix refusals must not overwrite the requested name's reason.
+      reason: name === "Backoffice" ? reason : reason === "held" ? "unverified" : "held",
+    }));
+    try {
+      const ctx = makeMockCtx(cwd);
+      await captureHandler("remote-pi")("", ctx);
+      expect(_getLockedNameForTest()).toBeNull();
+      expect(_hasMeshNodeForTest()).toBe(false);
+      expect(reserve).toHaveBeenCalledTimes(daemon ? 1 : 1000);
+      const prefix = daemon ? "[remote-pi] Daemon not started:" : '[remote-pi] Could not reserve a name for "Backoffice".';
+      const detail = reason === "held"
+        ? 'another live agent already owns "Backoffice" in this folder.'
+        : 'existing lock socket for "Backoffice" did not answer and could not be verified as stale. Retrying /remote-pi shortly may succeed.';
+      expect(ctx.ui.notify).toHaveBeenCalledWith(`${prefix} ${detail}`, "warning");
+    } finally {
+      reserve.mockRestore();
+      vi.unstubAllEnvs();
       _resetCwdLockForTest();
     }
   });

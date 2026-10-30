@@ -79,6 +79,189 @@ void main() {
     await tester.pump();
   }
 
+  for (final fromHistory in [false, true]) {
+    testWidgets('tool choices survive updates, streaming and lazy eviction '
+        '(history: $fromHistory)', (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 844));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      Future<void> showChat() => tester.pumpWidget(
+        MaterialApp(
+          home: MultiProvider(
+            providers: [
+              ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+              ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+              ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+              ChangeNotifierProvider<AttachmentViewModel>.value(value: attach),
+            ],
+            child: const ChatPage(),
+          ),
+        ),
+      );
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await showChat();
+        if (fromHistory) {
+          await deliver(
+            tester,
+            h.ch,
+            SessionHistory(
+              inReplyTo: 'sync',
+              sessionStartedAt: 1,
+              eos: true,
+              roomId: 'main',
+              events: const [
+                ToolRequestEvt(
+                  ts: 1,
+                  toolCallId: 'collapse-bash',
+                  tool: 'bash',
+                  args: {'command': 'echo retained'},
+                ),
+                ToolResultEvt(ts: 2, toolCallId: 'collapse-bash', result: 'ok'),
+              ],
+            ),
+          );
+        } else {
+          await deliver(
+            tester,
+            h.ch,
+            ToolRequest(
+              toolCallId: 'collapse-bash',
+              tool: 'bash',
+              args: const {'command': 'echo retained'},
+            ),
+          );
+        }
+        expect(find.text('BASH'), findsOneWidget);
+        expect(find.text('echo retained'), findsNothing);
+        await tester.tap(find.text('BASH'));
+        await tester.pump();
+        expect(find.text('echo retained'), findsOneWidget);
+        // Hiding even the only row must not overwrite its expansion choice.
+        await h.prefs.setHideToolCalls(true);
+        await tester.pump();
+        expect(find.byType(ToolRequestCard), findsNothing);
+        expect(find.text('Nothing here'), findsOneWidget);
+        await h.prefs.setHideToolCalls(false);
+        await tester.pump();
+        expect(find.text('echo retained'), findsOneWidget);
+        await deliver(
+          tester,
+          h.ch,
+          ToolResult(toolCallId: 'collapse-bash', result: 'ok'),
+        );
+        expect(find.text('✓ Done'), findsOneWidget);
+        await deliver(
+          tester,
+          h.ch,
+          ToolRequest(
+            toolCallId: 'collapse-read',
+            tool: 'read',
+            args: const {'path': 'hidden.txt'},
+          ),
+        );
+        expect(find.text('READ'), findsOneWidget);
+        expect(find.textContaining('hidden.txt'), findsNothing);
+        await deliver(
+          tester,
+          h.ch,
+          UserInput(id: 'later-turn', text: 'Later turn'),
+        );
+        for (final delta in ['Streaming', ' more']) {
+          await deliver(
+            tester,
+            h.ch,
+            AgentChunk(inReplyTo: 'later-turn', delta: delta),
+          );
+          expect(find.text('echo retained'), findsOneWidget);
+          expect(find.textContaining('hidden.txt'), findsNothing);
+        }
+        await deliver(tester, h.ch, AgentDone(inReplyTo: 'later-turn'));
+        final originalCard = find
+            .ancestor(
+              of: find.text('BASH'),
+              matching: find.byType(ToolRequestCard),
+            )
+            .evaluate()
+            .single;
+        for (var i = 0; i < 24; i++) {
+          await deliver(
+            tester,
+            h.ch,
+            UserInput(
+              id: 'collapse-later-$i',
+              text: 'Later message $i\nMore text\nThird line',
+            ),
+          );
+        }
+        final scrollable = find
+            .descendant(
+              of: find.byType(ListView).first,
+              matching: find.byType(Scrollable),
+            )
+            .first;
+        // Observe actual disposal, not merely a row outside the viewport.
+        expect(find.text('BASH'), findsNothing);
+        expect(originalCard.mounted, isFalse);
+        await tester.scrollUntilVisible(
+          find.text('BASH'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('echo retained'), findsOneWidget);
+        await tester.ensureVisible(find.text('BASH'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('BASH'));
+        await tester.pump();
+        expect(find.text('echo retained'), findsNothing);
+        await tester.scrollUntilVisible(
+          find.text('Later message 23\nMore text\nThird line'),
+          -300,
+          scrollable: scrollable,
+        );
+        await deliver(
+          tester,
+          h.ch,
+          ToolResult(toolCallId: 'collapse-read', result: 'ok'),
+        );
+        await tester.scrollUntilVisible(
+          find.text('BASH'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('echo retained'), findsNothing);
+        expect(find.textContaining('hidden.txt'), findsNothing);
+        await tester.ensureVisible(find.text('BASH'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('BASH'));
+        await tester.pump();
+        expect(find.text('echo retained'), findsOneWidget);
+        // Choices are screen-local, not persisted in the repository.
+        await tester.pumpWidget(const SizedBox());
+        await showChat();
+        await tester.scrollUntilVisible(
+          find.text('BASH'),
+          300,
+          scrollable: scrollable,
+        );
+        expect(find.text('echo retained'), findsNothing);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    });
+  }
+
   for (final requestBeforeTool in [false, true]) {
     testWidgets('live question follows its intro and tool, not later replies '
         '(request before tool: $requestBeforeTool)', (tester) async {

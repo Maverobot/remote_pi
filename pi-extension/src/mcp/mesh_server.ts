@@ -108,7 +108,7 @@ const mesh = new MeshNode({
 });
 
 let meshReady = false;
-// When the mesh isn't joined, this explains why (folder busy / connecting), so
+// When the mesh isn't joined, this explains why (lock refused / connecting), so
 // the tools return something actionable instead of a generic "not connected".
 let degradedReason = "connecting to the mesh…";
 
@@ -199,10 +199,12 @@ function isoNow(): string {
 // MCP for this folder is still tearing down when Claude respawns us). After a
 // short grace we FAIL LOUD (exit non-zero) rather than degrade forever: a
 // silent connected-but-idle MCP hides the real problem (you launched claude in
-// the wrong folder, or this folder already has a live agent — a duplicate
-// session). Failing makes Claude show the MCP as errored so you actually see it.
+// the wrong folder, this folder already has a live agent, or lock ownership
+// could not be verified). Failing makes Claude show the MCP as errored.
 const JOIN_RETRY_MS = 2_000;
-const MAX_JOIN_ATTEMPTS = 4;  // ~6–8s grace for a restart race, then fail loud
+// Bounds attempts spaced by JOIN_RETRY_MS; total time also depends on
+// lock-probe and mesh-join time.
+const MAX_JOIN_ATTEMPTS = 4;
 let _lock: AcquiredLock | null = null;
 let _lockRetryTimer: ReturnType<typeof setTimeout> | null = null;
 let _lockAttempt = 0;
@@ -274,11 +276,14 @@ async function tryJoinMesh(): Promise<void> {
 
   const res = await acquireCwdLock(_cwd);
   if (!res.ok) {
+    const reason = res.reason === "held"
+      ? "folder already served by another remote-pi agent"
+      : "existing lock socket did not answer and could not be verified as stale";
     _lockAttempt++;
     if (_lockAttempt >= MAX_JOIN_ATTEMPTS) {
-      _failLoud(`folder already served by another remote-pi agent (lock: ${res.lockPath})`);
+      _failLoud(`${reason} (lock: ${res.lockPath})`);
     }
-    degradedReason = `folder busy (lock ${res.lockPath}); attempt ${_lockAttempt}/${MAX_JOIN_ATTEMPTS}`;
+    degradedReason = `${reason} (lock ${res.lockPath}); attempt ${_lockAttempt}/${MAX_JOIN_ATTEMPTS}`;
     _scheduleJoinRetry(JOIN_RETRY_MS);
     return;
   }

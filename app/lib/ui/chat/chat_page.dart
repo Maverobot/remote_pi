@@ -23,7 +23,7 @@ import 'package:go_router/go_router.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 import 'package:provider/provider.dart';
 
-class ChatPage extends StatelessWidget {
+class ChatPage extends StatefulWidget {
   /// Plan/24-fix-title: optional title hint passed via `go_router`
   /// `extra` from the Home tile. Used as the peer-label fallback in
   /// the AppBar so the user sees the right name *immediately* on
@@ -57,6 +57,22 @@ class ChatPage extends StatelessWidget {
     this.initialOnline = false,
     this.showBack = true,
   });
+
+  @override
+  State<ChatPage> createState() => _ChatPageState();
+}
+
+class _ChatPageState extends State<ChatPage> {
+  // Keep choices outside lazy rows, which are disposed when scrolled away.
+  final _expandedToolCallIds = <String>{};
+
+  void _toggleTool(String toolCallId) {
+    setState(() {
+      if (!_expandedToolCallIds.remove(toolCallId)) {
+        _expandedToolCallIds.add(toolCallId);
+      }
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -122,7 +138,7 @@ class ChatPage extends StatelessWidget {
     // "reconnecting" on the default runtime. The live signal takes over once
     // resolved.
     final resolved = vm.connectionResolved;
-    final isOnline = resolved ? vm.isRoomLive : initialOnline;
+    final isOnline = resolved ? vm.isRoomLive : widget.initialOnline;
     // Plan-18 follow-up — when the chat is "offline" (WS to relay
     // down or retrying), prefer a "reconectando" amber pill so the
     // user knows it's the relay, not the Pi cwd, that's gone.
@@ -135,11 +151,11 @@ class ChatPage extends StatelessWidget {
     // either line of the AppBar (room or peer) shows it instead of
     // the generic placeholders when the ViewModel hasn't finished
     // bootstrapping yet.
-    final roomName = _roomDisplayName(room, state, initialTitle);
+    final roomName = _roomDisplayName(room, state, widget.initialTitle);
     // Plan/32g — line 2 (device) falls back to `initialDevice` (the Mac name
     // Home passed), NOT `initialTitle` (the room name) — so it shows the right
     // device from frame 1 and doesn't flip when the PeerRecord loads.
-    final peerLabel = _peerDisplayName(peer, initialDevice);
+    final peerLabel = _peerDisplayName(peer, widget.initialDevice);
 
     return Container(
       height: 56,
@@ -150,7 +166,7 @@ class ChatPage extends StatelessWidget {
       ),
       child: Row(
         children: [
-          if (showBack)
+          if (widget.showBack)
             IconButton(
               icon: Icon(LucideIcons.chevronLeft, size: 18, color: colors.text),
               tooltip: 'Back',
@@ -400,6 +416,8 @@ class ChatPage extends StatelessWidget {
         }
         return _MessageList(
           messages: messages,
+          expandedToolCallIds: _expandedToolCallIds,
+          onToggleTool: _toggleTool,
           hideToolCalls: hideToolCalls,
           uiFlows: state.uiFlows,
           uiError: state.pendingUiError,
@@ -575,6 +593,8 @@ class ChatPage extends StatelessWidget {
 // ---------------------------------------------------------------------------
 
 class _MessageList extends StatelessWidget {
+  final Set<String> expandedToolCallIds;
+  final ValueChanged<String> onToggleTool;
   final List<ChatMessage> messages;
   final StreamingMessage? streaming;
   final bool hideToolCalls;
@@ -584,6 +604,8 @@ class _MessageList extends StatelessWidget {
   final Future<void> Function(ExtensionUiResponse) onRespond;
   final void Function(String, ApproveDecision) onDecide;
   const _MessageList({
+    required this.expandedToolCallIds,
+    required this.onToggleTool,
     required this.messages,
     required this.streaming,
     required this.hideToolCalls,
@@ -630,7 +652,12 @@ class _MessageList extends StatelessWidget {
             child: switch (msg) {
               UserMsg() => UserBubble(msg),
               AssistantMsg() => AssistantBubble(msg),
-              ToolEvent() => ToolRequestCard(tool: msg, onDecide: onDecide),
+              ToolEvent() => ToolRequestCard(
+                tool: msg,
+                expanded: expandedToolCallIds.contains(msg.toolCallId),
+                onToggle: () => onToggleTool(msg.toolCallId),
+                onDecide: onDecide,
+              ),
               CompactionMsg() => CompactionBubble(msg),
               AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
             },

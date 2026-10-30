@@ -1,10 +1,32 @@
+import 'dart:ui' show SemanticsAction;
+
 import 'package:app/domain/session_state.dart';
 import 'package:app/ui/chat/widgets/tool_request_card.dart';
 import 'package:app/ui/core/themes/themes.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-Widget _wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
+Widget _wrap(ToolEvent tool, {ThemeData? theme, VoidCallback? onDecide}) {
+  var expanded = false;
+  return MaterialApp(
+    theme: theme,
+    home: Scaffold(
+      body: StatefulBuilder(
+        builder: (context, setState) => ToolRequestCard(
+          tool: tool,
+          expanded: expanded,
+          onToggle: () => setState(() => expanded = !expanded),
+          onDecide: (_, _) => onDecide?.call(),
+        ),
+      ),
+    ),
+  );
+}
+
+Future<void> _toggle(WidgetTester tester) async {
+  await tester.tap(find.text('BASH'));
+  await tester.pump();
+}
 
 const _bashTool = ToolEvent(
   id: 'tc1',
@@ -34,17 +56,124 @@ const _editToolWithHunk = ToolEvent(
 
 void main() {
   group('ToolRequestCard (informational)', () {
+    for (final status in ToolEventStatus.values) {
+      testWidgets(
+        '$status starts collapsed and toggles existing details',
+        (tester) async {
+          final tool = _bashTool.copyWith(status: status, error: 'tool error');
+          final label = switch (status) {
+            ToolEventStatus.pending || ToolEventStatus.allowed => 'RUNNING',
+            ToolEventStatus.completed => 'DONE',
+            ToolEventStatus.failed => 'FAILED',
+            ToolEventStatus.denied => 'DENIED',
+            ToolEventStatus.expired => 'EXPIRED',
+          };
+          final outcome = switch (status) {
+            ToolEventStatus.pending || ToolEventStatus.allowed => '⏳ Running…',
+            ToolEventStatus.completed => '✓ Done',
+            ToolEventStatus.failed || ToolEventStatus.denied => '✗ tool error',
+            ToolEventStatus.expired => '✗ Expired',
+          };
+          var decisions = 0;
+          await tester.pumpWidget(_wrap(tool, onDecide: () => decisions++));
+          expect(find.text('BASH'), findsOneWidget);
+          expect(find.text(label), findsOneWidget);
+          expect(find.byIcon(Icons.expand_more), findsOneWidget);
+          expect(find.text('ls -la'), findsNothing);
+          expect(find.text(outcome), findsNothing);
+          await _toggle(tester);
+          expect(find.text('ls -la'), findsOneWidget);
+          expect(find.text(outcome), findsOneWidget);
+          expect(find.byIcon(Icons.expand_less), findsOneWidget);
+          await _toggle(tester);
+          expect(find.text('ls -la'), findsNothing);
+          expect(find.text(outcome), findsNothing);
+          expect(find.text('Allow'), findsNothing);
+          expect(find.text('Deny'), findsNothing);
+          expect(decisions, 0);
+        },
+        variant: TargetPlatformVariant({
+          TargetPlatform.android,
+          TargetPlatform.iOS,
+        }),
+      );
+    }
+
+    for (final brightness in Brightness.values) {
+      testWidgets(
+        'single accessible header target in $brightness theme',
+        (tester) async {
+          final semantics = tester.ensureSemantics();
+          try {
+            await tester.pumpWidget(
+              _wrap(
+                _bashTool,
+                theme: brightness == Brightness.dark
+                    ? buildDarkTheme()
+                    : buildLightTheme(),
+              ),
+            );
+            final header = find.bySemanticsLabel('Bash, collapsed, RUNNING');
+            expect(header, findsOneWidget);
+            expect(
+              tester.getSemantics(header),
+              matchesSemantics(
+                label: 'Bash, collapsed, RUNNING',
+                isButton: true,
+                hasTapAction: true,
+                hasExpandedState: true,
+              ),
+            );
+            expect(
+              find.semantics.byPredicate(
+                (node) =>
+                    node.getSemanticsData().hasAction(SemanticsAction.tap),
+              ),
+              findsOneWidget,
+            );
+            // Invoke the accessibility action, not a second button/chevron target.
+            tester.semantics.tap(
+              find.semantics.byLabel('Bash, collapsed, RUNNING'),
+            );
+            await tester.pump();
+            expect(find.text('ls -la'), findsOneWidget);
+            expect(
+              find.bySemanticsLabel('Bash, expanded, RUNNING'),
+              findsOneWidget,
+            );
+            expect(
+              find.semantics.byPredicate(
+                (node) =>
+                    node.getSemanticsData().hasAction(SemanticsAction.tap),
+              ),
+              findsOneWidget,
+            );
+            await _toggle(tester);
+            expect(header, findsOneWidget);
+          } finally {
+            semantics.dispose();
+          }
+        },
+        variant: TargetPlatformVariant({
+          TargetPlatform.android,
+          TargetPlatform.iOS,
+        }),
+      );
+    }
+
     testWidgets('shows tool name and command', (tester) async {
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: _bashTool)));
+      await tester.pumpWidget(_wrap(_bashTool));
       expect(find.text('BASH'), findsOneWidget);
+      expect(find.text('ls -la'), findsNothing);
+      await _toggle(tester);
       expect(find.text('ls -la'), findsOneWidget);
     });
 
     testWidgets('edit renders rich hunks with context lines', (tester) async {
-      await tester.pumpWidget(
-        _wrap(const ToolRequestCard(tool: _editToolWithHunk)),
-      );
+      await tester.pumpWidget(_wrap(_editToolWithHunk));
 
+      await tester.tap(find.text('EDIT'));
+      await tester.pump();
       expect(
         find.textContaining('   16 args: {', findRichText: true),
         findsOneWidget,
@@ -66,11 +195,10 @@ void main() {
     testWidgets('pending state shows RUNNING and no Allow/Deny buttons', (
       tester,
     ) async {
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: _bashTool)));
+      await tester.pumpWidget(_wrap(_bashTool));
       expect(find.text('RUNNING'), findsOneWidget);
       expect(find.text('Allow'), findsNothing);
       expect(find.text('Deny'), findsNothing);
-      expect(find.textContaining('s'), findsAny); // no '60s' countdown
       expect(find.textContaining('60s'), findsNothing);
     });
 
@@ -82,8 +210,9 @@ void main() {
         args: {'command': 'ls'},
         status: ToolEventStatus.completed,
       );
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: done)));
+      await tester.pumpWidget(_wrap(done));
       expect(find.text('DONE'), findsOneWidget);
+      await _toggle(tester);
       expect(find.textContaining('Done'), findsAny);
     });
 
@@ -96,7 +225,7 @@ void main() {
         status: ToolEventStatus.denied,
         error: 'user denied',
       );
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: denied)));
+      await tester.pumpWidget(_wrap(denied));
       expect(find.text('DENIED'), findsOneWidget);
     });
 
@@ -110,7 +239,7 @@ void main() {
         args: {'command': 'ls'},
         status: ToolEventStatus.allowed,
       );
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: allowed)));
+      await tester.pumpWidget(_wrap(allowed));
       expect(find.text('RUNNING'), findsOneWidget);
       expect(find.text('Allow'), findsNothing);
     });
@@ -129,7 +258,8 @@ void main() {
         args: {'command': 'ls'},
         status: ToolEventStatus.completed,
       );
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: done)));
+      await tester.pumpWidget(_wrap(done));
+      await _toggle(tester);
       expect(outcomeColor(tester, '✓ Done'), AppColors.dark.success);
     });
 
@@ -142,8 +272,9 @@ void main() {
         status: ToolEventStatus.failed,
         error: 'command failed: exit 1',
       );
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: failed)));
+      await tester.pumpWidget(_wrap(failed));
       expect(find.text('FAILED'), findsOneWidget);
+      await _toggle(tester);
       expect(
         outcomeColor(tester, '✗ command failed: exit 1'),
         AppColors.dark.error,
@@ -152,7 +283,8 @@ void main() {
 
     testWidgets('running → blue "⏳ Running…"', (tester) async {
       // pending defaults
-      await tester.pumpWidget(_wrap(const ToolRequestCard(tool: _bashTool)));
+      await tester.pumpWidget(_wrap(_bashTool));
+      await _toggle(tester);
       expect(outcomeColor(tester, '⏳ Running…'), AppColors.dark.accent);
     });
   });

@@ -28,7 +28,7 @@ import { ipcAddress, usesNamedPipe } from "./ipc.js";
  *
  * Caller workflow:
  *   const lock = await acquireCwdLock(cwd);
- *   if (!lock.ok) { ui.notify("Já tem um agente rodando nessa pasta."); return; }
+ *   if (!lock.ok) { ui.notify(`Lock refused: ${lock.reason}`); return; }
  *   // …run /remote-pi normally; lock auto-releases on process exit
  */
 
@@ -48,7 +48,9 @@ export interface AcquiredLock {
 
 export interface RefusedLock {
   ok: false;
-  /** Where the live lock socket lives, in case the caller wants to log it. */
+  /** "held": a live owner answered; "unverified": ownership could not be verified. */
+  reason: "held" | "unverified";
+  /** Where the refused lock socket lives, in case the caller wants to log it. */
   lockPath: string;
 }
 
@@ -87,7 +89,7 @@ export function lockPathForCwd(cwd: string): string {
 /**
  * Attempts to acquire the cwd lock. Resolves with either:
  *   - `{ ok: true, release }` when we own it (server bound + retained).
- *   - `{ ok: false, lockPath }` when held or the owner cannot be verified.
+ *   - `{ ok: false, lockPath, reason }` when held or the owner cannot be verified.
  *
  * Self-healing path: if the prior holder crashed, the probe gets ECONNREFUSED.
  * We unlink only the unchanged leftover socket and retry the bind.
@@ -111,17 +113,17 @@ export async function acquireCwdLock(cwd: string, name?: string): Promise<CwdLoc
   const probe = await probeSocketWithRetry(lockPath);
   if (probe.status === "live") {
     probe.socket.destroy();
-    return { ok: false, lockPath };
+    return { ok: false, lockPath, reason: "held" };
   }
-  if (probe.status === "unknown") return { ok: false, lockPath };
+  if (probe.status === "unknown") return { ok: false, lockPath, reason: "unverified" };
 
   // Only reclaim the unchanged crash-leftover socket; never unlink a pipe.
   removeStaleSock(lockPath, probe);
   server = await tryBind(lockPath);
   if (server) return _acquired(server, lockPath);
 
-  // Race: someone else bound between our unlink and retry. Treat as held.
-  return { ok: false, lockPath };
+  // A lost bind race or another bind error: no fresh probe proved a live owner.
+  return { ok: false, lockPath, reason: "unverified" };
 }
 
 function _acquired(server: Server, _lockPath: string): AcquiredLock {

@@ -44,6 +44,7 @@ describe("acquireCwdLock", () => {
     expect(second.ok).toBe(false);
     if (!second.ok) {
       expect(second.lockPath).toBe(lockPathForCwd(cwd));
+      expect(second).toMatchObject({ reason: "held" });
     }
 
     if (first.ok) first.release();
@@ -144,6 +145,7 @@ describe.skipIf(process.platform === "win32")("acquireCwdLock socket safety", ()
     try {
       contender = await acquireCwdLock(cwd);
       expect(contender.ok).toBe(false);
+      expect(contender).toMatchObject({ reason: "unverified" });
       expect(connect.mock.calls.length).toBeGreaterThan(1);
       expect(connect.mock.calls.length).toBeLessThanOrEqual(5);
       expect(lstatSync(path).ino).toBe(before.ino);
@@ -167,6 +169,7 @@ describe.skipIf(process.platform === "win32")("acquireCwdLock socket safety", ()
     try {
       contender = await acquireCwdLock(cwd);
       expect(contender.ok).toBe(false);
+      expect(contender).toMatchObject({ reason: "held" });
       expect(connect).toHaveBeenCalledTimes(2);
       expect(lstatSync(path).ino).toBe(before.ino);
     } finally {
@@ -202,6 +205,20 @@ describe.skipIf(process.platform === "win32")("acquireCwdLock socket safety", ()
     }
   });
 
+  test("a failed second bind after a gone probe leaves ownership unverified", async () => {
+    const cwd = tmpCwd();
+    const path = lockPathForCwd(cwd);
+    mkdirSync(path, { recursive: true });
+    const connect = vi.spyOn(Socket.prototype, "connect").mockImplementation(function (this: Socket) {
+      queueMicrotask(() => this.emit("error", Object.assign(new Error("gone"), { code: "ENOENT" })));
+      return this;
+    });
+    try {
+      expect(await acquireCwdLock(cwd)).toEqual({ ok: false, lockPath: path, reason: "unverified" });
+      expect(lstatSync(path).isDirectory()).toBe(true);
+    } finally { connect.mockRestore(); }
+  });
+
   test.each(["young", "mature", "future"])("handles a %s real SIGKILL leftover without unsafe cleanup", async (age) => {
     const cwd = tmpCwd();
     const path = lockPathForCwd(cwd);
@@ -225,7 +242,10 @@ describe.skipIf(process.platform === "win32")("acquireCwdLock socket safety", ()
       const result = await pending;
       try {
         expect(result.ok).toBe(age !== "future");
-        if (age === "future") expect(lstatSync(path).isSocket()).toBe(true);
+        if (age === "future") {
+          expect(result).toMatchObject({ reason: "unverified" });
+          expect(lstatSync(path).isSocket()).toBe(true);
+        }
       } finally { if (result.ok) result.release(); }
     } finally { clock?.mockRestore(); child.kill("SIGKILL"); }
   });

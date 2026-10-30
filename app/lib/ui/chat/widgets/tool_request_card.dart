@@ -18,9 +18,17 @@ import 'package:flutter/material.dart';
 
 class ToolRequestCard extends StatelessWidget {
   final ToolEvent tool;
+  final bool expanded;
+  final VoidCallback onToggle;
   final void Function(String toolCallId, ApproveDecision decision)? onDecide;
 
-  const ToolRequestCard({super.key, required this.tool, this.onDecide});
+  const ToolRequestCard({
+    super.key,
+    required this.tool,
+    required this.expanded,
+    required this.onToggle,
+    this.onDecide,
+  });
 
   /// Plan/32 — one color drives the whole card so the outcome is unmistakable:
   /// running → blue, done → green, failed → red, denied/expired → grey.
@@ -64,10 +72,12 @@ class ToolRequestCard extends StatelessWidget {
           mainAxisSize: MainAxisSize.min,
           children: [
             _buildHeader(context, color),
-            const SizedBox(height: 10),
-            _buildCodeBlock(context),
-            const SizedBox(height: 8),
-            _buildOutcome(color),
+            if (expanded) ...[
+              const SizedBox(height: 10),
+              _buildCodeBlock(context),
+              const SizedBox(height: 8),
+              _buildOutcome(color),
+            ],
           ],
         ),
       ),
@@ -83,33 +93,62 @@ class ToolRequestCard extends StatelessWidget {
       ToolEventStatus.expired => 'EXPIRED',
     };
 
-    return Row(
-      children: [
-        CustomPaint(
-          size: const Size(14, 14),
-          painter: _TerminalIconPainter(color: color),
-        ),
-        const SizedBox(width: 8),
-        Text(
-          tool.tool.toUpperCase(),
-          style: TextStyle(
-            fontFamily: kMonoFamily,
-            fontSize: 11.5,
-            color: color,
-            letterSpacing: 0.6,
+    return Semantics(
+      button: true,
+      expanded: expanded,
+      label:
+          '${tool.tool}, ${expanded ? "expanded" : "collapsed"}, $statusLabel',
+      onTap: onToggle,
+      excludeSemantics: true,
+      child: Material(
+        type: MaterialType.transparency,
+        child: InkWell(
+          onTap: onToggle,
+          excludeFromSemantics: true,
+          borderRadius: BorderRadius.circular(8),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minHeight: 48),
+            child: Row(
+              children: [
+                CustomPaint(
+                  size: const Size(14, 14),
+                  painter: _TerminalIconPainter(color: color),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    tool.tool.toUpperCase(),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontFamily: kMonoFamily,
+                      fontSize: 11.5,
+                      color: color,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  statusLabel,
+                  style: TextStyle(
+                    fontFamily: kMonoFamily,
+                    fontSize: 10,
+                    color: color,
+                    letterSpacing: 0.4,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Icon(
+                  expanded ? Icons.expand_less : Icons.expand_more,
+                  color: color,
+                  size: 20,
+                ),
+              ],
+            ),
           ),
         ),
-        const Spacer(),
-        Text(
-          statusLabel,
-          style: TextStyle(
-            fontFamily: kMonoFamily,
-            fontSize: 10,
-            color: color,
-            letterSpacing: 0.4,
-          ),
-        ),
-      ],
+      ),
     );
   }
 
