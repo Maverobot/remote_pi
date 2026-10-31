@@ -84,7 +84,7 @@ void main() {
   }
 
   testWidgets(
-    'adjacent SDK Thinking snapshots share one open card and retain group collapse',
+    'adjacent SDK Thinking snapshots share one card; streaming opens, completion folds, manual choice survives',
     (tester) async {
       final semantics = tester.ensureSemantics();
       await tester.binding.setSurfaceSize(const Size(390, 844));
@@ -113,6 +113,7 @@ void main() {
         String status = 'streaming',
         String? historyReply,
         int index = 0,
+        String? runId,
       }) async {
         await deliver(
           tester,
@@ -128,6 +129,7 @@ void main() {
               'status': status,
               'text': text,
               'ts': 1,
+              'run_id': ?runId,
               if (historyReply != null)
                 'history': {'index': index, 'before_event': 0},
             },
@@ -170,15 +172,62 @@ void main() {
         expect(find.byType(SelectableText), findsOneWidget);
         await thought('a', 2, '  First revised', status: 'incomplete');
         await thought('b', 2, 'Second complete', status: 'complete');
-        expect(find.text('  First revised\n\nSecond complete'), findsOneWidget);
-        expect(find.text('Incomplete'), findsOneWidget);
+        // No streaming member left: the group folds automatically, and the
+        // retained partial text keeps its Partial badge even though the last
+        // member completed.
+        expect(find.text('Partial'), findsOneWidget);
+        expect(find.byType(SelectableText), findsNothing);
+        expect(
+          find.bySemanticsLabel('Thinking, collapsed, Partial'),
+          findsOneWidget,
+        );
         await tester.tap(find.text('Thinking'));
         await tester.pumpAndSettle();
+        // The manual expand wins over the automatic fold on completion.
         await thought('a', 3, 'First complete', status: 'complete');
         await thought('c', 1, 'Third appended');
         expect(find.text('Thinking'), findsOneWidget);
+        expect(
+          find.text('First complete\n\nSecond complete\n\nThird appended'),
+          findsOneWidget,
+        );
+        expect(find.bySemanticsLabel('Thinking, expanded'), findsOneWidget);
+        // A manual collapse wins over a still-streaming sibling member.
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        await thought('c', 2, 'Third appended more', status: 'streaming');
         expect(find.byType(SelectableText), findsNothing);
         expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        // The manual expand survives every member completing, and a
+        // server-confirmed cancel: the interrupted stream stops generating
+        // (no member is streaming anymore) yet the group stays open on the
+        // manual choice and keeps the Partial badge.
+        await thought('c', 3, 'Third finalized', status: 'complete');
+        await thought(
+          'd',
+          1,
+          'Interrupted draft',
+          status: 'streaming',
+          runId: 'run-d',
+        );
+        await deliver(
+          tester,
+          h.ch,
+          Cancelled(inReplyTo: 'cancel', targetId: 'run-d'),
+        );
+        expect(find.text('Partial'), findsOneWidget);
+        expect(
+          find.text(
+            'First complete\n\nSecond complete\n\nThird finalized\n\nInterrupted draft',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Thinking, expanded, Partial'),
+          findsOneWidget,
+        );
 
         // A correlated history reply prepends a new member to this same group.
         await tester.runAsync(() async {
@@ -231,18 +280,35 @@ void main() {
         );
         await thought(
           'c',
-          2,
+          4,
           'Third complete',
           status: 'complete',
           historyReply: reply,
           index: 3,
         );
         expect(find.text('Thinking'), findsOneWidget);
-        expect(find.byType(SelectableText), findsNothing);
-        // Removing a collapsed member must not forget its collapsed sibling.
+        expect(
+          find.text(
+            'History prefix\n\nFirst complete\n\nSecond complete\n\nThird complete\n\nInterrupted draft',
+          ),
+          findsOneWidget,
+        );
+        expect(
+          find.bySemanticsLabel('Thinking, expanded, Partial'),
+          findsOneWidget,
+        );
+        // Removing an expanded member must not forget its expanded sibling.
         await thought('a', 4, '', status: 'complete');
-        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
-        expect(find.byType(SelectableText), findsNothing);
+        expect(
+          find.bySemanticsLabel('Thinking, expanded, Partial'),
+          findsOneWidget,
+        );
+        expect(
+          find.text(
+            'History prefix\n\nSecond complete\n\nThird complete\n\nInterrupted draft',
+          ),
+          findsOneWidget,
+        );
         for (var i = 0; i < 24; i++) {
           await deliver(
             tester,
@@ -258,9 +324,24 @@ void main() {
             )
             .first;
         await tester.scrollUntilVisible(
-          find.bySemanticsLabel('Thinking, collapsed'),
+          find.bySemanticsLabel('Thinking, expanded, Partial'),
           300,
           scrollable: scrollable,
+        );
+        expect(
+          find.text(
+            'History prefix\n\nSecond complete\n\nThird complete\n\nInterrupted draft',
+          ),
+          findsOneWidget,
+        );
+        await tester.ensureVisible(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        // The manual collapse survives on the merged group's members.
+        expect(
+          find.bySemanticsLabel('Thinking, collapsed, Partial'),
+          findsOneWidget,
         );
         expect(
           find.descendant(
@@ -269,28 +350,35 @@ void main() {
           ),
           findsNothing,
         );
-        await tester.ensureVisible(find.text('Thinking'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Thinking'));
-        await tester.pumpAndSettle();
-        expect(
-          find.text('History prefix\n\nSecond complete\n\nThird complete'),
-          findsOneWidget,
-        );
-        expect(find.text('Thinking'), findsOneWidget);
-        await tester.ensureVisible(find.text('Thinking'));
-        await tester.pumpAndSettle();
-        await tester.tap(find.text('Thinking'));
-        await tester.pumpAndSettle();
-        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
         await tester.pumpWidget(const SizedBox());
         await showChat();
+        // A new page resets to automatic defaults: completed and interrupted
+        // history folds again.
         await tester.scrollUntilVisible(
-          find.text('History prefix\n\nSecond complete\n\nThird complete'),
+          find.bySemanticsLabel('Thinking, collapsed, Partial'),
           300,
           scrollable: scrollable,
         );
-        expect(find.bySemanticsLabel('Thinking, expanded'), findsOneWidget);
+        expect(find.byType(ThinkingCard), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(ThinkingCard),
+            matching: find.byType(SelectableText),
+          ),
+          findsNothing,
+        );
+        // Tombstoning the interrupted member leaves the completed siblings
+        // folded by default on this same page.
+        await thought('d', 2, '', status: 'complete');
+        expect(find.text('Thinking'), findsOneWidget);
+        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(ThinkingCard),
+            matching: find.byType(SelectableText),
+          ),
+          findsNothing,
+        );
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());
@@ -435,6 +523,9 @@ void main() {
         if (boundary == 'hidden tool') {
           expect(find.byType(ToolRequestCard), findsNothing);
           expect(find.text('Thinking'), findsOneWidget);
+          // Completed history folds by default; open it explicitly.
+          await tester.tap(find.text('Thinking'));
+          await tester.pumpAndSettle();
           expect(
             find.text('Before boundary\n\nAfter boundary'),
             findsOneWidget,
@@ -443,7 +534,9 @@ void main() {
           await tester.runAsync(() => h.prefs.setHideToolCalls(false));
           await tester.pump();
           expect(find.text('Thinking'), findsNWidgets(2));
-          await tester.tap(find.text('Thinking').first);
+          // Both members keep the manual open across the split; collapse the
+          // older (upper) group by tapping it.
+          await tester.tap(find.text('Thinking').last);
           await tester.pumpAndSettle();
           // Merging retains either member's collapse; expanding clears both.
           await tester.runAsync(() => h.prefs.setHideToolCalls(true));
@@ -460,20 +553,21 @@ void main() {
           await tester.pump();
         }
         expect(find.text('Thinking'), findsNWidgets(2));
-        expect(find.text('Before boundary'), findsOneWidget);
-        expect(find.text('After boundary'), findsOneWidget);
         expect(
-          tester.getBottomLeft(find.text('Before boundary')).dy,
+          tester.getBottomLeft(find.text('Thinking').last).dy,
           lessThan(tester.getTopLeft(separator).dy),
         );
         expect(
           tester.getBottomLeft(separator).dy,
-          lessThan(tester.getTopLeft(find.text('After boundary')).dy),
+          lessThan(tester.getTopLeft(find.text('Thinking').first).dy),
         );
         if (boundary.endsWith('with flow')) {
           await thought('before', 'Before revised', revision: 2);
           await thought('later', 'Appended after boundary');
           expect(find.text('Thinking'), findsNWidgets(2));
+          // The appended group folds until opened manually.
+          await tester.tap(find.text('Thinking').first);
+          await tester.pumpAndSettle();
           expect(
             find.text('After boundary\n\nAppended after boundary'),
             findsOneWidget,
@@ -583,21 +677,28 @@ void main() {
           ),
         );
         expect(find.text('Thinking'), findsNWidgets(3));
-        expect(find.text('First epoch\n\nNext epoch'), findsOneWidget);
-        expect(find.text('Other session'), findsOneWidget);
-        expect(find.text('After archived question'), findsOneWidget);
         expect(find.text('Legacy prompt — read-only.'), findsOneWidget);
+        // Completed history folds by default; open the oldest and newest
+        // groups to verify the projected bodies while the middle group stays
+        // folded.
+        await tester.tap(find.text('Thinking').last);
+        await tester.pumpAndSettle();
+        expect(find.text('First epoch\n\nNext epoch'), findsOneWidget);
+        await tester.tap(find.text('Thinking').first);
+        await tester.pumpAndSettle();
+        expect(find.text('After archived question'), findsOneWidget);
+        expect(find.text('Other session'), findsNothing);
         expect(
-          tester.getBottomLeft(find.text('First epoch\n\nNext epoch')).dy,
-          lessThan(tester.getTopLeft(find.text('Other session')).dy),
+          tester.getBottomLeft(find.text('Thinking').last).dy,
+          lessThan(tester.getTopLeft(find.text('Thinking').at(1)).dy),
         );
         expect(
-          tester.getBottomLeft(find.text('Other session')).dy,
+          tester.getBottomLeft(find.text('Thinking').at(1)).dy,
           lessThan(tester.getTopLeft(find.byType(AskUserPromptCard)).dy),
         );
         expect(
           tester.getBottomLeft(find.byType(AskUserPromptCard)).dy,
-          lessThan(tester.getTopLeft(find.text('After archived question')).dy),
+          lessThan(tester.getTopLeft(find.text('Thinking').first).dy),
         );
         expect(tester.takeException(), isNull);
       } finally {
@@ -615,8 +716,8 @@ void main() {
 
   for (final fromHistory in [false, true]) {
     testWidgets(
-      'Thinking defaults open; collapse survives revisions, history and lazy eviction; '
-      'page recreation reopens (history: $fromHistory)',
+      'Thinking folds on completion; manual choice survives revisions, history and '
+      'lazy eviction; new page resets (history: $fromHistory)',
       (tester) async {
         final semantics = tester.ensureSemantics();
         await tester.binding.setSurfaceSize(const Size(390, 844));
@@ -703,39 +804,59 @@ void main() {
             ),
           );
           expect(find.text('Thinking'), findsOneWidget);
-          expect(find.text('Summary A'), findsOneWidget);
-          if (fromHistory) expect(find.text('Incomplete'), findsOneWidget);
+          if (fromHistory) {
+            // History-only partial text is not generating: folded by default
+            // and labelled Partial.
+            expect(
+              find.bySemanticsLabel('Thinking, collapsed, Partial'),
+              findsOneWidget,
+            );
+            expect(find.text('Summary A'), findsNothing);
+          } else {
+            // Actively streaming: open by default.
+            expect(find.bySemanticsLabel('Thinking, expanded'), findsOneWidget);
+            expect(find.text('Summary A'), findsOneWidget);
+          }
           await deliverThinking(
             snapshot(2, 'Summary A\n\nSummary B', status: 'streaming'),
           );
           // Both live revisions are visible before any completion or manual tap.
           expect(find.text('Summary A\n\nSummary B'), findsOneWidget);
           await deliverThinking(snapshot(3, 'Completed provider summary'));
-          expect(find.text('Completed provider summary'), findsOneWidget);
+          // Normal completion folds the group by default.
+          expect(find.text('Completed provider summary'), findsNothing);
+          expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
           await tester.tap(find.text('Thinking'));
           await tester.pumpAndSettle();
-          expect(find.text('Completed provider summary'), findsNothing);
+          // The manual expand survives subsequent revisions and completions.
+          expect(find.text('Completed provider summary'), findsOneWidget);
           await deliverThinking(
             snapshot(4, 'Revised provider summary', status: 'streaming'),
           );
-          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Revised provider summary'), findsOneWidget);
           await deliverThinking(
             snapshot(5, 'Revised provider summary', status: 'incomplete'),
           );
-          expect(find.text('Incomplete'), findsOneWidget);
-          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Partial'), findsOneWidget);
+          expect(find.text('Revised provider summary'), findsOneWidget);
           await deliverThinking(snapshot(6, 'Revised provider summary'));
-          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Revised provider summary'), findsOneWidget);
           await deliver(
             tester,
             h.ch,
             UserInput(id: 'thinking-separator', text: 'Visible separator'),
           );
           await deliverThinking(
-            snapshot(1, 'Independent provider summary', messageId: 'other'),
+            snapshot(
+              1,
+              'Independent provider summary',
+              messageId: 'other',
+              status: 'incomplete',
+            ),
           );
-          expect(find.text('Independent provider summary'), findsOneWidget);
-          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Thinking'), findsNWidgets(2));
+          expect(find.text('Independent provider summary'), findsNothing);
+          expect(find.text('Revised provider summary'), findsOneWidget);
           await deliver(
             tester,
             h.ch,
@@ -753,8 +874,8 @@ void main() {
               eos: true,
             ),
           );
-          expect(find.text('Revised provider summary'), findsNothing);
-          expect(find.text('Independent provider summary'), findsOneWidget);
+          expect(find.text('Revised provider summary'), findsOneWidget);
+          expect(find.text('Independent provider summary'), findsNothing);
           for (var i = 0; i < 24; i++) {
             await deliver(
               tester,
@@ -772,25 +893,53 @@ void main() {
                 matching: find.byType(Scrollable),
               )
               .first;
+          // The manually expanded group stays open through lazy eviction; the
+          // interrupted one folds by default.
+          await tester.scrollUntilVisible(
+            find.bySemanticsLabel('Thinking, expanded'),
+            300,
+            scrollable: scrollable,
+          );
+          expect(find.text('Revised provider summary'), findsOneWidget);
+          expect(
+            find.bySemanticsLabel('Thinking, collapsed, Partial'),
+            findsOneWidget,
+          );
+          await tester.ensureVisible(
+            find.bySemanticsLabel('Thinking, expanded'),
+          );
+          await tester.pumpAndSettle();
+          await tester.tap(find.bySemanticsLabel('Thinking, expanded'));
+          await tester.pumpAndSettle();
+          expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+          expect(find.text('Revised provider summary'), findsNothing);
+          await tester.pumpWidget(const SizedBox());
+          await showChat();
+          // A new page resets to automatic defaults: both groups fold.
           await tester.scrollUntilVisible(
             find.bySemanticsLabel('Thinking, collapsed'),
             300,
             scrollable: scrollable,
           );
-          expect(find.text('Revised provider summary'), findsNothing);
-          expect(find.text('Independent provider summary'), findsOneWidget);
-          await tester.pumpWidget(const SizedBox());
-          await showChat();
-          await tester.scrollUntilVisible(
-            find.text('Revised provider summary'),
-            300,
-            scrollable: scrollable,
+          expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+          expect(
+            find.bySemanticsLabel('Thinking, collapsed, Partial'),
+            findsOneWidget,
           );
-          expect(find.text('Revised provider summary'), findsOneWidget);
+          expect(
+            find.descendant(
+              of: find.byType(ThinkingCard),
+              matching: find.byType(SelectableText),
+            ),
+            findsNothing,
+          );
           await deliverThinking(snapshot(7, ''));
           expect(find.text('Revised provider summary'), findsNothing);
           expect(find.text('Thinking'), findsOneWidget);
-          expect(find.text('Independent provider summary'), findsOneWidget);
+          expect(
+            find.bySemanticsLabel('Thinking, collapsed, Partial'),
+            findsOneWidget,
+          );
         } finally {
           await tester.pumpWidget(const SizedBox());
           h.vm.dispose();

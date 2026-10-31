@@ -1,5 +1,6 @@
 import 'package:app/data/preferences/preferences.dart';
 import 'package:app/domain/session_state.dart';
+import 'package:app/domain/thinking.dart';
 import 'package:app/pairing/storage.dart';
 import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/core/themes/themes.dart';
@@ -67,14 +68,15 @@ class _ChatPageState extends State<ChatPage> {
   // Keep choices outside lazy rows, which are disposed when scrolled away.
   final _expandedToolCallIds = <String>{};
   final _expandedCompactionIds = <String>{};
-  final _collapsedThinkingIds = <String>{};
+  // Explicit per-member expand/collapse choice (both directions). Recorded on
+  // toggle and preferred over the automatic streaming default while the page
+  // lives; a new page starts from the automatic defaults again.
+  final _thinkingExpansionChoice = <String, bool>{};
 
-  void _toggleThinking(List<String> ids) {
+  void _setThinkingExpansion(List<String> ids, bool expanded) {
     setState(() {
-      if (ids.any(_collapsedThinkingIds.contains)) {
-        _collapsedThinkingIds.removeAll(ids);
-      } else {
-        _collapsedThinkingIds.addAll(ids);
+      for (final id in ids) {
+        _thinkingExpansionChoice[id] = expanded;
       }
     });
   }
@@ -439,8 +441,8 @@ class _ChatPageState extends State<ChatPage> {
           messages: messages,
           expandedToolCallIds: _expandedToolCallIds,
           onToggleTool: _toggleTool,
-          collapsedThinkingIds: _collapsedThinkingIds,
-          onToggleThinking: _toggleThinking,
+          thinkingExpansionChoice: _thinkingExpansionChoice,
+          onToggleThinking: _setThinkingExpansion,
           expandedCompactionIds: _expandedCompactionIds,
           onToggleCompaction: _toggleCompaction,
           hideToolCalls: hideToolCalls,
@@ -618,8 +620,8 @@ class _ChatPageState extends State<ChatPage> {
 // ---------------------------------------------------------------------------
 
 class _MessageList extends StatelessWidget {
-  final Set<String> collapsedThinkingIds;
-  final ValueChanged<List<String>> onToggleThinking;
+  final Map<String, bool> thinkingExpansionChoice;
+  final void Function(List<String>, bool) onToggleThinking;
   final Set<String> expandedToolCallIds;
   final ValueChanged<String> onToggleTool;
   final Set<String> expandedCompactionIds;
@@ -633,7 +635,7 @@ class _MessageList extends StatelessWidget {
   final Future<void> Function(ExtensionUiResponse) onRespond;
   final void Function(String, ApproveDecision) onDecide;
   const _MessageList({
-    required this.collapsedThinkingIds,
+    required this.thinkingExpansionChoice,
     required this.onToggleThinking,
     required this.expandedToolCallIds,
     required this.onToggleTool,
@@ -659,16 +661,37 @@ class _MessageList extends StatelessWidget {
     final items = <Widget>[];
     // Visible flows still split groups when their anchoring tool is hidden.
     final thinkingGroup = <ThinkingMsg>[];
+    // Explicit member choices win over the automatic default: any manual
+    // collapse keeps the group closed, any manual expand keeps it open, and
+    // otherwise only a group with an actively streaming (not locally
+    // interrupted) member opens.
+    bool thinkingExpanded(List<ThinkingMsg> members) {
+      for (final message in members) {
+        if (thinkingExpansionChoice[message.id] == false) return false;
+      }
+      for (final message in members) {
+        if (thinkingExpansionChoice[message.id] == true) return true;
+      }
+      return members.any(
+        (message) =>
+            message.observation.status == ThinkingStatus.streaming &&
+            !message.observation.locallyInterrupted,
+      );
+    }
+
     void flushThinking() {
       if (thinkingGroup.isEmpty) return;
       final members = List<ThinkingMsg>.of(thinkingGroup);
       final ids = members.map((message) => message.id).toList();
+      final expanded = thinkingExpanded(members);
       items.add(
         ThinkingCard.group(
           members,
           key: ValueKey(('thinking-group', members.first.id)),
-          expanded: !ids.any(collapsedThinkingIds.contains),
-          onToggle: () => onToggleThinking(ids),
+          expanded: expanded,
+          // Record the desired bool for every visible member so later
+          // completions or regrouping cannot override the explicit choice.
+          onToggle: () => onToggleThinking(ids, !expanded),
         ),
       );
       thinkingGroup.clear();

@@ -46,7 +46,7 @@ class ThinkingCard extends StatelessWidget {
             expanded: expanded,
             excludeSemantics: true,
             label:
-                'Thinking, ${expanded ? "expanded" : "collapsed"}${incomplete ? ", Incomplete" : ""}',
+                'Thinking, ${expanded ? "expanded" : "collapsed"}${incomplete ? ", Partial" : ""}',
             onTap: onToggle,
             child: Material(
               type: MaterialType.transparency,
@@ -64,7 +64,7 @@ class ThinkingCard extends StatelessWidget {
                             Text('Thinking', style: context.typo.mono),
                             if (incomplete)
                               Text(
-                                'Incomplete',
+                                'Partial',
                                 style: context.typo.mono.copyWith(
                                   color: context.colors.muted2,
                                 ),

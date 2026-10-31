@@ -55,17 +55,15 @@ void main() {
           );
           const fullText = '  **Literal** first\n\n\nSecond\n\nparagraph  ';
           expect(find.text('Thinking'), findsOneWidget);
-          expect(find.text('Incomplete'), findsOneWidget);
+          expect(find.text('Partial'), findsOneWidget);
           expect(find.text(fullText), findsOneWidget);
           expect(find.byType(SelectableText), findsOneWidget);
-          final header = find.bySemanticsLabel(
-            'Thinking, expanded, Incomplete',
-          );
+          final header = find.bySemanticsLabel('Thinking, expanded, Partial');
           expect(tester.getSize(header).height, greaterThanOrEqualTo(48));
           expect(
             tester.getSemantics(header),
             matchesSemantics(
-              label: 'Thinking, expanded, Incomplete',
+              label: 'Thinking, expanded, Partial',
               isButton: true,
               hasTapAction: true,
               hasExpandedState: true,
@@ -81,7 +79,7 @@ void main() {
           expect(toggles, 1);
           expect(find.text(fullText), findsNothing);
           expect(
-            find.bySemanticsLabel('Thinking, collapsed, Incomplete'),
+            find.bySemanticsLabel('Thinking, collapsed, Partial'),
             findsOneWidget,
           );
         } finally {
@@ -118,9 +116,9 @@ void main() {
             ),
           );
           expect(find.text(thought.text), findsNothing);
-          expect(find.text('Incomplete'), findsOneWidget);
+          expect(find.text('Partial'), findsOneWidget);
           expect(
-            find.bySemanticsLabel('Thinking, collapsed, Incomplete'),
+            find.bySemanticsLabel('Thinking, collapsed, Partial'),
             findsOneWidget,
           );
           await tester.tap(find.text('Thinking'));
@@ -128,7 +126,7 @@ void main() {
           expect(find.byType(SelectableText), findsOneWidget);
           expect(find.text(thought.text), findsOneWidget);
           expect(
-            find.bySemanticsLabel('Thinking, expanded, Incomplete'),
+            find.bySemanticsLabel('Thinking, expanded, Partial'),
             findsOneWidget,
           );
         } finally {
