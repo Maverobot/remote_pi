@@ -4,11 +4,18 @@ import 'package:flutter/material.dart';
 import 'package:lucide_icons_flutter/lucide_icons.dart';
 
 class ThinkingCard extends StatelessWidget {
-  final ThinkingMsg message;
+  final List<ThinkingMsg> messages;
   final bool expanded;
   final VoidCallback onToggle;
-  const ThinkingCard(
-    this.message, {
+  ThinkingCard(
+    ThinkingMsg message, {
+    super.key,
+    required this.expanded,
+    required this.onToggle,
+  }) : messages = [message];
+
+  const ThinkingCard.group(
+    this.messages, {
     super.key,
     required this.expanded,
     required this.onToggle,
@@ -16,8 +23,14 @@ class ThinkingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final observation = message.observation;
-    if (!observation.visible) return const SizedBox.shrink();
+    final observations = messages
+        .map((message) => message.observation)
+        .where((observation) => observation.visible)
+        .toList();
+    if (observations.isEmpty) return const SizedBox.shrink();
+    final incomplete = observations.any(
+      (observation) => observation.incomplete,
+    );
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
@@ -33,7 +46,7 @@ class ThinkingCard extends StatelessWidget {
             expanded: expanded,
             excludeSemantics: true,
             label:
-                'Thinking, ${expanded ? "expanded" : "collapsed"}${observation.incomplete ? ", Incomplete" : ""}',
+                'Thinking, ${expanded ? "expanded" : "collapsed"}${incomplete ? ", Incomplete" : ""}',
             onTap: onToggle,
             child: Material(
               type: MaterialType.transparency,
@@ -49,7 +62,7 @@ class ThinkingCard extends StatelessWidget {
                           spacing: 8,
                           children: [
                             Text('Thinking', style: context.typo.mono),
-                            if (observation.incomplete)
+                            if (incomplete)
                               Text(
                                 'Incomplete',
                                 style: context.typo.mono.copyWith(
@@ -74,7 +87,7 @@ class ThinkingCard extends StatelessWidget {
           ),
           if (expanded)
             SelectableText(
-              observation.text,
+              observations.map((observation) => observation.text).join('\n\n'),
               style: context.typo.mono.copyWith(color: context.colors.muted2),
             ),
         ],

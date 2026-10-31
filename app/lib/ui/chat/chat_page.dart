@@ -67,11 +67,15 @@ class _ChatPageState extends State<ChatPage> {
   // Keep choices outside lazy rows, which are disposed when scrolled away.
   final _expandedToolCallIds = <String>{};
   final _expandedCompactionIds = <String>{};
-  final _expandedThinkingIds = <String>{};
+  final _collapsedThinkingIds = <String>{};
 
-  void _toggleThinking(String id) {
+  void _toggleThinking(List<String> ids) {
     setState(() {
-      if (!_expandedThinkingIds.remove(id)) _expandedThinkingIds.add(id);
+      if (ids.any(_collapsedThinkingIds.contains)) {
+        _collapsedThinkingIds.removeAll(ids);
+      } else {
+        _collapsedThinkingIds.addAll(ids);
+      }
     });
   }
 
@@ -435,7 +439,7 @@ class _ChatPageState extends State<ChatPage> {
           messages: messages,
           expandedToolCallIds: _expandedToolCallIds,
           onToggleTool: _toggleTool,
-          expandedThinkingIds: _expandedThinkingIds,
+          collapsedThinkingIds: _collapsedThinkingIds,
           onToggleThinking: _toggleThinking,
           expandedCompactionIds: _expandedCompactionIds,
           onToggleCompaction: _toggleCompaction,
@@ -614,8 +618,8 @@ class _ChatPageState extends State<ChatPage> {
 // ---------------------------------------------------------------------------
 
 class _MessageList extends StatelessWidget {
-  final Set<String> expandedThinkingIds;
-  final ValueChanged<String> onToggleThinking;
+  final Set<String> collapsedThinkingIds;
+  final ValueChanged<List<String>> onToggleThinking;
   final Set<String> expandedToolCallIds;
   final ValueChanged<String> onToggleTool;
   final Set<String> expandedCompactionIds;
@@ -629,7 +633,7 @@ class _MessageList extends StatelessWidget {
   final Future<void> Function(ExtensionUiResponse) onRespond;
   final void Function(String, ApproveDecision) onDecide;
   const _MessageList({
-    required this.expandedThinkingIds,
+    required this.collapsedThinkingIds,
     required this.onToggleThinking,
     required this.expandedToolCallIds,
     required this.onToggleTool,
@@ -653,7 +657,25 @@ class _MessageList extends StatelessWidget {
     final rows = chatMessageRows(messages).toList();
     final rowIds = rows.map((row) => row.id).toSet();
     final items = <Widget>[];
+    // Visible flows still split groups when their anchoring tool is hidden.
+    final thinkingGroup = <ThinkingMsg>[];
+    void flushThinking() {
+      if (thinkingGroup.isEmpty) return;
+      final members = List<ThinkingMsg>.of(thinkingGroup);
+      final ids = members.map((message) => message.id).toList();
+      items.add(
+        ThinkingCard.group(
+          members,
+          key: ValueKey(('thinking-group', members.first.id)),
+          expanded: !ids.any(collapsedThinkingIds.contains),
+          onToggle: () => onToggleThinking(ids),
+        ),
+      );
+      thinkingGroup.clear();
+    }
+
     void addFlow(ExtensionUiFlow flow) {
+      flushThinking();
       items.add(
         ExtensionUiCard(
           key: ValueKey(('extension-ui', flow.request.id)),
@@ -674,38 +696,43 @@ class _MessageList extends StatelessWidget {
     }
     for (final row in rows) {
       final msg = row.message;
-      if (!hideToolCalls || msg is! ToolEvent) {
+      if (msg is ThinkingMsg && msg.observation.visible) {
+        if (thinkingGroup.isNotEmpty &&
+            thinkingGroup.last.observation.scope.sessionId !=
+                msg.observation.scope.sessionId) {
+          flushThinking();
+        }
+        thinkingGroup.add(msg);
+      }
+      final child = switch (msg) {
+        ThinkingMsg() => null,
+        ToolEvent() when hideToolCalls => null,
+        UserMsg() => UserBubble(msg),
+        AssistantMsg() => AssistantBubble(msg),
+        ToolEvent() => ToolRequestCard(
+          tool: msg,
+          expanded: expandedToolCallIds.contains(msg.toolCallId),
+          onToggle: () => onToggleTool(msg.toolCallId),
+          onDecide: onDecide,
+        ),
+        CompactionMsg() => CompactionBubble(
+          msg,
+          expanded: expandedCompactionIds.contains(msg.id),
+          onToggle: () => onToggleCompaction(msg.id),
+        ),
+        AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
+      };
+      if (child != null) {
+        flushThinking();
         items.add(
-          KeyedSubtree(
-            key: ValueKey(('message', row.id)),
-            child: switch (msg) {
-              UserMsg() => UserBubble(msg),
-              AssistantMsg() => AssistantBubble(msg),
-              ThinkingMsg() => ThinkingCard(
-                msg,
-                expanded: expandedThinkingIds.contains(msg.id),
-                onToggle: () => onToggleThinking(msg.id),
-              ),
-              ToolEvent() => ToolRequestCard(
-                tool: msg,
-                expanded: expandedToolCallIds.contains(msg.toolCallId),
-                onToggle: () => onToggleTool(msg.toolCallId),
-                onDecide: onDecide,
-              ),
-              CompactionMsg() => CompactionBubble(
-                msg,
-                expanded: expandedCompactionIds.contains(msg.id),
-                onToggle: () => onToggleCompaction(msg.id),
-              ),
-              AskUserPromptMsg() => AskUserPromptCard(prompt: msg),
-            },
-          ),
+          KeyedSubtree(key: ValueKey(('message', row.id)), child: child),
         );
       }
       for (final flow in uiFlows) {
         if (flow.afterMessageRowId == row.id) addFlow(flow);
       }
     }
+    flushThinking();
     if (streaming != null) {
       items.add(
         KeyedSubtree(

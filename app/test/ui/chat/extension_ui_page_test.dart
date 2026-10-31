@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'package:app/domain/session_state.dart';
 
 import 'package:app/data/actions/actions_repository.dart';
 import 'package:app/data/images/image_picker_service.dart';
@@ -8,6 +7,8 @@ import 'package:app/data/preferences/preferences.dart';
 import 'package:app/data/repositories/session_read_repository.dart';
 import 'package:app/data/voice/speech_service.dart';
 import 'package:app/protocol/protocol.dart';
+import 'package:app/domain/thinking.dart';
+import 'package:app/ui/chat/widgets/ask_user_prompt_card.dart';
 import 'package:app/ui/chat/states/chat_state.dart';
 import 'package:app/ui/chat/attachment/viewmodels/attachment_viewmodel.dart';
 import 'package:app/ui/chat/chat_page.dart';
@@ -83,8 +84,9 @@ void main() {
   }
 
   testWidgets(
-    'Thinking choices survive revisions, history and lazy eviction; page recreation collapses',
+    'adjacent SDK Thinking snapshots share one open card and retain group collapse',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       await tester.binding.setSurfaceSize(const Size(390, 844));
       addTearDown(() => tester.binding.setSurfaceSize(null));
       final h = (await tester.runAsync(extensionUiHarness))!;
@@ -104,19 +106,39 @@ void main() {
           ),
         ),
       );
-      Pong snapshot(int revision, String text) => Pong.fromJson({
-        'in_reply_to': 'thinking:m',
-        'thinking': {
-          'session_id': 'thinking-ui',
-          'epoch': 'E',
-          'message_id': 'm',
-          'room_id': 'main',
-          'revision': revision,
-          'status': 'complete',
-          'text': text,
-          'ts': 1,
-        },
-      });
+      Future<void> thought(
+        String id,
+        int revision,
+        String text, {
+        String status = 'streaming',
+        String? historyReply,
+        int index = 0,
+      }) async {
+        await deliver(
+          tester,
+          h.ch,
+          Pong.fromJson({
+            'in_reply_to': historyReply ?? 'thinking:$id',
+            'thinking': {
+              'session_id': 'adjacent-ui',
+              'epoch': 'E',
+              'message_id': id,
+              'room_id': 'main',
+              'revision': revision,
+              'status': status,
+              'text': text,
+              'ts': 1,
+              if (historyReply != null)
+                'history': {'index': index, 'before_event': 0},
+            },
+          }),
+        );
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 300)),
+        );
+        await tester.pump();
+      }
+
       try {
         await tester.runAsync(h.vm.clearActiveSession);
         await showChat();
@@ -133,46 +155,102 @@ void main() {
             'truncated': false,
             'thinking_history': {
               'kind': 'reply',
-              'session_id': 'thinking-ui',
+              'session_id': 'adjacent-ui',
               'epoch': 'E',
               'count': 0,
               'truncated': false,
             },
           }),
         );
-        await deliver(tester, h.ch, snapshot(1, 'Summary A\n\nSummary B'));
+        await thought('a', 1, '  First prefix');
+        await thought('b', 1, 'Second prefix');
+        // Distinct SDK IDs, still streaming: one open frame before any tap.
         expect(find.text('Thinking'), findsOneWidget);
-        expect(find.text('Summary A\n\nSummary B'), findsNothing);
+        expect(find.text('  First prefix\n\nSecond prefix'), findsOneWidget);
+        expect(find.byType(SelectableText), findsOneWidget);
+        await thought('a', 2, '  First revised', status: 'incomplete');
+        await thought('b', 2, 'Second complete', status: 'complete');
+        expect(find.text('  First revised\n\nSecond complete'), findsOneWidget);
+        expect(find.text('Incomplete'), findsOneWidget);
         await tester.tap(find.text('Thinking'));
         await tester.pumpAndSettle();
-        expect(find.text('Summary A\n\nSummary B'), findsOneWidget);
-        await deliver(tester, h.ch, snapshot(2, 'Revised provider summary'));
-        expect(find.text('Revised provider summary'), findsOneWidget);
+        await thought('a', 3, 'First complete', status: 'complete');
+        await thought('c', 1, 'Third appended');
+        expect(find.text('Thinking'), findsOneWidget);
+        expect(find.byType(SelectableText), findsNothing);
+        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+
+        // A correlated history reply prepends a new member to this same group.
+        await tester.runAsync(() async {
+          h.sync.requestSync();
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        });
+        final reply = h.ch.sent.whereType<SessionSync>().last.id;
         await deliver(
           tester,
           h.ch,
-          SessionHistory(
-            inReplyTo: 'legacy-replay',
-            sessionStartedAt: 1,
-            events: const [
-              UserInputEvt(ts: 0, id: 'thinking-question', text: 'Question'),
-            ],
-            eos: true,
-          ),
+          ServerMessage.fromJson({
+            'type': 'session_history',
+            'in_reply_to': reply,
+            'session_started_at': 1,
+            'room_id': 'main',
+            'events': [],
+            'eos': true,
+            'truncated': false,
+            'thinking_history': {
+              'kind': 'reply',
+              'session_id': 'adjacent-ui',
+              'epoch': 'E',
+              'count': 4,
+              'truncated': false,
+            },
+          }),
         );
-        expect(find.text('Revised provider summary'), findsOneWidget);
-        final original = find.byType(ThinkingCard).evaluate().single;
+        await thought(
+          'older',
+          1,
+          'History prefix',
+          status: 'complete',
+          historyReply: reply,
+        );
+        await thought(
+          'a',
+          3,
+          'First complete',
+          status: 'complete',
+          historyReply: reply,
+          index: 1,
+        );
+        await thought(
+          'b',
+          2,
+          'Second complete',
+          status: 'complete',
+          historyReply: reply,
+          index: 2,
+        );
+        await thought(
+          'c',
+          2,
+          'Third complete',
+          status: 'complete',
+          historyReply: reply,
+          index: 3,
+        );
+        expect(find.text('Thinking'), findsOneWidget);
+        expect(find.byType(SelectableText), findsNothing);
+        // Removing a collapsed member must not forget its collapsed sibling.
+        await thought('a', 4, '', status: 'complete');
+        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
+        expect(find.byType(SelectableText), findsNothing);
         for (var i = 0; i < 24; i++) {
           await deliver(
             tester,
             h.ch,
-            UserInput(
-              id: 'thinking-after-$i',
-              text: 'Later $i\nSecond line\nThird line',
-            ),
+            UserInput(id: 'group-after-$i', text: 'Later message $i'),
           );
         }
-        expect(original.mounted, isFalse);
+        expect(find.byType(ThinkingCard), findsNothing);
         final scrollable = find
             .descendant(
               of: find.byType(ListView).first,
@@ -180,25 +258,348 @@ void main() {
             )
             .first;
         await tester.scrollUntilVisible(
-          find.text('Thinking'),
+          find.bySemanticsLabel('Thinking, collapsed'),
           300,
           scrollable: scrollable,
         );
-        expect(find.text('Revised provider summary'), findsOneWidget);
+        expect(
+          find.descendant(
+            of: find.byType(ThinkingCard),
+            matching: find.byType(SelectableText),
+          ),
+          findsNothing,
+        );
+        await tester.ensureVisible(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        expect(
+          find.text('History prefix\n\nSecond complete\n\nThird complete'),
+          findsOneWidget,
+        );
+        expect(find.text('Thinking'), findsOneWidget);
+        await tester.ensureVisible(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Thinking'));
+        await tester.pumpAndSettle();
+        expect(find.bySemanticsLabel('Thinking, collapsed'), findsOneWidget);
         await tester.pumpWidget(const SizedBox());
         await showChat();
         await tester.scrollUntilVisible(
-          find.text('Thinking'),
+          find.text('History prefix\n\nSecond complete\n\nThird complete'),
           300,
           scrollable: scrollable,
         );
-        expect(find.text('Revised provider summary'), findsNothing);
-        await deliver(tester, h.ch, snapshot(3, ''));
-        expect(find.byType(ThinkingCard), findsNothing);
-        expect(
-          (h.vm.state as ChatReady).messages.whereType<ThinkingMsg>(),
-          isEmpty,
+        expect(find.bySemanticsLabel('Thinking, expanded'), findsOneWidget);
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+        semantics.dispose();
+      }
+    },
+  );
+
+  for (final boundary in [
+    'user',
+    'assistant',
+    'compaction',
+    'tool',
+    'hidden tool',
+    'tool with flow',
+    'hidden tool with flow',
+  ]) {
+    testWidgets('Thinking groups respect visible $boundary boundary', (
+      tester,
+    ) async {
+      await tester.binding.setSurfaceSize(const Size(390, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      Future<void> thought(String id, String text, {int revision = 1}) =>
+          deliver(
+            tester,
+            h.ch,
+            Pong.fromJson({
+              'in_reply_to': 'thinking:$id',
+              'thinking': {
+                'session_id': 'boundary-ui',
+                'epoch': 'E',
+                'message_id': id,
+                'room_id': 'main',
+                'revision': revision,
+                'status': 'complete',
+                'text': text,
+                'ts': 1,
+              },
+            }),
+          );
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        await tester.runAsync(
+          () => h.prefs.setHideToolCalls(boundary.startsWith('hidden')),
         );
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MultiProvider(
+              providers: [
+                ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+                ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+                ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+                ChangeNotifierProvider<AttachmentViewModel>.value(
+                  value: attach,
+                ),
+              ],
+              child: const ChatPage(),
+            ),
+          ),
+        );
+        await deliver(
+          tester,
+          h.ch,
+          ServerMessage.fromJson({
+            'type': 'session_history',
+            'in_reply_to': h.ch.sent.whereType<SessionSync>().last.id,
+            'session_started_at': 1,
+            'room_id': 'main',
+            'events': [],
+            'eos': true,
+            'truncated': false,
+            'thinking_history': {
+              'kind': 'reply',
+              'session_id': 'boundary-ui',
+              'epoch': 'E',
+              'count': 0,
+              'truncated': false,
+            },
+          }),
+        );
+        await thought('before', 'Before boundary');
+        late Finder separator;
+        switch (boundary) {
+          case 'user':
+            await deliver(
+              tester,
+              h.ch,
+              UserInput(id: 'separator', text: 'Visible prose'),
+            );
+            separator = find.byType(UserBubble);
+          case 'assistant':
+            await deliver(
+              tester,
+              h.ch,
+              AgentChunk(inReplyTo: 'separator', delta: 'Visible prose'),
+            );
+            await deliver(tester, h.ch, AgentDone(inReplyTo: 'separator'));
+            separator = find.byType(AssistantBubble);
+          case 'compaction':
+            await deliver(
+              tester,
+              h.ch,
+              Compaction(summary: 'Recap', tokensBefore: 42),
+            );
+            separator = find.byType(CompactionBubble);
+          default:
+            await deliver(
+              tester,
+              h.ch,
+              ToolRequest(
+                toolCallId: 'boundary-tool',
+                tool: 'read',
+                args: const {'path': 'file'},
+              ),
+            );
+            separator = find.byType(ToolRequestCard);
+        }
+        if (boundary.endsWith('with flow')) {
+          await deliver(
+            tester,
+            h.ch,
+            _request('boundary-flow', toolCallId: 'boundary-tool'),
+          );
+          separator = find.byType(ExtensionUiCard);
+          await tester.enterText(
+            find.descendant(of: separator, matching: find.byType(TextField)),
+            'Keep this draft',
+          );
+        }
+        await thought('after', 'After boundary');
+        if (boundary == 'hidden tool') {
+          expect(find.byType(ToolRequestCard), findsNothing);
+          expect(find.text('Thinking'), findsOneWidget);
+          expect(
+            find.text('Before boundary\n\nAfter boundary'),
+            findsOneWidget,
+          );
+          // Showing the tool splits the visible timeline again.
+          await tester.runAsync(() => h.prefs.setHideToolCalls(false));
+          await tester.pump();
+          expect(find.text('Thinking'), findsNWidgets(2));
+          await tester.tap(find.text('Thinking').first);
+          await tester.pumpAndSettle();
+          // Merging retains either member's collapse; expanding clears both.
+          await tester.runAsync(() => h.prefs.setHideToolCalls(true));
+          await tester.pump();
+          expect(find.text('Thinking'), findsOneWidget);
+          expect(find.text('Before boundary\n\nAfter boundary'), findsNothing);
+          await tester.tap(find.text('Thinking'));
+          await tester.pumpAndSettle();
+          expect(
+            find.text('Before boundary\n\nAfter boundary'),
+            findsOneWidget,
+          );
+          await tester.runAsync(() => h.prefs.setHideToolCalls(false));
+          await tester.pump();
+        }
+        expect(find.text('Thinking'), findsNWidgets(2));
+        expect(find.text('Before boundary'), findsOneWidget);
+        expect(find.text('After boundary'), findsOneWidget);
+        expect(
+          tester.getBottomLeft(find.text('Before boundary')).dy,
+          lessThan(tester.getTopLeft(separator).dy),
+        );
+        expect(
+          tester.getBottomLeft(separator).dy,
+          lessThan(tester.getTopLeft(find.text('After boundary')).dy),
+        );
+        if (boundary.endsWith('with flow')) {
+          await thought('before', 'Before revised', revision: 2);
+          await thought('later', 'Appended after boundary');
+          expect(find.text('Thinking'), findsNWidgets(2));
+          expect(
+            find.text('After boundary\n\nAppended after boundary'),
+            findsOneWidget,
+          );
+          expect(find.text('Keep this draft'), findsOneWidget);
+          await tester.tap(find.text('Alpha'));
+          await tester.pump();
+          await tester.tap(find.widgetWithText(FilledButton, 'Submit'));
+          await tester.pump();
+          expect(
+            h.ch.sent.whereType<ExtensionUiResponse>().single.id,
+            'boundary-flow',
+          );
+          await deliver(
+            tester,
+            h.ch,
+            const ExtensionUiRequest(
+              id: 'boundary-flow',
+              method: ExtensionUiMethod.notify,
+            ),
+          );
+          expect(find.text('Submitted on this device'), findsOneWidget);
+          expect(find.text('Keep this draft'), findsOneWidget);
+          expect(find.text('Thinking'), findsNWidgets(2));
+        }
+        expect(tester.takeException(), isNull);
+      } finally {
+        await tester.pumpWidget(const SizedBox());
+        h.vm.dispose();
+        voice.dispose();
+        attach.dispose();
+        actions.dispose();
+        h.sync.dispose();
+        h.conn.dispose();
+        h.prefs.dispose();
+      }
+    });
+  }
+
+  testWidgets(
+    'Thinking history projection respects sessions and legacy prompts, not epochs or tombstones',
+    (tester) async {
+      await tester.binding.setSurfaceSize(const Size(390, 1600));
+      addTearDown(() => tester.binding.setSurfaceSize(null));
+      final h = (await tester.runAsync(extensionUiHarness))!;
+      final voice = VoiceInputViewModel(_Speech());
+      final actions = ActionsRepository(h.conn);
+      final attach = AttachmentViewModel(_Picker(), actions);
+      try {
+        await tester.runAsync(h.vm.clearActiveSession);
+        // Saved rows exercise the real repository projection, including a legacy
+        // prompt that today's wire protocol no longer creates.
+        await tester.runAsync(() async {
+          final box = await LocalBoxes().msgsBox(
+            extensionUiTestPeer.remoteEpk,
+            'main',
+          );
+          Future<void> savedThought(
+            int seq,
+            String session,
+            String epoch,
+            String text,
+          ) {
+            final observation = ThinkingObservation(
+              scope: ThinkingScope(sessionId: session, epoch: epoch),
+              messageId: 'message-$seq',
+              revision: 1,
+              status: ThinkingStatus.complete,
+              text: text,
+            );
+            return box.put(seq, {
+              'id': observation.id,
+              'seq': seq,
+              'role': 'assistant',
+              'ts': 1,
+              'thinking': observation.toJson(),
+            });
+          }
+
+          await savedThought(0, 'S', 'E', 'First epoch');
+          await savedThought(1, 'S', 'E', '  ');
+          await savedThought(2, 'S', 'E2', 'Next epoch');
+          await savedThought(3, 'T', 'E', 'Other session');
+          await box.put(4, {
+            'id': 'legacy-prompt',
+            'seq': 4,
+            'role': 'askUser',
+            'ts': 1,
+            'ask_user': {'question': 'Archived question', 'options': []},
+          });
+          await savedThought(5, 'T', 'E', 'After archived question');
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        });
+        await tester.pumpWidget(
+          MaterialApp(
+            home: MultiProvider(
+              providers: [
+                ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+                ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+                ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+                ChangeNotifierProvider<AttachmentViewModel>.value(
+                  value: attach,
+                ),
+              ],
+              child: const ChatPage(),
+            ),
+          ),
+        );
+        expect(find.text('Thinking'), findsNWidgets(3));
+        expect(find.text('First epoch\n\nNext epoch'), findsOneWidget);
+        expect(find.text('Other session'), findsOneWidget);
+        expect(find.text('After archived question'), findsOneWidget);
+        expect(find.text('Legacy prompt — read-only.'), findsOneWidget);
+        expect(
+          tester.getBottomLeft(find.text('First epoch\n\nNext epoch')).dy,
+          lessThan(tester.getTopLeft(find.text('Other session')).dy),
+        );
+        expect(
+          tester.getBottomLeft(find.text('Other session')).dy,
+          lessThan(tester.getTopLeft(find.byType(AskUserPromptCard)).dy),
+        );
+        expect(
+          tester.getBottomLeft(find.byType(AskUserPromptCard)).dy,
+          lessThan(tester.getTopLeft(find.text('After archived question')).dy),
+        );
+        expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox());
         h.vm.dispose();
@@ -211,6 +612,199 @@ void main() {
       }
     },
   );
+
+  for (final fromHistory in [false, true]) {
+    testWidgets(
+      'Thinking defaults open; collapse survives revisions, history and lazy eviction; '
+      'page recreation reopens (history: $fromHistory)',
+      (tester) async {
+        final semantics = tester.ensureSemantics();
+        await tester.binding.setSurfaceSize(const Size(390, 844));
+        addTearDown(() => tester.binding.setSurfaceSize(null));
+        final h = (await tester.runAsync(extensionUiHarness))!;
+        final voice = VoiceInputViewModel(_Speech());
+        final actions = ActionsRepository(h.conn);
+        final attach = AttachmentViewModel(_Picker(), actions);
+        Future<void> showChat() => tester.pumpWidget(
+          MaterialApp(
+            home: MultiProvider(
+              providers: [
+                ChangeNotifierProvider<ChatViewModel>.value(value: h.vm),
+                ChangeNotifierProvider<Preferences>.value(value: h.prefs),
+                ChangeNotifierProvider<VoiceInputViewModel>.value(value: voice),
+                ChangeNotifierProvider<AttachmentViewModel>.value(
+                  value: attach,
+                ),
+              ],
+              child: const ChatPage(),
+            ),
+          ),
+        );
+        Pong snapshot(
+          int revision,
+          String text, {
+          String status = 'complete',
+          String messageId = 'm',
+          String? historyReply,
+        }) => Pong.fromJson({
+          'in_reply_to': historyReply ?? 'thinking:$messageId',
+          'thinking': {
+            'session_id': 'thinking-ui',
+            'epoch': 'E',
+            'message_id': messageId,
+            'room_id': 'main',
+            'revision': revision,
+            'status': status,
+            'text': text,
+            'ts': 1,
+            if (historyReply != null)
+              'history': {'index': 0, 'before_event': 0},
+          },
+        });
+        Future<void> deliverThinking(Pong message) async {
+          await deliver(tester, h.ch, message);
+          // Allow coalesced streaming snapshots to reach the real repository.
+          await tester.runAsync(
+            () => Future<void>.delayed(const Duration(milliseconds: 300)),
+          );
+          await tester.pump();
+        }
+
+        try {
+          await tester.runAsync(h.vm.clearActiveSession);
+          await showChat();
+          final historyReply = h.ch.sent.whereType<SessionSync>().last.id;
+          await deliver(
+            tester,
+            h.ch,
+            ServerMessage.fromJson({
+              'type': 'session_history',
+              'in_reply_to': historyReply,
+              'session_started_at': 1,
+              'room_id': 'main',
+              'events': [],
+              'eos': true,
+              'truncated': false,
+              'thinking_history': {
+                'kind': 'reply',
+                'session_id': 'thinking-ui',
+                'epoch': 'E',
+                'count': fromHistory ? 1 : 0,
+                'truncated': false,
+              },
+            }),
+          );
+          await deliverThinking(
+            snapshot(
+              1,
+              'Summary A',
+              status: fromHistory ? 'incomplete' : 'streaming',
+              historyReply: fromHistory ? historyReply : null,
+            ),
+          );
+          expect(find.text('Thinking'), findsOneWidget);
+          expect(find.text('Summary A'), findsOneWidget);
+          if (fromHistory) expect(find.text('Incomplete'), findsOneWidget);
+          await deliverThinking(
+            snapshot(2, 'Summary A\n\nSummary B', status: 'streaming'),
+          );
+          // Both live revisions are visible before any completion or manual tap.
+          expect(find.text('Summary A\n\nSummary B'), findsOneWidget);
+          await deliverThinking(snapshot(3, 'Completed provider summary'));
+          expect(find.text('Completed provider summary'), findsOneWidget);
+          await tester.tap(find.text('Thinking'));
+          await tester.pumpAndSettle();
+          expect(find.text('Completed provider summary'), findsNothing);
+          await deliverThinking(
+            snapshot(4, 'Revised provider summary', status: 'streaming'),
+          );
+          expect(find.text('Revised provider summary'), findsNothing);
+          await deliverThinking(
+            snapshot(5, 'Revised provider summary', status: 'incomplete'),
+          );
+          expect(find.text('Incomplete'), findsOneWidget);
+          expect(find.text('Revised provider summary'), findsNothing);
+          await deliverThinking(snapshot(6, 'Revised provider summary'));
+          expect(find.text('Revised provider summary'), findsNothing);
+          await deliver(
+            tester,
+            h.ch,
+            UserInput(id: 'thinking-separator', text: 'Visible separator'),
+          );
+          await deliverThinking(
+            snapshot(1, 'Independent provider summary', messageId: 'other'),
+          );
+          expect(find.text('Independent provider summary'), findsOneWidget);
+          expect(find.text('Revised provider summary'), findsNothing);
+          await deliver(
+            tester,
+            h.ch,
+            SessionHistory(
+              inReplyTo: 'legacy-replay',
+              sessionStartedAt: 1,
+              events: const [
+                UserInputEvt(ts: 0, id: 'thinking-question', text: 'Question'),
+                UserInputEvt(
+                  ts: 2,
+                  id: 'thinking-separator',
+                  text: 'Visible separator',
+                ),
+              ],
+              eos: true,
+            ),
+          );
+          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Independent provider summary'), findsOneWidget);
+          for (var i = 0; i < 24; i++) {
+            await deliver(
+              tester,
+              h.ch,
+              UserInput(
+                id: 'thinking-after-$i',
+                text: 'Later $i\nSecond line\nThird line',
+              ),
+            );
+          }
+          expect(find.byType(ThinkingCard), findsNothing);
+          final scrollable = find
+              .descendant(
+                of: find.byType(ListView).first,
+                matching: find.byType(Scrollable),
+              )
+              .first;
+          await tester.scrollUntilVisible(
+            find.bySemanticsLabel('Thinking, collapsed'),
+            300,
+            scrollable: scrollable,
+          );
+          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Independent provider summary'), findsOneWidget);
+          await tester.pumpWidget(const SizedBox());
+          await showChat();
+          await tester.scrollUntilVisible(
+            find.text('Revised provider summary'),
+            300,
+            scrollable: scrollable,
+          );
+          expect(find.text('Revised provider summary'), findsOneWidget);
+          await deliverThinking(snapshot(7, ''));
+          expect(find.text('Revised provider summary'), findsNothing);
+          expect(find.text('Thinking'), findsOneWidget);
+          expect(find.text('Independent provider summary'), findsOneWidget);
+        } finally {
+          await tester.pumpWidget(const SizedBox());
+          h.vm.dispose();
+          voice.dispose();
+          attach.dispose();
+          actions.dispose();
+          h.sync.dispose();
+          h.conn.dispose();
+          h.prefs.dispose();
+          semantics.dispose();
+        }
+      },
+    );
+  }
 
   for (final fromHistory in [false, true]) {
     testWidgets('tool choices survive updates, streaming and lazy eviction '
