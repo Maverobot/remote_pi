@@ -2351,7 +2351,7 @@ let _lastCtx: Pick<ExtensionContext, "ui" | "abort" | "cwd"> | null = null;
 // (an app Quick Action OR a `/new` typed in the Pi TUI). It carries only
 // base-ctx methods (no newSession — that's command-ctx only), so command ops
 // keep using `_lastCtx`.
-let _lastEventCtx: Pick<ExtensionContext, "compact" | "abort" | "ui"> | null = null;
+let _lastEventCtx: Pick<ExtensionContext, "compact" | "abort" | "ui" | "sessionManager"> | null = null;
 const _noopCtx = { ui: { notify: () => undefined }, abort: () => undefined };
 
 // A single Pi process can load this extension TWICE in the SAME session:
@@ -5158,6 +5158,77 @@ export function routeClientMessage(
 
 // ── session_sync handler + helpers ────────────────────────────────────────────
 
+/** Complete SDK history, not the process-local catch-up window. Prepare every
+ * part before sending so source/size failures cannot masquerade as empty EOS. */
+function _handleSdkFullSync(sender: PlainPeerChannel, msg: Extract<ClientMessage, { type: "session_sync" }>): void {
+  try {
+    if (_thinkingCapture.suspended) throw new Error("SDK session replacement is pending");
+    const manager = _lastEventCtx?.sessionManager;
+    if (!manager || typeof manager.getEntries !== "function") throw new Error("Current SDK history is unavailable");
+    const sessionId = manager.getSessionId();
+    if (!sessionId.trim()) throw new Error("Current SDK session identity is unavailable");
+    const entries = manager.getEntries();
+    const messages: BufferMsg[] = [];
+    const sdkPositions = new Map<BufferMsg, number>();
+    for (const [position, entry] of entries.entries()) {
+      if (entry.type === "message") {
+        const message = entry.message as BufferMsg;
+        if (message.role !== "user" && message.role !== "assistant" && message.role !== "toolResult") continue;
+        messages.push(message);
+        sdkPositions.set(message, position);
+      } else if (entry.type === "compaction") {
+        const message: BufferMsg = { role: "compaction", content: entry.summary, timestamp: Date.parse(entry.timestamp), tokensBefore: entry.tokensBefore };
+        messages.push(message);
+        sdkPositions.set(message, position);
+      }
+    }
+    const sources: number[] = [];
+    const mapped = _mapAgentMessagesToEvents(messages, sources);
+    const eventSources = sources.map(source => sdkPositions.get(messages[source]!)!);
+    const events = JSON.parse(JSON.stringify(mapped)) as SessionHistoryEvent[];
+    const base = { type: "session_history" as const, in_reply_to: msg.id, history_format: "sdk_full" as const,
+      session_id: sessionId, room_id: _myRoomId || "main", session_started_at: _sessionStartedAt ?? 0, truncated: false };
+    let thinking: ReturnType<ThinkingCapture["history"]> | undefined;
+    let supplements: ServerMessage[] = [];
+    try {
+      if (_thinkingCapture.scope.session_id === sessionId) {
+        const limit = _getSyncLimit();
+        thinking = _thinkingCapture.history(eventSources, limit, source => sdkPositions.get(_messageBuffer[source]!), /* anchorAllEvents */ true);
+        supplements = thinking.snapshots.map(snapshot => thinkingFrame(snapshot, msg.id));
+        checkedThinkingFrame({ ...base, events: [], part: 0, eos: true, thinking_history: thinking.manifest });
+      }
+    } catch {
+      // Optional current-capture Thinking must not withhold recorded SDK history.
+      thinking = undefined;
+      supplements = [];
+    }
+    const frames: ServerMessage[] = [];
+    let batch: SessionHistoryEvent[] = [];
+    const frame = (values: SessionHistoryEvent[]) => ({ ...base, events: values, part: frames.length, eos: false });
+    let bytes = Buffer.byteLength(JSON.stringify(frame([])), "utf8");
+    for (const event of events) {
+      const size = Buffer.byteLength(JSON.stringify(event), "utf8");
+      if (Math.ceil((bytes + size + (batch.length ? 1 : 0)) / 3) * 3 > 4 * 1024 * 1024) {
+        if (batch.length) frames.push(checkedThinkingFrame(frame(batch)));
+        batch = [];
+        bytes = Buffer.byteLength(JSON.stringify(frame([])), "utf8");
+        if (Math.ceil((bytes + size) / 3) * 3 > 4 * 1024 * 1024) throw new Error("SDK history event exceeds the 4194304-byte transport bound");
+      }
+      bytes += size + (batch.length ? 1 : 0);
+      batch.push(event);
+    }
+    if (batch.length) frames.push(checkedThinkingFrame(frame(batch)));
+    frames.push(checkedThinkingFrame({ ...base, events: [], part: frames.length, eos: true, ...(thinking ? { thinking_history: thinking.manifest } : {}) }));
+    if (manager.getSessionId() !== sessionId) throw new Error("SDK session changed while reading history");
+    for (const value of frames) sender.send(value);
+    for (const supplement of supplements) sender.send(supplement);
+    for (const request of _extensionUiBridge?.pendingRequests() ?? []) sender.send(request);
+  } catch (error) {
+    sender.send({ type: "error", in_reply_to: msg.id, code: String(error).includes("transport bound") ? "too_large" : "internal_error", message: `SDK history unavailable: ${String(error)}` });
+  }
+}
+
+
 /**
  * `session_sync` is a per-sender query: the owner asking gets the reply,
  * not the whole broadcast. Otherwise a session_sync from owner A would
@@ -5169,6 +5240,10 @@ function _handleSessionSync(
   msg: Extract<ClientMessage, { type: "session_sync" }>,
 ): void {
   _sendQueuedState(sender);
+  if (msg.history_format === "sdk_full") {
+    _handleSdkFullSync(sender, msg);
+    return;
+  }
   if (_sessionStartedAt === null) {
     sender.send(checkedThinkingFrame({
       type: "session_history",

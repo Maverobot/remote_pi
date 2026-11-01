@@ -580,13 +580,15 @@ class PairRequest extends ClientMessage {
 class SessionSync extends ClientMessage {
   final String id;
   final int? limit;
-  SessionSync({required this.id, this.limit});
+  final String? historyFormat;
+  SessionSync({required this.id, this.limit, this.historyFormat});
 
   @override
   Map<String, dynamic> toJson() => {
     'type': 'session_sync',
     'id': id,
     if (limit != null) 'limit': limit,
+    if (historyFormat != null) 'history_format': historyFormat,
   };
 }
 
@@ -1277,6 +1279,9 @@ class SessionHistory extends ServerMessage {
   final String inReplyTo;
   final int sessionStartedAt;
   final List<SessionHistoryEvent> events;
+  final String? historyFormat;
+  final String? sessionId;
+  final int? part;
   final bool eos;
   final bool truncated;
   final String? roomId;
@@ -1290,6 +1295,9 @@ class SessionHistory extends ServerMessage {
     required this.eos,
     this.truncated = false,
     this.roomId,
+    this.historyFormat,
+    this.sessionId,
+    this.part,
     this.thinkingResetPending = false,
     this.thinkingHistoryPresent = false,
     this.thinkingHistory,
@@ -1298,6 +1306,11 @@ class SessionHistory extends ServerMessage {
   factory SessionHistory.fromJson(Map<String, dynamic> j) => SessionHistory(
     inReplyTo: j['in_reply_to'] as String,
     sessionStartedAt: (j['session_started_at'] as num).toInt(),
+    historyFormat: j['history_format'] is String
+        ? j['history_format'] as String
+        : null,
+    sessionId: j['session_id'] is String ? j['session_id'] as String : null,
+    part: j['part'] is int ? j['part'] as int : null,
     events: (j['events'] as List<dynamic>)
         .map((e) => SessionHistoryEvent.fromJson(e as Map<String, dynamic>))
         .toList(),

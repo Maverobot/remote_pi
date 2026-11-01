@@ -24,18 +24,26 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:fake_async/fake_async.dart';
 import 'package:hive/hive.dart';
 
+import '../../fixtures/sdk_full_host.dart';
+
 class _FakeChannel implements IChannel, IControlLink {
   final _ctrl = StreamController<ServerMessage>.broadcast();
   final _control = StreamController<ControlInbound>.broadcast();
   final List<ClientMessage> sent = [];
   String activeRoom = 'main';
+  void Function()? requestHistory;
+  Future<SessionSync>? historyQuery;
   @override
   Stream<ServerMessage> get serverMessages => _ctrl.stream;
   @override
   Stream<ControlInbound> get controlFrames => _control.stream;
   @override
-  Future<void> send(ClientMessage msg) async {
-    sent.add(msg);
+  Future<void> send(ClientMessage msg) {
+    final delivered = Future<void>.sync(() {
+      sent.add(msg);
+    });
+    if (msg is SessionSync) historyQuery = delivered.then((_) => msg);
+    return delivered;
   }
 
   @override
@@ -51,7 +59,24 @@ class _FakeChannel implements IChannel, IControlLink {
     await _control.close();
   }
 
-  void push(ServerMessage m) => _ctrl.add(m);
+  void push(ServerMessage m) {
+    if (m is SessionHistory &&
+        m.historyFormat == null &&
+        !m.thinkingHistoryPresent &&
+        !m.thinkingResetPending &&
+        requestHistory != null) {
+      requestHistory!();
+      final query = historyQuery;
+      if (query != null) {
+        unawaited(
+          query.then((request) => _ctrl.add(sdkFullHostReply(m, request.id))),
+        );
+        return;
+      }
+    }
+    _ctrl.add(m);
+  }
+
   void pushControl(ControlInbound m) => _control.add(m);
 }
 
@@ -203,6 +228,7 @@ void main() {
       boxes,
       pendingSendTimeout: pendingSendTimeout,
     );
+    ch.requestHistory = sync.requestSync;
     final epk = 'epk_sync_${++_counter}';
     conn.adopt(
       ch,
@@ -406,6 +432,12 @@ void main() {
       ServerMessage.fromJson({
             'type': 'session_history',
             'in_reply_to': id,
+            if (manifestOverride is! Map ||
+                manifestOverride['kind'] != 'reset') ...{
+              'history_format': 'sdk_full',
+              'session_id': session,
+              'part': 0,
+            },
             'room_id': 'main',
             'session_started_at': 1,
             'events': events,

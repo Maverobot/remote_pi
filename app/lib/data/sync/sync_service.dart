@@ -456,7 +456,7 @@ class SyncService extends Service {
     );
     _thinkingHistoryRequest = request;
     request.timer = Timer(const Duration(seconds: 3), _finishThinkingHistory);
-    ch.send(SessionSync(id: request.id));
+    ch.send(SessionSync(id: request.id, historyFormat: 'sdk_full'));
     _startBackgroundInterest();
   }
 
@@ -918,7 +918,14 @@ class SyncService extends Service {
 
       case SessionHistory(:final roomId):
         if (!_isForActiveRoom(roomId)) break;
-        _receiveThinkingHistory(msg);
+        if (msg.historyFormat == 'sdk_full') {
+          _receiveSdkHistory(msg);
+        } else if (msg.thinkingResetPending ||
+            msg.thinkingHistory?.reset == true) {
+          _receiveThinkingHistory(msg);
+        } else {
+          debugPrint('[history] Complete SDK history requires an updated host');
+        }
 
       case ErrorMessage(:final code, :final message):
         _interruptThinking(runId: msg.inReplyTo ?? _workingReplyTo);
@@ -1046,6 +1053,62 @@ class SyncService extends Service {
       );
     }
     _updateIndex((cur) => cur.copyWith(thinkingScope: scope));
+  }
+
+  void _receiveSdkHistory(SessionHistory history) {
+    final request = _thinkingHistoryRequest;
+    if (request == null ||
+        request.base != null ||
+        !_ownsThinkingRequest(request) ||
+        request.id != history.inReplyTo ||
+        history.roomId != request.room ||
+        _conn.activePeer?.remoteEpk != request.epk ||
+        _conn.activeRoomId != request.room) {
+      return;
+    }
+    final part = history.part;
+    final session = history.sessionId;
+    if (part == null ||
+        part < 0 ||
+        part > 9007199254740991 ||
+        part != request.nextPart ||
+        session == null ||
+        session.trim().isEmpty ||
+        history.truncated ||
+        history.thinkingResetPending ||
+        history.thinkingHistory?.reset == true ||
+        (request.sdkSession != null &&
+            (session != request.sdkSession ||
+                history.sessionStartedAt != request.sdkStartedAt))) {
+      debugPrint(
+        '[history] Invalid or incomplete SDK snapshot; retaining cache',
+      );
+      _finishThinkingHistory();
+      return;
+    }
+    request.sdkSession = session;
+    request.sdkStartedAt = history.sessionStartedAt;
+    request.nextPart++;
+    request.sdkEvents.addAll(history.events);
+    request.timer?.cancel();
+    request.timer = Timer(const Duration(seconds: 3), _finishThinkingHistory);
+    if (!history.eos) return;
+    final thinking = history.thinkingHistory?.scope.sessionId == session
+        ? history.thinkingHistory
+        : null;
+    _receiveThinkingHistory(
+      SessionHistory(
+        inReplyTo: history.inReplyTo,
+        sessionStartedAt: history.sessionStartedAt,
+        events: List.unmodifiable(request.sdkEvents),
+        eos: true,
+        roomId: history.roomId,
+        historyFormat: 'sdk_full',
+        sessionId: session,
+        thinkingHistoryPresent: thinking != null,
+        thinkingHistory: thinking,
+      ),
+    );
   }
 
   void _receiveThinkingHistory(SessionHistory history) {
@@ -1361,7 +1424,10 @@ class SyncService extends Service {
         predecessor = storedPositions[i] ?? predecessor;
         final retainThinking =
             r.thinking != null &&
-            (scope == null || r.thinking!.scope.sessionId == scope.sessionId) &&
+            (h.historyFormat == 'sdk_full'
+                ? r.thinking!.scope.sessionId == h.sessionId
+                : scope == null ||
+                      r.thinking!.scope.sessionId == scope.sessionId) &&
             !historyIds.contains(_key(r.role, r.id));
         if (r.role != MsgRole.askUser && !retainThinking) continue;
         // A truncated history may contain neither neighbor. Use time only to
@@ -1680,7 +1746,8 @@ class SyncService extends Service {
   }
 
   void _interruptThinking({String? runId}) {
-    _finishThinkingHistory();
+    // Local Thinking completion must not discard an unfinished ordinary snapshot.
+    if (_thinkingHistoryRequest?.base != null) _finishThinkingHistory();
     for (final entry in _thinkingRows.entries.toList()) {
       final thought = entry.value.row.thinking!;
       if (thought.status != ThinkingStatus.streaming ||
@@ -2110,6 +2177,10 @@ class _ThinkingHistoryRequest {
   final int generation;
   final int connection;
   SessionHistory? base;
+  String? sdkSession;
+  int? sdkStartedAt;
+  int nextPart = 0;
+  final sdkEvents = <SessionHistoryEvent>[];
   final snapshots = <int, ThinkingSnapshot>{};
   int bytes = 0;
   bool fallback = false;

@@ -3870,6 +3870,100 @@ describe("session sync", () => {
     _setSessionStartedAtForTest(null);
   });
 
+  test("sdk_full sync reads the complete recorded SDK session despite an empty process buffer and limit30", async () => {
+    const entries = Array.from({ length: 35 }, (_, i) => ({ type: "message", id: `entry-${i}`, message: { role: "user", content: `message ${i}`, timestamp: i + 1 } }));
+    const ctx = { ...makeMockCtx(), sessionManager: { getSessionId: () => "sdk-full", getEntries: () => entries } };
+    _setAutoInitedForTest(true);
+    await captureEventHarness().handler("session_start")({ type: "session_start" }, ctx);
+    _setMessageBufferForTest([]);
+    const frames: ServerMessage[] = [];
+    const sender = { send: (frame: ServerMessage) => frames.push(frame) } as Parameters<typeof _routeClientMessageFrom>[0];
+    const sync = () => _routeClientMessageFrom(sender, { type: "session_sync", id: "sdk-query", history_format: "sdk_full", limit: 30 } as ClientMessage, ctx);
+    sync();
+    expect(frames.filter(f => f.type === "session_history").flatMap(f => f.events)).toHaveLength(35);
+    entries.push(...Array.from({ length: 5 }, (_, i) => ({ type: "message", id: `offline-${i}`, message: { role: "user", content: `offline ${i}`, timestamp: 36 + i } })));
+    frames.length = 0;
+    sync();
+    const history = frames.filter(f => f.type === "session_history");
+    expect(history.flatMap(f => f.events)).toHaveLength(40);
+    expect(history.at(-1)).toMatchObject({ history_format: "sdk_full", session_id: "sdk-full", eos: true, truncated: false });
+    // A reconstructed SDK manager retains records; the new process buffer need not.
+    const loaded = JSON.parse(JSON.stringify(entries)) as typeof entries;
+    ctx.sessionManager.getEntries = () => { throw new Error("retired SDK context"); };
+    await captureEventHarness().handler("session_start")({ type: "session_start" }, { ...makeMockCtx(), sessionManager: { getSessionId: () => "sdk-full", getEntries: () => loaded } });
+    _setMessageBufferForTest([]);
+    frames.length = 0;
+    sync();
+    expect(frames.filter(f => f.type === "session_history").flatMap(f => f.events)).toHaveLength(40);
+  });
+
+  test("sdk_full anchors Thinking before its answer when limit30 splits its text and tool events", async () => {
+    const current = { role: "assistant", timestamp: 21, stopReason: "toolUse", content: [{ type: "thinking", thinking: "tool thought" }, { type: "text", text: "own answer" }, { type: "toolCall", id: "T", name: "read", arguments: {} }] };
+    const messages = [
+      ...Array.from({ length: 20 }, (_, i) => ({ role: "user", timestamp: i + 1, content: `earlier ${i}` })),
+      current,
+      { role: "toolResult", timestamp: 22, toolCallId: "T", toolName: "read", content: [{ type: "text", text: "result" }], isError: false },
+      ...Array.from({ length: 28 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", timestamp: i + 23, content: [{ type: "text", text: `later ${i}` }] })),
+    ];
+    const ctx = { ...makeMockCtx(), sessionManager: { getSessionId: () => "sdk-anchor", getEntries: () => messages.map((message, i) => ({ type: "message", id: `entry-${i}`, message })) } };
+    _setAutoInitedForTest(true);
+    const harness = captureEventHarness();
+    await harness.handler("session_start")({ type: "session_start" }, ctx);
+    _setMessageBufferForTest([]);
+    harness.handler("message_end")({ type: "message_end", message: current }, ctx);
+    const frames: ServerMessage[] = [];
+    _routeClientMessageFrom({ send: (frame: ServerMessage) => frames.push(frame) } as Parameters<typeof _routeClientMessageFrom>[0],
+      { type: "session_sync", id: "anchor-sdk-query", history_format: "sdk_full" }, ctx);
+    const events = frames.filter(f => f.type === "session_history").flatMap(f => f.events);
+    expect(events).toHaveLength(51);
+    expect(events[20]).toMatchObject({ type: "agent_message", text: "own answer" });
+    expect(events[21]).toMatchObject({ type: "tool_request", tool_call_id: "T" });
+    expect(frames.find(f => f.type === "pong" && f.thinking)?.thinking).toMatchObject({ text: "tool thought", history: { index: 0, before_event: 20 } });
+  });
+
+  test("sdk_full preserves compaction and translates current Thinking anchors past recorded SDK history", async () => {
+    const current = { role: "assistant", timestamp: 3, stopReason: "stop", content: [{ type: "thinking", thinking: "current thought" }, { type: "text", text: "answer" }] };
+    const entries = [
+      { type: "message", id: "old", message: { role: "user", timestamp: 1, content: "recorded before process start" } },
+      { type: "compaction", id: "compact", timestamp: new Date(2).toISOString(), summary: "compacted", tokensBefore: 100 },
+      { type: "message", id: "new", message: current },
+      { type: "custom", id: "private", data: { secret: "not a chat message" } },
+    ];
+    const ctx = { ...makeMockCtx(), sessionManager: { getSessionId: () => "sdk-thinking", getEntries: () => entries } };
+    _setAutoInitedForTest(true);
+    const harness = captureEventHarness();
+    await harness.handler("session_start")({ type: "session_start" }, ctx);
+    _setMessageBufferForTest([]);
+    harness.handler("message_end")({ type: "message_end", message: current }, ctx);
+    const frames: ServerMessage[] = [];
+    _routeClientMessageFrom({ send: (frame: ServerMessage) => frames.push(frame) } as Parameters<typeof _routeClientMessageFrom>[0],
+      { type: "session_sync", id: "thinking-sdk-query", history_format: "sdk_full" }, ctx);
+    expect(frames.filter(f => f.type === "session_history").flatMap(f => f.events).map(e => e.type)).toEqual(["user_input", "compaction", "agent_message"]);
+    expect(frames.find(f => f.type === "pong" && f.thinking)?.thinking).toMatchObject({ text: "current thought", history: { index: 0, before_event: 2 } });
+  });
+
+  test("sdk_full splits bounded frames and fails explicitly for an oversized single event", async () => {
+    const entries = Array.from({ length: 3 }, (_, i) => ({ type: "message", id: `entry-${i}`, message: { role: "user", content: `${i}${"x".repeat(2 * 1024 * 1024)}`, timestamp: i + 1 } }));
+    const ctx = { ...makeMockCtx(), sessionManager: { getSessionId: () => "sdk-batched", getEntries: () => entries } };
+    _setAutoInitedForTest(true);
+    await captureEventHarness().handler("session_start")({ type: "session_start" }, ctx);
+    const frames: ServerMessage[] = [];
+    const sender = { send: (frame: ServerMessage) => frames.push(frame) } as Parameters<typeof _routeClientMessageFrom>[0];
+    const sync = () => _routeClientMessageFrom(sender, { type: "session_sync", id: "batch-query", history_format: "sdk_full" } as ClientMessage, ctx);
+    sync();
+    const history = frames.filter(f => f.type === "session_history");
+    expect(history.length).toBeGreaterThan(1);
+    expect(history.flatMap(f => f.events)).toHaveLength(3);
+    expect(history.map(f => (f as unknown as { part: number }).part)).toEqual(history.map((_, i) => i));
+    expect(history.slice(0, -1).every(f => !f.eos)).toBe(true);
+    for (const frame of frames) expect(Math.ceil(Buffer.byteLength(JSON.stringify(frame)) / 3) * 3).toBeLessThanOrEqual(4 * 1024 * 1024);
+    entries[0]!.message.content = "x".repeat(4 * 1024 * 1024);
+    frames.length = 0;
+    sync();
+    expect(frames).toContainEqual(expect.objectContaining({ type: "error", code: "too_large", in_reply_to: "batch-query" }));
+    expect(frames.some(f => f.type === "session_history" && f.eos)).toBe(false);
+  });
+
   test("thinking capture without connected peers replays final-only summaries and in-flight text", async () => {
     const harness = captureEventHarness();
     harness.handler("message_end")({ type: "message_end", message: { role: "assistant", stopReason: "stop", timestamp: 1, content: [{ type: "thinking", thinking: "offline summary" }] } });

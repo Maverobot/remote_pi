@@ -11,12 +11,18 @@ import 'package:app/protocol/protocol.dart';
 import 'package:app/ui/chat/viewmodels/chat_viewmodel.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../fixtures/sdk_full_host.dart';
+
 class ExtensionUiTestChannel implements IChannel, IControlLink {
   final _ctrl = StreamController<ServerMessage>.broadcast();
   final _control = StreamController<ControlInbound>.broadcast();
   final List<ClientMessage> sent = [];
   Object? sendError;
   Completer<void>? sendPending;
+  void Function()? requestHistory;
+  Future<SessionSync>? historyQuery;
+  String? _historyRequestId;
+  String? _sdkSession;
   @override
   Stream<ServerMessage> get serverMessages => _ctrl.stream;
   @override
@@ -24,11 +30,18 @@ class ExtensionUiTestChannel implements IChannel, IControlLink {
   @override
   void sendControl(Map<String, dynamic> json) {}
   @override
-  Future<void> send(ClientMessage msg) async {
-    await sendPending?.future;
-    final error = sendError;
-    if (error != null) throw error;
-    sent.add(msg);
+  Future<void> send(ClientMessage msg) {
+    final delivered = () async {
+      await sendPending?.future;
+      final error = sendError;
+      if (error != null) throw error;
+      sent.add(msg);
+    }();
+    if (msg is SessionSync) {
+      _historyRequestId = msg.id;
+      historyQuery = delivered.then((_) => msg);
+    }
+    return delivered;
   }
 
   @override
@@ -37,7 +50,38 @@ class ExtensionUiTestChannel implements IChannel, IControlLink {
     await _control.close();
   }
 
-  void push(ServerMessage m) => _ctrl.add(m);
+  void push(ServerMessage m) {
+    if (m is SessionHistory &&
+        m.thinkingHistory != null &&
+        (m.roomId == null || m.roomId == 'main') &&
+        (m.inReplyTo == _historyRequestId || m.thinkingHistory!.reset)) {
+      _sdkSession = m.thinkingHistory!.scope.sessionId;
+    }
+    if (m is SessionHistory &&
+        m.historyFormat == null &&
+        !m.thinkingResetPending &&
+        m.thinkingHistory?.reset != true &&
+        requestHistory != null) {
+      if (m.thinkingHistoryPresent) {
+        _ctrl.add(sdkFullHostReply(m, m.inReplyTo, sessionId: _sdkSession));
+        return;
+      }
+      requestHistory!();
+      final query = historyQuery;
+      if (query != null) {
+        unawaited(
+          query.then(
+            (request) => _ctrl.add(
+              sdkFullHostReply(m, request.id, sessionId: _sdkSession),
+            ),
+          ),
+        );
+        return;
+      }
+    }
+    _ctrl.add(m);
+  }
+
   void pushControl(ControlInbound frame) => _control.add(frame);
 }
 
@@ -117,6 +161,7 @@ extensionUiHarness() async {
   final conn = ConnectionManager(factory: (_, _) async => ch, storage: storage);
   final boxes = LocalBoxes();
   final sync = SyncService(conn, boxes);
+  ch.requestHistory = sync.requestSync;
   final read = SessionReadRepository(boxes);
   final prefs = Preferences(ExtensionUiTestSecureStorage());
   await prefs.setSelectedPeerEpk(extensionUiTestPeer.remoteEpk);

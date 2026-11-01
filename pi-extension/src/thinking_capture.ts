@@ -137,17 +137,22 @@ export class ThinkingCapture {
     for (const snapshot of snapshots) this.send(thinkingFrame({ ...snapshot, room_id: this.room() }));
   }
 
-  /** Event source indices refer to the unchanged original legacy event array. */
-  history(eventSources: readonly number[], limit: number): { manifest: ThinkingHistoryWire; snapshots: ThinkingSnapshotWire[] } {
+  /** Anchors precede client-side tool collapse. position maps capture-buffer
+   * sources into the caller's history source indices (identity for legacy).
+   * anchorAllEvents changes coordinates, not optional observation selection. */
+  history(eventSources: readonly number[], limit: number, position: (source: number) => number | undefined = source => source, anchorAllEvents = false): { manifest: ThinkingHistoryWire; snapshots: ThinkingSnapshotWire[] } {
     const start = Math.max(0, eventSources.length - limit);
     const firstSource = start > 0 ? eventSources[start] : undefined;
-    const eligible = this.messages.filter(m => m.snapshot && (firstSource === undefined || m.source >= firstSource));
+    const eligible = this.messages.filter(m => {
+      const source = position(m.source);
+      return m.snapshot && source !== undefined && (firstSource === undefined || source >= firstSource);
+    });
     const selected = limit > 0 ? eligible.slice(-limit) : [];
-    const retained = eventSources.slice(start);
+    const retained = anchorAllEvents ? eventSources : eventSources.slice(start);
     return {
       manifest: { kind: "reply", ...this.scope, count: selected.length, truncated: eligible.length > selected.length },
       snapshots: selected.map((m, index) => {
-        const before = retained.findIndex(source => source >= m.source);
+        const before = retained.findIndex(source => source >= position(m.source)!);
         return { ...m.snapshot!, room_id: this.room(), history: { index, before_event: before < 0 ? retained.length : before } };
       }),
     };

@@ -525,6 +525,35 @@ Longo prazo:
 
 [Definir canal] — por enquanto, abra issue marcando como `security` ou contate maintainers diretamente.
 
+### Complete recorded SDK history (`sdk_full`)
+
+A client can request `session_sync` with `history_format:"sdk_full"`. The host
+reads all supported message and compaction entries of the current SDK session,
+including its recorded branches, rather than the process-local buffer or last-N
+window. Other session files and arbitrary custom metadata are not imported.
+`limit` continues to govern legacy history, not this complete ordinary snapshot.
+
+Each `session_history` part echoes `history_format:"sdk_full"`, the actual
+`session_id`, `room_id`, request `in_reply_to`, and a zero-based ordered `part`.
+`eos:false` means more parts follow; only the final `eos:true` completes the
+snapshot. `truncated` is false. All parts share one frozen SDK session and start
+stamp. The existing 4 MiB decoded/base64-padding bound applies per frame. An
+oversized single event or unavailable SDK history returns an explicit error,
+never a truncated or empty-success substitute.
+
+The App collects only its current target's owned request, validates the part
+sequence/session and replaces ordinary cached history once after EOS. Missing,
+invalid, stale or unsupported replies leave the cache intact. A new App requires
+a supporting host; a legacy last-N reply is not treated as a complete snapshot.
+Absent or unknown request formats retain the host's legacy behavior.
+
+SDK-recorded history is authoritative: reconnect can restore records after an
+extension restart, but phone-only temporary observations need not survive a
+complete snapshot. Transfer cost grows with the SDK session. Existing live UI,
+explicit reset handling and optional Thinking protocol remain unchanged. Current
+Thinking anchors are translated to the SDK snapshot's original event positions;
+unpersisted/unmappable optional observations may be omitted.
+
 ### Provider-visible Thinking (optional, grouped)
 
 Thinking content is distinct from thinking-level settings. One SDK assistant
