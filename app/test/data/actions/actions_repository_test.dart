@@ -136,6 +136,23 @@ void main() {
       s.cm.dispose();
     });
 
+    test('reload() sends session_reload', () async {
+      final s = await _setup();
+      final future = s.repo.reload();
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+      final sent = s.ch.sent.single as SessionReload;
+      expect(sent.toJson()['type'], 'session_reload');
+      s.ch.push(
+        ActionOk(
+          inReplyTo: sent.id,
+          action: ActionName.sessionReload,
+          rawAction: 'session_reload',
+        ),
+      );
+      await future;
+      s.cm.dispose();
+    });
+
     test('setModel(provider, modelId) sends model_set', () async {
       final s = await _setup();
       final future = s.repo.setModel('anthropic', 'claude-opus-4-7');

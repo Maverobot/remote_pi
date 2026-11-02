@@ -194,6 +194,7 @@ export type ClientMessage =
   // `action_error` back. Visible side-effects (chat output, model change
   // broadcasts, compaction notice) still flow through the normal channels.
   | { type: "session_new"; id: string }
+  | { type: "session_reload"; id: string }
   | { type: "session_compact"; id: string }
   | { type: "model_set"; id: string; provider: string; model_id: string }
   | { type: "thinking_set"; id: string; level: ThinkingLevel }
@@ -385,6 +386,7 @@ export type ServerMessage =
  */
 export type ActionName =
   | "session_new"
+  | "session_reload"
   | "session_compact"
   | "model_set"
   | "thinking_set";

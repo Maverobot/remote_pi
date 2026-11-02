@@ -10,6 +10,12 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('ClientMessage — typed actions', () {
+    test('SessionReload encodes and replies use session_reload', () {
+      expect(SessionReload(id: 'reload-1').toJson(),
+          {'type': 'session_reload', 'id': 'reload-1'});
+      expect(ActionName.fromWire('session_reload'), ActionName.sessionReload);
+    });
+
     test('SessionCompact encodes as session_compact', () {
       final j = SessionCompact(id: 'r1').toJson();
       expect(j, {'type': 'session_compact', 'id': 'r1'});

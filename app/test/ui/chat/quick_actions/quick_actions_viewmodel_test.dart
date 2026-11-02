@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _FakeActionsRepository implements IActionsRepository {
   int compactCalls = 0;
+  int reloadCalls = 0;
   int newSessionCalls = 0;
   String? lastProvider;
   String? lastModelId;
@@ -42,6 +43,11 @@ class _FakeActionsRepository implements IActionsRepository {
   Future<void> compact() async {
     compactCalls++;
     if (compactError != null) throw compactError!;
+  }
+
+  @override
+  Future<void> reload() async {
+    reloadCalls++;
   }
 
   @override
@@ -85,6 +91,20 @@ void main() {
       expect(transitions.first, isA<QuickActionsBusy>());
       expect((transitions.first as QuickActionsBusy).action,
           ActionName.sessionCompact);
+      expect(transitions.last, isA<QuickActionsIdle>());
+      vm.dispose();
+    });
+
+    test('reload() flips to busy then back to idle', () async {
+      final repo = _FakeActionsRepository();
+      final vm = QuickActionsViewModel(repo);
+      final transitions = <QuickActionsState>[];
+      vm.addListener(() => transitions.add(vm.state));
+      await vm.reload();
+      expect(repo.reloadCalls, 1);
+      expect(transitions.first, isA<QuickActionsBusy>());
+      expect((transitions.first as QuickActionsBusy).action,
+          ActionName.sessionReload);
       expect(transitions.last, isA<QuickActionsIdle>());
       vm.dispose();
     });

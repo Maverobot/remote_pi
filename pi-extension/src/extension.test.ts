@@ -25,7 +25,9 @@ function clearPiSubagentEnv(): void {
 
 beforeEach(() => {
   clearPiSubagentEnv();
+  _hostVersion.value = "0.79.10";
 });
+const _hostVersion = vi.hoisted(() => ({ value: "0.79.10" as unknown }));
 const _convertToPngMock = vi.hoisted(() => vi.fn(async () => null));
 
 // ── Mock RelayClient ──────────────────────────────────────────────────────────
@@ -193,7 +195,7 @@ vi.mock("./pairing/qr.js", async (importOriginal) => {
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
-  return { ...orig, convertToPng: _convertToPngMock };
+  return { ...orig, get VERSION() { return _hostVersion.value; }, convertToPng: _convertToPngMock };
 });
 
 interface CapturedSelfRevokeOptions {
@@ -289,7 +291,7 @@ function deferred<T>(): {
 
 type CmdHandler = (args: string, ctx: ReturnType<typeof makeMockCtx>) => Promise<void>;
 
-function captureHandler(commandName: string): CmdHandler {
+function captureHandler(commandName: string, sendUserMessage: ExtensionAPI["sendUserMessage"] = () => undefined): CmdHandler {
   let captured: CmdHandler | undefined;
   const pi = {
     on: () => undefined,
@@ -299,7 +301,7 @@ function captureHandler(commandName: string): CmdHandler {
     registerTool: () => undefined, registerShortcut: () => undefined,
     registerFlag: () => undefined, getFlag: () => undefined,
     registerMessageRenderer: () => undefined,
-    sendMessage: () => undefined, sendUserMessage: () => undefined,
+    sendMessage: () => undefined, sendUserMessage,
   } as unknown as ExtensionAPI;
   (extension as ExtensionFactory)(pi);
   if (!captured) throw new Error(`command "${commandName}" not registered`);
@@ -3886,28 +3888,442 @@ describe("session sync", () => {
     harness.handler("agent_end")({ type: "agent_end" });
   });
 
-  test("in-process session replacement uses actual SDK scope; cancelled replacement does not reset", async () => {
-    await _pairForTest("thinking-new-owner");
-    const status = captureHandler("remote-pi status");
-    const fresh = { ...makeMockCtx(), sessionManager: { getSessionId: () => "actual-fresh-sdk" } };
-    const ctx = { ...makeMockCtx(), newSession: vi.fn(async (options?: {withSession?: (value: unknown) => Promise<void>}) => {
+  test.each(["session_new", "session_reload"] as const)("%s dispatches a one-shot public command with a full ctx", async (action) => {
+    await _pairForTest("session-control-owner");
+    _hostVersion.value = "1.4.0";
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type: action, id: "dispatch" }, { abort() {} });
+    expect(sendUserMessage).toHaveBeenCalledExactlyOnceWith(
+      expect.stringMatching(/^\/remote-pi _session-control [0-9a-f-]{36}$/),
+      { expandPromptTemplates: true },
+    );
+    const frames = () => relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    const ctx = { ...makeMockCtx(), isIdle: () => action !== "session_new",
+      newSession: vi.fn(async () => ({ cancelled: false })),
+      reload: vi.fn(async () => {
+        expect(frames().find(f => f.type === "action_ok")).toMatchObject({ action, in_reply_to: "dispatch" });
+      }),
+    };
+    const args = String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length);
+    await command(args, ctx);
+    expect(action === "session_new" ? ctx.newSession : ctx.reload).toHaveBeenCalledOnce();
+    expect(frames().filter(f => f.type === "action_ok")).toHaveLength(1);
+    expect(frames().some(f => f.type === "session_history")).toBe(action === "session_new");
+    const count = frames().length;
+    await command(args, ctx);
+    await command("_session-control unknown", ctx);
+    expect(frames()).toHaveLength(count);
+    expect(ctx.ui.notify).not.toHaveBeenCalled();
+  });
+
+  test("dispatched reload refuses a busy command ctx without acknowledging success", async () => {
+    await _pairForTest("busy-reload-owner");
+    _hostVersion.value = "1.4.0";
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type: "session_reload", id: "busy-reload" }, { abort() {} });
+    const ctx = { ...makeMockCtx(), isIdle: () => false, reload: vi.fn() };
+    await command(String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length), ctx);
+    expect(ctx.reload).not.toHaveBeenCalled();
+    const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    expect(frames).toEqual([expect.objectContaining({ type: "action_error", action: "session_reload", error: expect.stringContaining("agent is running") })]);
+  });
+
+  test("new session recaptures its command ctx for subsequent reload", async () => {
+    await _pairForTest("recapture-owner");
+    const command = captureHandler("remote-pi");
+    const fresh = { ...makeMockCtx(), isIdle: () => true, reload: vi.fn(async () => undefined) };
+    const ctx = { ...makeMockCtx(), isIdle: () => false, newSession: vi.fn(async (options?: { withSession?: (ctx: unknown) => Promise<void> }) => {
       await options?.withSession?.(fresh);
       return { cancelled: false };
     }) };
-    await status("", ctx);
-    let before = relayRef.current!.send.mock.calls.length;
-    routeClientMessage({ type:"session_new",id:"in-process" }, { abort() {} });
-    await new Promise<void>(resolve => setImmediate(resolve));
-    let frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
-    expect(frames.find(f => f.type === "session_history")).toMatchObject({ thinking_history:{kind:"reset",session_id:"actual-fresh-sdk",count:0},events:[] });
-    expect(frames.some(f => "thinking_reset_pending" in f)).toBe(false);
-    await status("", { ...makeMockCtx(), newSession: vi.fn(async () => ({cancelled:true})) });
-    before = relayRef.current!.send.mock.calls.length;
-    routeClientMessage({type:"session_new",id:"cancelled-new"},{abort(){}});
-    await new Promise<void>(resolve => setImmediate(resolve));
-    frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
-    expect(frames.some(f => f.type === "session_history")).toBe(false);
-    expect(frames.find(f => f.type === "action_error")).toMatchObject({in_reply_to:"cancelled-new"});
+    await command("status", ctx);
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_new", id: "recapture-new" }, { abort() {} });
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      routeClientMessage({ type: "session_reload", id: "recapture-reload" }, { abort() {} });
+      expect(fresh.reload).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(fresh.reload).toHaveBeenCalledOnce();
+    } finally { vi.useRealTimers(); }
+  });
+
+  test("stale captured newSession retains daemon restartFresh recovery", async () => {
+    await _pairForTest("stale-new-owner");
+    const command = captureHandler("remote-pi");
+    const ctx = { ...makeMockCtx(), isIdle: vi.fn(() => {
+      throw new Error("stale after session replacement or reload");
+    }), newSession: vi.fn() };
+    await command("status", ctx);
+    const before = relayRef.current!.send.mock.calls.length;
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+    process.env["REMOTE_PI_DAEMON"] = "1";
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_new", id: "stale-new" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(exit).toHaveBeenCalledOnce();
+      expect(ctx.isIdle).toHaveBeenCalledOnce();
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+      expect(frames.filter(f => f.type === "action_ok")).toEqual([expect.objectContaining({ action: "session_new", in_reply_to: "stale-new" })]);
+      expect(frames.find(f => f.type === "session_history")).toMatchObject({ thinking_reset_pending: true });
+    } finally {
+      delete process.env["REMOTE_PI_DAEMON"];
+      exit.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test.each([true, false])("captured ctx reload idle=%s acknowledges before reload and never resets chat", async (idle) => {
+    await _pairForTest("reload-owner");
+    const command = captureHandler("remote-pi");
+    const before = relayRef.current!.send.mock.calls.length;
+    const frames = () => relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    const ctx = { ...makeMockCtx(), isIdle: () => idle, reload: vi.fn(async () => {
+      expect(frames().find(f => f.type === "action_ok")).toMatchObject({ action: "session_reload" });
+    }) };
+    await command("status", ctx);
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_reload", id: "reload" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(99);
+      expect(ctx.reload).not.toHaveBeenCalled();
+      expect(frames().find(f => f.type === (idle ? "action_ok" : "action_error"))).toMatchObject({ action: "session_reload", in_reply_to: "reload" });
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ctx.reload).toHaveBeenCalledTimes(idle ? 1 : 0);
+      expect(frames().some(f => f.type === "session_history")).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  test("reload rejection after acknowledgement logs locally and never replies twice", async () => {
+    await _pairForTest("rejected-reload-owner");
+    const command = captureHandler("remote-pi");
+    const ctx = { ...makeMockCtx(), isIdle: () => true, reload: vi.fn(async () => {
+      throw new Error("reload failed");
+    }) };
+    await command("status", ctx);
+    const before = relayRef.current!.send.mock.calls.length;
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_reload", id: "rejected-reload" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(100);
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+      expect(frames).toEqual([expect.objectContaining({ type: "action_ok", action: "session_reload", in_reply_to: "rejected-reload" })]);
+      expect(ctx.reload).toHaveBeenCalledOnce();
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining("reload failed"));
+    } finally {
+      debug.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test.each(["session_new", "session_reload"] as const)("stale captured %s dispatches on a supported host without an early ack", async (action) => {
+    await _pairForTest("stale-dispatch-owner");
+    _hostVersion.value = "1.4.0";
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    const ctx = { ...makeMockCtx(), isIdle: () => { throw new Error("stale after session replacement or reload"); }, newSession: vi.fn(), reload: vi.fn() };
+    await command("status", ctx);
+    const before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type: action, id: "stale-dispatch" }, { abort() {} });
+    expect(sendUserMessage).toHaveBeenCalledOnce();
+    expect(relayRef.current!.send.mock.calls).toHaveLength(before);
+    expect(ctx.newSession).not.toHaveBeenCalled();
+    expect(ctx.reload).not.toHaveBeenCalled();
+    const fresh = { ...makeMockCtx(), isIdle: () => true, newSession: vi.fn(async () => ({ cancelled: false })), reload: vi.fn(async () => undefined) };
+    await command(String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length), fresh);
+    const replies = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner).filter(f => f.type === "action_ok" || f.type === "action_error");
+    expect(replies).toEqual([expect.objectContaining({ type: "action_ok", action })]);
+    expect(action === "session_new" ? fresh.newSession : fresh.reload).toHaveBeenCalledOnce();
+  });
+
+  test.each(["session_new", "session_reload"] as const)("stale captured %s gives actionable error on an unsupported interactive host", async (action) => {
+    await _pairForTest("stale-old-owner");
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    const ctx = { ...makeMockCtx(), isIdle: () => { throw new Error("stale after session replacement or reload"); }, newSession: vi.fn(), reload: vi.fn() };
+    await command("status", ctx);
+    const before = relayRef.current!.send.mock.calls.length;
+    routeClientMessage({ type: action, id: "stale-old" }, { abort() {} });
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    expect(frames).toEqual([expect.objectContaining({ type: "action_error", action, error: expect.stringContaining("Pi 0.84.2 or newer") })]);
+    expect(ctx.newSession).not.toHaveBeenCalled();
+    expect(ctx.reload).not.toHaveBeenCalled();
+  });
+
+  test.each([
+    { action: "session_new", failure: "missing", daemon: false },
+    { action: "session_new", failure: "stale", daemon: false },
+    { action: "session_reload", failure: "missing", daemon: false },
+    { action: "session_reload", failure: "stale", daemon: false },
+    { action: "session_new", failure: "missing", daemon: true },
+    { action: "session_new", failure: "stale", daemon: true },
+    { action: "session_reload", failure: "missing", daemon: true },
+    { action: "session_reload", failure: "stale", daemon: true },
+  ] as const)("dispatched $action with $failure context (daemon=$daemon) never redispatches", async ({ action, failure, daemon }) => {
+    await _pairForTest("invalid-dispatch-owner");
+    _hostVersion.value = "1.4.0";
+    const isIdle = vi.fn(() => { throw new Error("stale after session replacement or reload"); });
+    const method = vi.fn();
+    const ctx = { ...makeMockCtx(), isIdle, ...(failure === "stale" ? { newSession: method, reload: method } : {}) };
+    let command: CmdHandler;
+    let dispatched: Promise<void> | undefined;
+    const sendUserMessage = vi.fn((text: unknown) => {
+      // Model Pi's synchronous command dispatch, but bound a regression so a
+      // redispatch fails the assertion instead of overflowing the test runner.
+      if (sendUserMessage.mock.calls.length === 1) {
+        dispatched = command(String(text).slice("/remote-pi ".length), ctx);
+      }
+    });
+    command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+    if (daemon) process.env["REMOTE_PI_DAEMON"] = "1";
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: action, id: "invalid-dispatch" }, { abort() {} });
+      await dispatched;
+      await vi.advanceTimersByTimeAsync(100);
+      const replies = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner).filter(f => f.type === "action_ok" || f.type === "action_error");
+      const restartFresh = daemon && action === "session_new";
+      expect(replies).toEqual([expect.objectContaining({
+        type: restartFresh ? "action_ok" : "action_error", action, in_reply_to: "invalid-dispatch",
+        ...(!restartFresh ? { error: expect.stringContaining("Run /remote-pi") } : {}),
+      })]);
+      expect(sendUserMessage).toHaveBeenCalledOnce();
+      expect(isIdle).toHaveBeenCalledTimes(failure === "stale" ? 1 : 0);
+      expect(method).not.toHaveBeenCalled();
+      expect(exit).toHaveBeenCalledTimes(restartFresh ? 1 : 0);
+    } finally {
+      delete process.env["REMOTE_PI_DAEMON"];
+      exit.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test.each(["unknown", "expired-timer", "expired-deadline"])("%s token preserves the previously captured command context", async (kind) => {
+    await _pairForTest("preserved-context-owner");
+    _hostVersion.value = "1.4.0";
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const good = { ...makeMockCtx(), isIdle: () => true, reload: vi.fn(async () => undefined) };
+    const ignored = { ...makeMockCtx(), isIdle: () => true, reload: vi.fn(async () => undefined) };
+    vi.useFakeTimers();
+    try {
+      let args = "_session-control unknown";
+      if (kind !== "unknown") {
+        routeClientMessage({ type: "session_reload", id: "expired-context" }, { abort() {} });
+        args = String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length);
+      }
+      await command("status", good);
+      if (kind === "expired-timer") await vi.advanceTimersByTimeAsync(10_000);
+      if (kind === "expired-deadline") vi.setSystemTime(Date.now() + 10_000);
+      await command(args, ignored);
+      routeClientMessage({ type: "session_reload", id: "preserved-context" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(100);
+      expect(good.reload).toHaveBeenCalledOnce();
+      expect(ignored.reload).not.toHaveBeenCalled();
+      expect(ignored.ui.notify).not.toHaveBeenCalled();
+      expect(sendUserMessage).toHaveBeenCalledTimes(kind === "unknown" ? 0 : 1);
+    } finally { vi.useRealTimers(); }
+  });
+
+  test.each(["session_new", "session_reload"] as const)("shutdown during %s flush abandons the accepted continuation", async (action) => {
+    await _pairForTest("flush-shutdown-owner");
+    const shutdown = captureEventHandler("session_shutdown");
+    const command = captureHandler("remote-pi");
+    const ctx = { ...makeMockCtx(), isIdle: () => true, newSession: vi.fn(), reload: vi.fn() };
+    await command("status", ctx);
+    const relay = relayRef.current!;
+    const before = relay.send.mock.calls.length;
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: action, id: "flush-shutdown" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(50);
+      const shuttingDown = shutdown({ type: "session_shutdown", reason: "reload" });
+      await vi.advanceTimersByTimeAsync(50);
+      await shuttingDown;
+      const replies = relay.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner).filter(f => f.type === "action_ok" || f.type === "action_error");
+      expect(replies).toEqual([expect.objectContaining({ type: "action_ok", action, in_reply_to: "flush-shutdown" })]);
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      expect(ctx.reload).not.toHaveBeenCalled();
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining("session lifecycle changed during flush"));
+    } finally {
+      _setDisposedForTest(false);
+      debug.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  test("late dispatch cannot execute even before its expired timer callback runs", async () => {
+    await _pairForTest("late-dispatch-owner");
+    _hostVersion.value = "1.4.0";
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_new", id: "late-dispatch" }, { abort() {} });
+      vi.setSystemTime(Date.now() + 10_000);
+      const ctx = { ...makeMockCtx(), isIdle: () => true, newSession: vi.fn() };
+      const args = String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length);
+      await command(args, ctx);
+      await vi.advanceTimersByTimeAsync(10_000);
+      await command(args, ctx);
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+      expect(frames).toEqual([expect.objectContaining({ type: "action_error", in_reply_to: "late-dispatch", error: expect.stringContaining("timed out") })]);
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
+  test.each([undefined, "unknown", "0.0.0", "0.79.10", "0.84.1", "0.84.2-beta.1", "1.4", "1.4.0junk", "1.4.0+", "1.4.0+build..1", "1.4.0-01", "9007199254740992.0.0"])("unsupported host %s never sends a literal prompt", async (version) => {
+    await _pairForTest("old-host-owner");
+    _hostVersion.value = version;
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    for (const type of ["session_new", "session_reload"] as const) routeClientMessage({ type, id: type }, { abort() {} });
+    expect(sendUserMessage).not.toHaveBeenCalled();
+    const errors = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner).filter(f => f.type === "action_error");
+    expect(errors).toHaveLength(2);
+    for (const error of errors) expect(error.error).toMatch(/Pi 0.84.2 or newer.*\/remote-pi/);
+  });
+
+  test.each(["0.84.2", "0.84.3", "0.85.0", "1.0.0", "1.4.0+build.1", "0.85.0-beta.1", "1.4.0-beta.1"])("supported host %s expires undispatched tokens", async (version) => {
+    await _pairForTest("timeout-owner");
+    _hostVersion.value = version;
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    const before = relayRef.current!.send.mock.calls.length;
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_reload", id: "timeout" }, { abort() {} });
+      expect(sendUserMessage).toHaveBeenCalledOnce();
+      await vi.advanceTimersByTimeAsync(10_000);
+      const ctx = { ...makeMockCtx(), isIdle: () => true, reload: vi.fn() };
+      await command(String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length), ctx);
+      expect(ctx.reload).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+      expect(frames.filter(f => f.type === "action_error")).toEqual([
+        expect.objectContaining({ action: "session_reload", in_reply_to: "timeout", error: expect.stringContaining("timed out") }),
+      ]);
+    } finally { vi.useRealTimers(); }
+  });
+
+  test("shutdown clears pending command tokens before teardown", async () => {
+    await _pairForTest("shutdown-owner");
+    _hostVersion.value = "1.4.0";
+    const shutdown = captureEventHandler("session_shutdown");
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    await command("status", makeMockCtx());
+    routeClientMessage({ type: "session_new", id: "shutdown" }, { abort() {} });
+    const relay = relayRef.current!;
+    try {
+      await shutdown({ type: "session_shutdown" });
+      const ctx = { ...makeMockCtx(), newSession: vi.fn() };
+      await command(String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length), ctx);
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      expect(ctx.ui.notify).not.toHaveBeenCalled();
+      expect(relay.send.mock.calls.map(c => decodeSentCt(c[0] as string).inner)).toContainEqual(
+        expect.objectContaining({ type: "action_error", in_reply_to: "shutdown", error: expect.stringContaining("shut down") }),
+      );
+    } finally { _setDisposedForTest(false); }
+  });
+
+  test.each(["captured", "dispatched"])("%s new session sends ack and reset before real shutdown teardown", async (route) => {
+    await _pairForTest("thinking-new-owner");
+    const shutdown = captureEventHandler("session_shutdown");
+    const sendUserMessage = vi.fn();
+    const command = captureHandler("remote-pi", sendUserMessage);
+    const relay = relayRef.current!;
+    const before = relay.send.mock.calls.length;
+    const frames = () => relay.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+    const fresh = { ...makeMockCtx(), isIdle: () => true, sessionManager: { getSessionId: () => "actual-fresh-sdk" } };
+    const ctx = { ...makeMockCtx(), isIdle: () => false, newSession: vi.fn(async (options?: {withSession?: (value: unknown) => Promise<void>}) => {
+      expect(relay.isOpen()).toBe(true);
+      expect(frames().filter(f => f.type === "action_ok")).toEqual([
+        expect.objectContaining({ action: "session_new", in_reply_to: "in-process" }),
+      ]);
+      expect(frames().find(f => f.type === "session_history")).toMatchObject({ events: [], in_reply_to: "in-process" });
+      expect(frames().some(f => "thinking_reset_pending" in f)).toBe(false);
+      await shutdown({ type: "session_shutdown", reason: "new" });
+      expect(relay.isOpen()).toBe(false);
+      expect(_getState()).toBe("idle");
+      await options?.withSession?.(fresh);
+      return { cancelled: false };
+    }) };
+    await command("status", route === "captured" ? ctx : makeMockCtx());
+    _hostVersion.value = "1.4.0";
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_new", id: "in-process" }, { abort() {} });
+      const dispatched = route === "dispatched"
+        ? command(String(sendUserMessage.mock.calls[0]![0]).slice("/remote-pi ".length), ctx)
+        : undefined;
+      expect(frames().some(f => f.type === "action_ok")).toBe(true);
+      const sendsBeforeReplacement = relay.send.mock.calls.length;
+      await vi.advanceTimersByTimeAsync(99);
+      expect(ctx.newSession).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await dispatched;
+      expect(ctx.newSession).toHaveBeenCalledOnce();
+      expect(relay.close).toHaveBeenCalledOnce();
+      expect(relay.send.mock.calls).toHaveLength(sendsBeforeReplacement);
+    } finally {
+      _setDisposedForTest(false);
+      vi.useRealTimers();
+    }
+  });
+
+  test.each(["cancelled", "rejected"])("new session %s after acknowledgement logs locally without another reply", async (outcome) => {
+    await _pairForTest("cancel-new-owner");
+    const command = captureHandler("remote-pi");
+    const ctx = { ...makeMockCtx(), isIdle: () => true, newSession: vi.fn(async () => {
+      if (outcome === "rejected") throw new Error("stale after session replacement or reload");
+      return { cancelled: true };
+    }) };
+    await command("status", ctx);
+    const before = relayRef.current!.send.mock.calls.length;
+    const debug = vi.spyOn(console, "debug").mockImplementation(() => undefined);
+    const exit = vi.spyOn(process, "exit").mockImplementation((() => undefined) as never);
+    // Even a post-ack stale error in daemon mode must not issue a second ack.
+    process.env["REMOTE_PI_DAEMON"] = "1";
+    vi.useFakeTimers();
+    try {
+      routeClientMessage({ type: "session_new", id: "cancelled-new" }, { abort() {} });
+      await vi.advanceTimersByTimeAsync(200);
+      const frames = relayRef.current!.send.mock.calls.slice(before).map(c => decodeSentCt(c[0] as string).inner);
+      expect(frames.filter(f => f.type === "action_ok" || f.type === "action_error")).toEqual([
+        expect.objectContaining({ type: "action_ok", in_reply_to: "cancelled-new" }),
+      ]);
+      expect(frames.some(f => f.type === "session_history")).toBe(true);
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining("after acknowledgement"));
+      expect(exit).not.toHaveBeenCalled();
+    } finally {
+      delete process.env["REMOTE_PI_DAEMON"];
+      debug.mockRestore();
+      exit.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   test("thinking live/history uses known pongs, original request UUID and original event anchors", async () => {

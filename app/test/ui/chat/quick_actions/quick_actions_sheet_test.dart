@@ -16,6 +16,7 @@ import 'package:provider/provider.dart';
 
 class _FakeRepo implements IActionsRepository {
   int compactCalls = 0;
+  int reloadCalls = 0;
   int newSessionCalls = 0;
   ThinkingLevel? thinking;
   WireModel? modelArg;
@@ -23,6 +24,7 @@ class _FakeRepo implements IActionsRepository {
   /// When set, the matching action throws [ActionFailure] to exercise the
   /// failure path (error toast + sheet stays open).
   bool failCompact = false;
+  bool failReload = false;
   bool failNewSession = false;
 
   @override
@@ -36,6 +38,12 @@ class _FakeRepo implements IActionsRepository {
   Future<void> compact() async {
     compactCalls++;
     if (failCompact) throw const ActionFailure('compact boom');
+  }
+
+  @override
+  Future<void> reload() async {
+    reloadCalls++;
+    if (failReload) throw const ActionFailure('reload boom');
   }
 
   @override
@@ -74,12 +82,14 @@ class _FakeRepo implements IActionsRepository {
 Future<({_FakeRepo repo, List<int> resetCalls})> _openSheet(
   WidgetTester tester, {
   bool failCompact = false,
+  bool failReload = false,
   bool failNewSession = false,
   // Production (showQuickActionsSheet) lets the sheet create, and dispose, its
   // ViewModel; the default shares one that outlives the sheet.
   bool sheetOwnsViewModel = false,
 }) async {
   final repo = _FakeRepo()
+    ..failReload = failReload
     ..failCompact = failCompact
     ..failNewSession = failNewSession;
   final vm = QuickActionsViewModel(repo);
@@ -124,6 +134,28 @@ Future<({_FakeRepo repo, List<int> resetCalls})> _openSheet(
 }
 
 void main() {
+  testWidgets('Reload: success closes quietly without resetting chat',
+      (tester) async {
+    final s = await _openSheet(tester);
+    await tester.tap(find.byKey(const Key('qa-reload')));
+    await tester.pumpAndSettle();
+    expect(s.repo.reloadCalls, 1);
+    expect(find.byKey(const Key('qa-reload')), findsNothing);
+    expect(find.byType(SnackBar), findsNothing);
+    expect(s.resetCalls, isEmpty);
+  });
+
+  testWidgets('Reload: failure toasts and keeps sheet open without reset',
+      (tester) async {
+    final s = await _openSheet(tester, failReload: true);
+    await tester.tap(find.byKey(const Key('qa-reload')));
+    await tester.pumpAndSettle();
+    expect(s.repo.reloadCalls, 1);
+    expect(find.byKey(const Key('qa-reload')), findsOneWidget);
+    expect(find.text('reload boom'), findsOneWidget);
+    expect(s.resetCalls, isEmpty);
+  });
+
   testWidgets('Compact: tap sends and closes the sheet — no success toast',
       (tester) async {
     final s = await _openSheet(tester);

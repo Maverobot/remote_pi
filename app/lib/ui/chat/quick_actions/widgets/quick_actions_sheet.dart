@@ -154,6 +154,15 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
               onTap: () => _onNewSession(vm),
             ),
             const _Divider(),
+            _ActionTile(
+              key: const Key('qa-reload'),
+              icon: LucideIcons.refreshCw,
+              label: 'Reload',
+              subtitle: 'Reload extensions, skills, prompts and themes on the Pi.',
+              busy: busyAction == ActionName.sessionReload,
+              onTap: () => _onReload(vm),
+            ),
+            const _Divider(),
             _ModelRow(
               currentLabel: vm.currentModel?.name ?? vm.currentModelName,
               busy: busyAction == ActionName.modelSet,
@@ -182,6 +191,17 @@ class _QuickActionsSheetBodyState extends State<QuickActionsSheetBody> {
     }
     // action_ok — just close the sheet (no success toast: compacting is a
     // quiet, frequent action and the toast was noise).
+    if (!mounted) return;
+    Navigator.of(context).pop();
+  }
+
+  Future<void> _onReload(QuickActionsViewModel vm) async {
+    try {
+      await vm.reload();
+    } catch (_) {
+      // The ViewModel error stream toasts the failure; keep the sheet open.
+      return;
+    }
     if (!mounted) return;
     Navigator.of(context).pop();
   }

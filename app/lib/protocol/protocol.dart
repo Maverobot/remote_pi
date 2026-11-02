@@ -600,6 +600,7 @@ class SessionSync extends ClientMessage {
 /// `pi-extension/src/actions/handlers.ts`.
 enum ActionName {
   sessionNew('session_new'),
+  sessionReload('session_reload'),
   sessionCompact('session_compact'),
   modelSet('model_set'),
   thinkingSet('thinking_set');
@@ -719,6 +720,14 @@ class SessionNew extends ClientMessage {
 
   @override
   Map<String, dynamic> toJson() => {'type': 'session_new', 'id': id};
+}
+
+class SessionReload extends ClientMessage {
+  final String id;
+  SessionReload({required this.id});
+
+  @override
+  Map<String, dynamic> toJson() => {'type': 'session_reload', 'id': id};
 }
 
 class ModelSet extends ClientMessage {

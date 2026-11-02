@@ -225,9 +225,24 @@ Vocabulário curado de ações tipadas que o app mobile invoca sobre a sessão d
 |---|---|---|
 | Compact context | `session_compact` | `ctx.compact()` |
 | New session | `session_new` | `ctx.newSession()` |
+| Reload | `session_reload` | `ctx.reload()` |
 | Set model | `model_set {provider, model_id}` | `ModelRegistry.find(...)` + `pi.setModel(model)` |
 | Set thinking | `thinking_set {level}` | `pi.setThinkingLevel(level)` |
 | List models | `list_models` | `ModelRegistry.getAvailable()` |
+
+`session_new` e `session_reload` carregam `{ type, id }` e respondem com
+`action_ok` / `action_error` usando o mesmo nome de ação. Usam o command ctx
+capturado quando disponível; senão, em Pi **>= 0.84.2**, despacham um subcomando
+interno one-shot de `/remote-pi` via `pi.sendUserMessage(...,
+{ expandPromptTemplates: true })` para obter um command ctx público. O token
+expira em 10s (antes do timeout de 15s do app) e é descartado no shutdown; falha de dispatch retorna `action_error`.
+Versão desconhecida/inválida não usa essa rota. Hosts antigos exigem um comando
+`/remote-pi` nesta sessão; `session_new` em daemon mantém o fallback restartFresh
+(inclusive para ctx stale). `ctx.isIdle()` valida o contexto antes do ack. New
+session permite agente em execução; Reload recusa agente não idle. Ambas enviam
+`action_ok` **antes** de substituir o runtime e aguardam 100ms para flush; New
+session também envia o reset antes da troca. O ack confirma aceitação: cancelamento
+ou erro posterior fica no log local, sem segunda resposta. Reload não limpa o chat.
 
 ### Wire — exemplos
 

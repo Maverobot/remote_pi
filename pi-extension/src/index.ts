@@ -39,7 +39,7 @@ import type {
   ExtensionContext,
   ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { SettingsManager, convertToPng } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, VERSION, convertToPng } from "@earendil-works/pi-coding-agent";
 import { type Ed25519Keypair } from "./pairing/crypto.js";
 import { buildQRUri, qrSession, renderQRAscii, clampPairTtlMs, TOKEN_TTL_MS } from "./pairing/qr.js";
 import {
@@ -87,6 +87,7 @@ import {
   handleThinkingSet,
   handleListModels,
   type ActionCtx,
+  type ActionReplySender,
 } from "./actions/handlers.js";
 import { ensureModelRegistry } from "./actions/registry.js";
 import {
@@ -2339,6 +2340,121 @@ async function _handlePairRequest(
 
 // ── Extension factory (default export) ───────────────────────────────────────
 
+type SessionControlRequest = Extract<ClientMessage, { type: "session_new" | "session_reload" }>;
+type SessionControlContext = ActionCtx & Partial<Pick<ExtensionCommandContext, "reload" | "isIdle">>;
+const SESSION_CONTROL_COMMAND = "_session-control";
+const SESSION_CONTROL_TIMEOUT_MS = 10_000;
+const SESSION_CONTROL_FLUSH_MS = 100;
+const SESSION_CONTROL_TIMEOUT_ERROR = "Session command dispatch timed out. Retry the action on the Pi.";
+const _pendingSessionControls = new Map<string, {
+  request: SessionControlRequest;
+  sender: ActionReplySender;
+  timer: ReturnType<typeof setTimeout>;
+  expiresAt: number;
+}>();
+
+// Unknown/dev versions must never send a literal slash prompt to an old host.
+function _supportsSessionControlDispatch(version: unknown): boolean {
+  if (typeof version !== "string") return false;
+  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1, 4).map(Number);
+  const prerelease = match[4];
+  if (![major, minor, patch].every(Number.isSafeInteger)) return false;
+  if (prerelease?.split(".").some(part => /^0\d+$/.test(part))) return false;
+  return major! > 0 || minor! > 84 || (minor === 84 && (patch! > 2 || (patch === 2 && !prerelease)));
+}
+
+function _sessionControlError(request: SessionControlRequest, sender: ActionReplySender, error: string): void {
+  sender.send({ type: "action_error", in_reply_to: request.id, action: request.type, error });
+}
+
+function _restartFreshSession(request: SessionControlRequest, sender: ActionReplySender): void {
+  sender.send({ type: "action_ok", in_reply_to: request.id, action: request.type });
+  _resetSessionForNew(request.id, true);
+  setTimeout(() => process.exit(EXIT_DAEMON_FRESH_SESSION), SESSION_CONTROL_FLUSH_MS);
+}
+
+// isIdle is also the public SDK liveness check: stale command ctxs throw here.
+function _sessionControlIdle(request: SessionControlRequest, ctx: SessionControlContext | null): boolean | null {
+  const method = request.type === "session_new" ? "newSession" : "reload";
+  try {
+    if (typeof ctx?.[method] !== "function" || typeof ctx.isIdle !== "function") return null;
+    return ctx.isIdle();
+  } catch {
+    return null;
+  }
+}
+
+async function _runSessionControl(request: SessionControlRequest, sender: ActionReplySender, ctx: SessionControlContext, idle: boolean): Promise<void> {
+  if (request.type === "session_reload" && !idle) {
+    _sessionControlError(request, sender, "Cannot reload while the agent is running. Wait for it to finish, then retry.");
+    return;
+  }
+  const lifecycleGeneration = _rootLifecycleGeneration;
+  // Replacement closes the relay. Ack/reset while it is still up, then allow
+  // the frames to flush. After accepting the action there must be no second reply.
+  sender.send({ type: "action_ok", in_reply_to: request.id, action: request.type });
+  if (request.type === "session_new") _resetSessionForNew(request.id);
+  await new Promise<void>(resolve => setTimeout(resolve, SESSION_CONTROL_FLUSH_MS));
+  if (!_isCurrentRootLifecycle(lifecycleGeneration)) {
+    console.debug(`[remote-pi] ${request.type} abandoned after acknowledgement: session lifecycle changed during flush`);
+    return;
+  }
+  try {
+    if (request.type === "session_reload") {
+      await ctx.reload!();
+      return;
+    }
+    const result = await ctx.newSession!({
+      withSession: async (freshCtx) => {
+        _lastCtx = freshCtx as unknown as typeof _lastCtx;
+        const replacement = freshCtx as unknown as ExtensionContext;
+        _thinkingCapture.setSession(replacement.sessionManager.getSessionId());
+      },
+    });
+    if (result?.cancelled) {
+      console.debug(`[remote-pi] ${request.type} cancelled by extension hook after acknowledgement`);
+    }
+  } catch (e) {
+    console.debug(`[remote-pi] ${request.type} failed after acknowledgement: ${String((e as Error)?.message ?? e)}`);
+  }
+}
+
+async function _requestSessionControl(request: SessionControlRequest, sender: ActionReplySender): Promise<void> {
+  const ctx = _lastCtx as SessionControlContext | null;
+  const idle = _sessionControlIdle(request, ctx);
+  if (ctx && idle !== null) {
+    await _runSessionControl(request, sender, ctx, idle);
+    return;
+  }
+  if (_pi && _supportsSessionControlDispatch(VERSION)) {
+    const token = randomUUID();
+    const timer = setTimeout(() => {
+      if (!_pendingSessionControls.delete(token)) return;
+      _sessionControlError(request, sender, SESSION_CONTROL_TIMEOUT_ERROR);
+    }, SESSION_CONTROL_TIMEOUT_MS);
+    timer.unref();
+    _pendingSessionControls.set(token, { request, sender, timer, expiresAt: Date.now() + SESSION_CONTROL_TIMEOUT_MS });
+    try {
+      // Public since Pi 0.84.2; the dev SDK (0.79) does not type this option yet.
+      _pi.sendUserMessage(`/remote-pi ${SESSION_CONTROL_COMMAND} ${token}`, {
+        expandPromptTemplates: true,
+      } as Parameters<ExtensionAPI["sendUserMessage"]>[1]);
+    } catch (e) {
+      clearTimeout(timer);
+      if (_pendingSessionControls.delete(token)) _sessionControlError(request, sender, String(e));
+    }
+    return;
+  }
+  if (request.type === "session_new" && process.env["REMOTE_PI_DAEMON"] === "1") {
+    _restartFreshSession(request, sender);
+    return;
+  }
+  const method = request.type === "session_new" ? "newSession" : "reload";
+  _sessionControlError(request, sender, `${method} requires Pi 0.84.2 or newer, or a /remote-pi command in this Pi session.`);
+}
+
 // Stores most recent command context so the auto-listener can use ui.notify.
 // NOTE: this is a CAPTURED command ctx — the SDK marks it stale after a
 // session replacement (newSession/fork/switch/reload). We re-capture it via
@@ -2780,6 +2896,11 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
   // (e.g. shutdown lands mid-`_cmdRoot`) tears down without throwing.
   pi.on("session_shutdown", async () => {
     _thinkingCapture.finishInterrupted();
+    for (const { request, sender, timer } of _pendingSessionControls.values()) {
+      clearTimeout(timer);
+      _sessionControlError(request, sender, "Pi session shut down before the command ran. Retry in the new session.");
+    }
+    _pendingSessionControls.clear();
     // Revoke async authority synchronously, before any teardown await. `_disposed`
     // blocks the outgoing continuation immediately; the root and candidate
     // generations keep queued work stale even if a same-module session_start
@@ -2871,8 +2992,31 @@ const extension: ExtensionFactory = (pi: ExtensionAPI): void => {
         .map((o) => ({ value: o, label: o }));
     },
     handler: async (args, ctx) => {
-      _lastCtx = ctx;
       const sub = args.trim();
+      if (sub === SESSION_CONTROL_COMMAND || sub.startsWith(`${SESSION_CONTROL_COMMAND} `)) {
+        const token = sub.slice(SESSION_CONTROL_COMMAND.length).trim();
+        const pending = _pendingSessionControls.get(token);
+        if (!pending) return;
+        _pendingSessionControls.delete(token);
+        clearTimeout(pending.timer);
+        // Check the deadline as well as the timer: a busy event loop can delay
+        // the timer callback past a queued command invocation.
+        if (Date.now() >= pending.expiresAt) {
+          _sessionControlError(pending.request, pending.sender, SESSION_CONTROL_TIMEOUT_ERROR);
+          return;
+        }
+        _lastCtx = ctx;
+        const idle = _sessionControlIdle(pending.request, ctx as SessionControlContext);
+        if (idle !== null) {
+          await _runSessionControl(pending.request, pending.sender, ctx as SessionControlContext, idle);
+        } else if (pending.request.type === "session_new" && process.env["REMOTE_PI_DAEMON"] === "1") {
+          _restartFreshSession(pending.request, pending.sender);
+        } else {
+          _sessionControlError(pending.request, pending.sender, "Session control unavailable in the dispatched command context. Run /remote-pi in the current Pi session and retry.");
+        }
+        return;
+      }
+      _lastCtx = ctx;
       if      (sub === "")                       { await _cmdRoot(ctx); }
       else if (sub === "setup")                  { await _cmdSetup(ctx); }
       else if (sub === "status")                 { _cmdStatus(ctx); }
@@ -5045,79 +5189,10 @@ export function _routeClientMessageFrom(
       // session_start has landed yet (keeps the pre-replacement happy path).
       handleSessionCompact((_lastEventCtx ?? _lastCtx) as ActionCtx | null, sender, msg);
       break;
-    case "session_new": {
-      const actionCtx = _lastCtx as ActionCtx | null;
-      const daemonMode = process.env["REMOTE_PI_DAEMON"] === "1";
-      // Fresh Pi session via the supervisor: ack, clear remote-pi's mirror, then
-      // exit with the private code so the supervisor relaunches without
-      // --continue → a genuinely fresh session. Used when there's NO command ctx
-      // AND as recovery when the captured _lastCtx has gone STALE after an
-      // external session replacement (compact, a /new typed in the TUI,
-      // reload/resume). Reusing a stale ctx throws "stale after session
-      // replacement", which previously surfaced to the app as a hard failure
-      // ("session_new failed") and left New Context wedged.
-      const restartFresh = () => {
-        sender.send({ type: "action_ok", in_reply_to: msg.id, action: "session_new" });
-        _resetSessionForNew(msg.id, true);
-        setTimeout(() => process.exit(EXIT_DAEMON_FRESH_SESSION), 100);
-      };
-      if (!actionCtx?.newSession) {
-        if (daemonMode) {
-          restartFresh();
-          break;
-        }
-        sender.send({
-          type: "action_error",
-          in_reply_to: msg.id,
-          action: "session_new",
-          error: "newSession unavailable (no command ctx yet)",
-        });
-        break;
-      }
-      // Fast path: drive newSession in-process on the (hopefully fresh) command
-      // ctx, re-capturing the replacement ctx via withSession so later command
-      // ops target the current session. If the ctx turns out stale, recover by
-      // restarting fresh (daemon) instead of failing the action.
-      // Capture the method past the guard above: TS drops the `!actionCtx?.newSession`
-      // narrowing inside the async closure, so bind it to a local const first.
-      const newSession = actionCtx.newSession;
-      void (async () => {
-        try {
-          const result = await newSession({
-            withSession: async (freshCtx) => {
-              _lastCtx = freshCtx as unknown as typeof _lastCtx;
-              const replacement = freshCtx as unknown as ExtensionContext;
-              _thinkingCapture.setSession(replacement.sessionManager.getSessionId());
-            },
-          });
-          if (result?.cancelled) {
-            sender.send({
-              type: "action_error",
-              in_reply_to: msg.id,
-              action: "session_new",
-              error: "cancelled by extension hook",
-            });
-            return;
-          }
-          sender.send({ type: "action_ok", in_reply_to: msg.id, action: "session_new" });
-          _resetSessionForNew(msg.id);
-        } catch (e) {
-          const emsg = String((e as Error)?.message ?? e ?? "");
-          const stale = /stale|session replacement or reload/i.test(emsg);
-          if (daemonMode && stale) {
-            restartFresh();
-            return;
-          }
-          sender.send({
-            type: "action_error",
-            in_reply_to: msg.id,
-            action: "session_new",
-            error: emsg || "session_new failed",
-          });
-        }
-      })();
+    case "session_new":
+    case "session_reload":
+      void _requestSessionControl(msg, sender);
       break;
-    }
     case "model_set":
       void handleModelSet(
         _pi,
@@ -5222,7 +5297,7 @@ function _handleSessionSync(
 }
 
 /**
- * Resets the Pi-side session view after a SUCCESSFUL `session_new`. The app's
+ * Resets the Pi-side session view when a `session_new` is ACCEPTED. The app's
  * New Session clears its local store on `action_ok`, but that alone isn't
  * durable: `_messageBuffer` (which answers `session_sync`) is append-only and
  * `_sessionStartedAt` is stamped once, so a later reconnect/restart would

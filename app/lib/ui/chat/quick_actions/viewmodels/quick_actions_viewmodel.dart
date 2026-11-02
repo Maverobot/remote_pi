@@ -55,6 +55,10 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
     await _runVoid(ActionName.sessionNew, _repo.newSession);
   }
 
+  Future<void> reload() async {
+    await _runVoid(ActionName.sessionReload, _repo.reload);
+  }
+
   Future<void> setModel(WireModel model) async {
     // Optimistic highlight — flip the current model immediately so the
     // picker row reflects the tap before the round-trip resolves.

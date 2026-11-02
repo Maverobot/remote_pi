@@ -93,6 +93,7 @@ class ActionFailure implements Exception {
 abstract class IActionsRepository extends Repository {
   Future<void> compact();
   Future<void> newSession();
+  Future<void> reload();
   Future<void> setModel(String provider, String modelId);
   Future<void> setThinking(ThinkingLevel level);
 
@@ -275,6 +276,11 @@ class ActionsRepository extends Repository implements IActionsRepository {
   @override
   Future<void> newSession() async {
     await _dispatch<void>((id) => SessionNew(id: id));
+  }
+
+  @override
+  Future<void> reload() async {
+    await _dispatch<void>((id) => SessionReload(id: id));
   }
 
   @override
