@@ -75,6 +75,9 @@ Future<({_FakeRepo repo, List<int> resetCalls})> _openSheet(
   WidgetTester tester, {
   bool failCompact = false,
   bool failNewSession = false,
+  // Production (showQuickActionsSheet) lets the sheet create, and dispose, its
+  // ViewModel; the default shares one that outlives the sheet.
+  bool sheetOwnsViewModel = false,
 }) async {
   final repo = _FakeRepo()
     ..failCompact = failCompact
@@ -93,14 +96,21 @@ Future<({_FakeRepo repo, List<int> resetCalls})> _openSheet(
               // Mirror the production entry point so the full body has room
               // (otherwise the Column overflows the half-height default).
               isScrollControlled: true,
-              builder: (_) =>
-                  ChangeNotifierProvider<QuickActionsViewModel>.value(
-                value: vm,
-                child: QuickActionsSheetBody(
+              builder: (_) {
+                final body = QuickActionsSheetBody(
                   messenger: messenger,
                   onSessionReset: () async => resetCalls.add(1),
-                ),
-              ),
+                );
+                return sheetOwnsViewModel
+                    ? ChangeNotifierProvider<QuickActionsViewModel>(
+                        create: (_) => QuickActionsViewModel(repo),
+                        child: body,
+                      )
+                    : ChangeNotifierProvider<QuickActionsViewModel>.value(
+                        value: vm,
+                        child: body,
+                      );
+              },
             );
           },
           child: const Text('open'),
@@ -255,6 +265,26 @@ void main() {
     // The sheet was already closed when the dialog opened; the failure is
     // surfaced as a toast (the user re-opens Quick Actions to retry).
     expect(find.byKey(const Key('qa-new-session')), findsNothing);
+    expect(find.text('new boom'), findsOneWidget);
+  });
+
+  testWidgets(
+      'New session: failure is toasted after the sheet disposed its '
+      'ViewModel', (tester) async {
+    final s = await _openSheet(
+      tester,
+      failNewSession: true,
+      sheetOwnsViewModel: true,
+    );
+    await tester.tap(find.byKey(const Key('qa-new-session')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Start new'));
+    await tester.pumpAndSettle();
+
+    expect(s.repo.newSessionCalls, 1);
+    expect(s.resetCalls, isEmpty);
+    // The ViewModel's own toast feed is closed by now; the sheet must still
+    // surface the Pi's rejection instead of failing silently.
     expect(find.text('new boom'), findsOneWidget);
   });
 

@@ -80,7 +80,7 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
         currentModelName: previousName,
         currentThinking: state.currentThinking,
       ));
-      _errorController.add(e.message);
+      _reportError(e.message);
       rethrow;
     }
   }
@@ -106,7 +106,7 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
         currentModel: state.currentModel,
         currentModelName: state.currentModelName,
       ));
-      _errorController.add(e.message);
+      _reportError(e.message);
       rethrow;
     }
   }
@@ -129,7 +129,7 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
       }
       return catalogue;
     } on ActionFailure catch (e) {
-      _errorController.add(e.message);
+      _reportError(e.message);
       rethrow;
     }
   }
@@ -201,7 +201,7 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
         currentModel: state.currentModel,
         currentModelName: state.currentModelName,
       ));
-      _errorController.add(e.message);
+      _reportError(e.message);
       rethrow;
     }
   }
@@ -209,6 +209,15 @@ class QuickActionsViewModel extends ViewModel<QuickActionsState> {
   void _emitIfAlive(QuickActionsState next) {
     if (_disposed) return;
     emit(next);
+  }
+
+  /// The sheet can close (disposing this ViewModel) while an action is still
+  /// in flight, e.g. New session confirms after the sheet is gone. Skip the
+  /// closed toast feed so the [ActionFailure] still reaches the caller, which
+  /// reports it through the chat page's messenger.
+  void _reportError(String message) {
+    if (_disposed) return;
+    _errorController.add(message);
   }
 
   @override
