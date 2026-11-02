@@ -32,6 +32,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { HOST_PI_VERSION, supportsSessionControlDispatch } from "./host_version.js";
 import { ThinkingCapture, thinkingFrame, checkedThinkingFrame } from "./thinking_capture.js";
 import type {
   ExtensionAPI,
@@ -39,7 +40,7 @@ import type {
   ExtensionContext,
   ExtensionFactory,
 } from "@earendil-works/pi-coding-agent";
-import { SettingsManager, VERSION, convertToPng } from "@earendil-works/pi-coding-agent";
+import { SettingsManager, convertToPng } from "@earendil-works/pi-coding-agent";
 import { type Ed25519Keypair } from "./pairing/crypto.js";
 import { buildQRUri, qrSession, renderQRAscii, clampPairTtlMs, TOKEN_TTL_MS } from "./pairing/qr.js";
 import {
@@ -2353,18 +2354,6 @@ const _pendingSessionControls = new Map<string, {
   expiresAt: number;
 }>();
 
-// Unknown/dev versions must never send a literal slash prompt to an old host.
-function _supportsSessionControlDispatch(version: unknown): boolean {
-  if (typeof version !== "string") return false;
-  const match = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/.exec(version);
-  if (!match) return false;
-  const [major, minor, patch] = match.slice(1, 4).map(Number);
-  const prerelease = match[4];
-  if (![major, minor, patch].every(Number.isSafeInteger)) return false;
-  if (prerelease?.split(".").some(part => /^0\d+$/.test(part))) return false;
-  return major! > 0 || minor! > 84 || (minor === 84 && (patch! > 2 || (patch === 2 && !prerelease)));
-}
-
 function _sessionControlError(request: SessionControlRequest, sender: ActionReplySender, error: string): void {
   sender.send({ type: "action_error", in_reply_to: request.id, action: request.type, error });
 }
@@ -2428,7 +2417,7 @@ async function _requestSessionControl(request: SessionControlRequest, sender: Ac
     await _runSessionControl(request, sender, ctx, idle);
     return;
   }
-  if (_pi && _supportsSessionControlDispatch(VERSION)) {
+  if (_pi && supportsSessionControlDispatch(HOST_PI_VERSION)) {
     const token = randomUUID();
     const timer = setTimeout(() => {
       if (!_pendingSessionControls.delete(token)) return;
@@ -2437,7 +2426,8 @@ async function _requestSessionControl(request: SessionControlRequest, sender: Ac
     timer.unref();
     _pendingSessionControls.set(token, { request, sender, timer, expiresAt: Date.now() + SESSION_CONTROL_TIMEOUT_MS });
     try {
-      // Public since Pi 0.84.2; the dev SDK (0.79) does not type this option yet.
+      // Public since host Pi 0.84.2 (resolved from its package, not our SDK import).
+      // The dev SDK (0.79) does not type this option yet.
       _pi.sendUserMessage(`/remote-pi ${SESSION_CONTROL_COMMAND} ${token}`, {
         expandPromptTemplates: true,
       } as Parameters<ExtensionAPI["sendUserMessage"]>[1]);

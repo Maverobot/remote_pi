@@ -195,7 +195,12 @@ vi.mock("./pairing/qr.js", async (importOriginal) => {
 
 vi.mock("@earendil-works/pi-coding-agent", async (importOriginal) => {
   const orig = await importOriginal<typeof import("@earendil-works/pi-coding-agent")>();
-  return { ...orig, get VERSION() { return _hostVersion.value; }, convertToPng: _convertToPngMock };
+  return { ...orig, convertToPng: _convertToPngMock };
+});
+
+vi.mock("./host_version.js", async (importOriginal) => {
+  const orig = await importOriginal<typeof import("./host_version.js")>();
+  return { ...orig, get HOST_PI_VERSION() { return _hostVersion.value; } };
 });
 
 interface CapturedSelfRevokeOptions {
